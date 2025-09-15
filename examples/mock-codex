@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+# Mock Codex command for demonstration purposes
+# This simulates what a real Codex CLI might do
+
+echo "Mock Codex CLI starting..."
+echo "Working directory: $(pwd)"
+echo "Arguments: $*"
+echo ""
+
+# Simulate some activity
+count=0
+while true; do
+    echo "$(date): Mock Codex working... ($count)"
+    sleep 5
+    count=$((count + 1))
+    
+    # Stop after 10 iterations for demo
+    if [ $count -ge 10 ]; then
+        echo "$(date): Mock Codex demo complete"
+        break
+    fi
+done

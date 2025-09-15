@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Adopt an existing Codex process into tmux using reptyr
+# Usage: codex-adopt PID
+
+[ $# -eq 1 ] || { 
+    echo "Usage: $(basename "$0") PID" >&2
+    exit 1
+}
+
+PID="$1"
+SESSION="${CODEX_SESSION:-codexfarm}"
+
+# Validate PID
+if ! kill -0 "$PID" 2>/dev/null; then
+    echo "Process $PID does not exist or is not accessible" >&2
+    exit 1
+fi
+
+# Create session if it doesn't exist
+tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
+
+# Get process working directory and create window name
+DIR="$(readlink -f "/proc/$PID/cwd" 2>/dev/null || echo "$HOME")"
+NAME="adopt-$PID"
+
+# Create new window
+WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR")
+
+# Use reptyr to adopt the process
+# -T uses TTY-stealing mode, -s creates a new session
+tmux send-keys -t "$SESSION:$WIN" "reptyr -T -s $PID" C-m
+
+# Setup logging
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
+mkdir -p "$LOGDIR"
+STAMP=$(date +%Y%m%d-%H%M%S)
+LOGFILE="$LOGDIR/${NAME}_${STAMP}.log"
+tmux pipe-pane -o -t "$SESSION:$WIN" "cat >> \"$LOGFILE\""
+
+# Link to board session if it exists
+tmux has-session -t board 2>/dev/null && tmux link-window -s "$SESSION:$WIN" -t board
+
+# Attach or switch to window
+if [ -n "${TMUX:-}" ]; then 
+    tmux select-window -t "$SESSION:$WIN"
+else 
+    tmux attach -t "$SESSION"
+fi
+
+printf 'Adopted PID %s into %s:%s\nLogging to %s\n' "$PID" "$SESSION" "$WIN" "$LOGFILE"

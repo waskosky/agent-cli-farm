@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Add a new Codex instance to tmux session
+# Usage: codex-add [directory]
+# Environment variables:
+#   CODEX_SESSION - tmux session name (default: codexfarm)
+#   CODEX_NAME - window name (default: directory basename)
+#   CODEX_CMD - command to run (default: codex)
+#   CODEX_ARGS - additional arguments for codex
+
+SESSION="${CODEX_SESSION:-codexfarm}"
+DIR="${1:-$PWD}"
+NAME="${CODEX_NAME:-$(basename "$DIR")}"
+CMD="${CODEX_CMD:-codex}"
+ARGS="${CODEX_ARGS:-}"
+
+# Check dependencies
+for c in tmux "$CMD"; do 
+    command -v "$c" >/dev/null || { 
+        echo "$c not found" >&2
+        exit 127
+    }
+done
+
+# Setup logging directory
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
+mkdir -p "$LOGDIR"
+
+# Create session if it doesn't exist
+tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
+
+# Create new window and start Codex
+WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" "$CMD $ARGS")
+
+# Setup logging
+STAMP=$(date +%Y%m%d-%H%M%S)
+LOGFILE="$LOGDIR/${NAME}_${STAMP}.log"
+tmux pipe-pane -o -t "$SESSION:$WIN" "cat >> \"$LOGFILE\""
+
+# Link to board session if it exists
+tmux has-session -t board 2>/dev/null && tmux link-window -s "$SESSION:$WIN" -t board
+
+# Attach or switch to window
+if [ -n "${TMUX:-}" ]; then 
+    tmux select-window -t "$SESSION:$WIN"
+else 
+    tmux attach -t "$SESSION"
+fi
+
+printf 'Started %s in %s:%s\nLogging to %s\n' "$CMD" "$SESSION" "$WIN" "$LOGFILE"

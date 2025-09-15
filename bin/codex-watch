@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Watch all Codex logs in a consolidated view
+# Uses multitail if available, otherwise falls back to tail
+
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
+mkdir -p "$LOGDIR"
+
+# Find all log files
+shopt -s nullglob
+files=( "$LOGDIR"/*.log )
+
+if [ ${#files[@]} -eq 0 ]; then
+    echo "No logs yet in $LOGDIR"
+    echo "Start some Codex instances with 'codex-add' first"
+    exit 0
+fi
+
+echo "Watching ${#files[@]} log file(s) in $LOGDIR"
+
+# Use multitail if available, otherwise fall back to tail
+if command -v multitail >/dev/null; then
+    exec multitail -n 200 "${files[@]}"
+else
+    echo "multitail not found; falling back to tail"
+    exec tail -n 200 -F -q "${files[@]}"
+fi

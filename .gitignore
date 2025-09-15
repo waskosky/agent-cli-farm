@@ -1,0 +1,32 @@
+# .gitignore for Codex CLI Farm
+
+# Temporary files
+/tmp/
+*.tmp
+*.temp
+
+# Log files (these are created in user's home directory)
+*.log
+
+# Build artifacts (if any are added later)
+/dist/
+/build/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Runtime directories that may be created during testing
+/.local/
