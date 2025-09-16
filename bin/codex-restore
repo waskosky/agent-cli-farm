@@ -50,11 +50,27 @@ tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" 
   fi
   # Fallbacks
   cmd=${cmd:-}
+  # Trim whitespace and surrounding quotes from cmd and args
+  cmd=$(printf '%s' "$cmd" | sed -e 's/^\s\+//' -e 's/\s\+$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
+  args=$(printf '%s' "${args:-}" | sed -e 's/^\s\+//' -e 's/\s\+$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
   case "$cmd" in
     sh|bash|zsh|'') cmd="${CODEX_CMD:-codex}" ;; 
   esac
+  # If command not found, fall back to codex (or override)
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    cmd="${CODEX_CMD:-codex}"
+  fi
+  # Default args from env if none provided
   args=${args:-${CODEX_ARGS:-}}
-  CODEX_NAME="$name" CODEX_CMD="$cmd" CODEX_ARGS="$args" codex-add -d "${dir:-$HOME}"
+  # Resolve codex-add binary (PATH or alongside this script)
+  ADD_BIN="${CODEX_ADD_BIN:-codex-add}"
+  if ! command -v "$ADD_BIN" >/dev/null 2>&1; then
+    script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+    if [ -x "$script_dir/codex-add" ]; then
+      ADD_BIN="$script_dir/codex-add"
+    fi
+  fi
+  CODEX_NAME="$name" CODEX_CMD="$cmd" CODEX_ARGS="$args" "$ADD_BIN" -d "${dir:-$HOME}"
 done
 
 if [ "$attach" -eq 1 ]; then
@@ -66,4 +82,3 @@ if [ "$attach" -eq 1 ]; then
 fi
 
 echo "Restore complete from $MANIFEST_PATH"
-
