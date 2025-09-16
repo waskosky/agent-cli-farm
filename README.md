@@ -26,12 +26,7 @@ This will:
 - Install `tmux`, `reptyr`, and `multitail` using your system's package manager
 - Create helper scripts in `$HOME/bin/`
 - Set up logging directories
-
-Make sure `$HOME/bin` is in your PATH:
-```bash
-export PATH="$HOME/bin:$PATH"
-# Add to your ~/.bashrc or ~/.zshrc to make permanent
-```
+- Add `$HOME/bin` to your PATH automatically (bash/zsh/fish) and the current session
 
 ### 2. Add Codex Instances
 
@@ -68,17 +63,18 @@ codex-watch
 
 ### 5. Adopt Existing Processes
 
-If you have Codex already running outside tmux:
+If you have Codex already running outside tmux, you can auto-adopt them all:
 
-1. Find the process ID:
-   ```bash
-   pgrep -fa codex
-   ```
+```bash
+codex-auto-adopt       # adopts all running codex/cursor processes
+```
 
-2. Adopt it into tmux:
-   ```bash
-   codex-adopt 12345
-   ```
+Or adopt a specific PID manually:
+
+```bash
+pgrep -fa codex        # find PID
+codex-adopt 12345      # adopt just that one
+```
 
 ## Available Commands
 
@@ -86,6 +82,7 @@ If you have Codex already running outside tmux:
 
 - **`codex-add [directory]`** - Add new Codex instance to tmux session
 - **`codex-adopt PID`** - Adopt existing Codex process with reptyr
+- **`codex-auto-adopt`** - Auto-adopt all running codex/cursor processes
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-status [sessions|windows|logs]`** - Show status information
 - **`codex-board [create|link|switch]`** - Manage board session for navigation
@@ -146,7 +143,7 @@ Now you can use `tmux switch-client -t board` to scan through all Codex instance
 
 - Adopt all running Codex-like processes into the farm:
   ```bash
-  examples/adopt-running.sh
+  codex-auto-adopt
   ```
 
 - Auto-restore on login (add to shell rc):
@@ -201,6 +198,7 @@ codex-cli-farm/
 ├── bin/               # Helper scripts
 │   ├── codex-add      # Add new Codex instances
 │   ├── codex-adopt    # Adopt existing processes
+│   ├── codex-auto-adopt # Auto-adopt running processes
 │   ├── codex-save     # Save manifest of windows
 │   ├── codex-restore  # Restore windows from manifest
 │   ├── codex-watch    # Monitor logs

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Auto-adopt all running Codex-like processes into tmux using reptyr
+# Usage: codex-auto-adopt [-d]
+# Flags:
+#   -d, --detach   Do not attach/switch after adopting
+# Env:
+#   CODEX_SESSION  Tmux session name (default: codexfarm)
+#   CODEX_MATCH    pgrep pattern (default: "\bcodex\b|\bcursor\b")
+
+detach=0
+args_pos=()
+while (( "$#" )); do
+  case "${1:-}" in
+    -d|--detach) detach=1; shift ;;
+    --) shift; while (( "$#" )); do args_pos+=("$1"); shift; done ;;
+    -*) echo "Unknown option: $1" >&2; exit 2 ;;
+    *) args_pos+=("$1"); shift ;;
+  esac
+done
+
+if [ ${#args_pos[@]} -ne 0 ]; then
+  echo "Usage: $(basename "$0") [-d]" >&2
+  exit 1
+fi
+
+SESSION="${CODEX_SESSION:-codexfarm}"
+MATCH="${CODEX_MATCH:-\bcodex\b|\bcursor\b}"
+
+# Ensure tmux exists early
+command -v tmux >/dev/null || { echo "tmux not found" >&2; exit 127; }
+
+# Find candidate processes
+mapfile -t lines < <(pgrep -fa "$MATCH" || true)
+
+if [ ${#lines[@]} -eq 0 ]; then
+  echo "No matching processes found ($MATCH)."
+  exit 0
+fi
+
+to_adopt=()
+for l in "${lines[@]}"; do
+  pid=${l%% *}
+
+  # Validate PID is accessible
+  if ! kill -0 "$pid" 2>/dev/null; then
+    continue
+  fi
+
+  # Skip if already under tmux (environment contains TMUX=)
+  if [ -r "/proc/$pid/environ" ] && tr '\0' '\n' < "/proc/$pid/environ" | grep -q '^TMUX='; then
+    continue
+  fi
+
+  # Only adopt if the executable name looks like a CLI we care about
+  # Use argv[0] (from cmdline) to avoid matching our helper scripts
+  if [ -r "/proc/$pid/cmdline" ]; then
+    cmd0=$(tr '\0' ' ' < "/proc/$pid/cmdline" | awk '{print $1}')
+    base=$(basename -- "$cmd0")
+    case "$base" in
+      codex|cursor)
+        to_adopt+=("$pid") ;;
+      *)
+        # Not a primary CLI binary; skip conservatively
+        ;;
+    esac
+  fi
+done
+
+if [ ${#to_adopt[@]} -eq 0 ]; then
+  echo "Found candidates, but none required adoption (already in tmux or not primary CLI)."
+  exit 0
+fi
+
+printf "Auto-adopting %d process(es) into session '%s'...\n" "${#to_adopt[@]}" "$SESSION"
+
+for pid in "${to_adopt[@]}"; do
+  echo "Adopting PID $pid ..."
+  if [ "$detach" -eq 1 ]; then
+    codex-adopt -d "$pid" || echo "Failed to adopt $pid" >&2
+  else
+    # If running inside tmux, avoid stealing focus repeatedly; adopt detached then select
+    if [ -n "${TMUX:-}" ]; then
+      codex-adopt -d "$pid" || echo "Failed to adopt $pid" >&2
+    else
+      codex-adopt "$pid" || echo "Failed to adopt $pid" >&2
+    fi
+  fi
+done
+
+if [ -n "${TMUX:-}" ] && [ "$detach" -eq 0 ]; then
+  # If we're in tmux and adopted detached, switch to the last created window
+  tmux last-window 2>/dev/null || true
+fi
+
+echo "Done. Attach with: tmux attach -t ${SESSION}"
+
