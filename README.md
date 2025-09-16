@@ -5,7 +5,6 @@ A comprehensive tmux session management system for easily managing and restoring
 ## Features
 
 - **Automated session management**: Long-lived tmux session that persists across reboots
-- **Process adoption**: Reparent already-running Codex instances into tmux with reptyr
 - **Centralized logging**: Each Codex pane logs to individual files with timestamps
 - **Unified monitoring**: Watch all Codex instances from a single consolidated view
 - **Fast navigation**: Optional "board" session for quick switching between instances
@@ -23,7 +22,7 @@ Run the setup script to install dependencies and create helper scripts:
 ```
 
 This will:
-- Install `tmux`, `reptyr`, and `multitail` using your system's package manager
+- Install `tmux` and `multitail` using your system's package manager
 - Create helper scripts in `$HOME/bin/`
 - Set up logging directories
 - Add `$HOME/bin` to your PATH automatically (bash/zsh/fish) and the current session
@@ -61,28 +60,15 @@ Monitor all Codex logs in real-time:
 codex-watch
 ```
 
-### 5. Adopt Existing Processes
+### 5. (Optional) Create a Board Session
 
-If you have Codex already running outside tmux, you can auto-adopt them all:
-
-```bash
-codex-auto-adopt       # adopts all running codex/cursor processes
-```
-
-Or adopt a specific PID manually:
-
-```bash
-pgrep -fa codex        # find PID
-codex-adopt 12345      # adopt just that one
-```
+For fast navigation across many instances, use the board helper (see Advanced Usage below).
 
 ## Available Commands
 
 ### Core Commands
 
 - **`codex-add [directory]`** - Add new Codex instance to tmux session
-- **`codex-adopt PID`** - Adopt existing Codex process with reptyr
-- **`codex-auto-adopt`** - Auto-adopt all running codex/cursor processes
 - **`codex-remove [-p] [-n] <name|index> [...]`** - Remove/kill Codex window(s); `-a` to remove all, `-p` to purge logs
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-status [sessions|windows|logs]`** - Show status information
@@ -106,7 +92,6 @@ CODEX_CMD="cursor" CODEX_ARGS="--wait" codex-add /my/project
 
 Flags:
 - `codex-add -d`: start without attaching (useful in SSH automation)
-- `codex-adopt -d`: adopt without attaching
 - `codex-remove -a`: remove all windows (except the initial `home`)
 - `codex-remove -p`: purge matching logs for removed windows
 - `codex-restore -a`: attach after restoring; `-f` to replace same-named windows
@@ -144,11 +129,6 @@ Now you can use `tmux switch-client -t board` to scan through all Codex instance
   tmux attach -t ${CODEX_SESSION:-codexfarm}
   ```
 
-- Adopt all running Codex-like processes into the farm:
-  ```bash
-  codex-auto-adopt
-  ```
-
 - Auto-restore on login (add to shell rc):
   ```bash
   # ~/.bashrc or ~/.zshrc
@@ -178,23 +158,9 @@ find ~/.local/state/codexfarm/logs -name "*.log" -mtime +7 -delete
   - `codex-remove -p myproject`  # deletes `myproject_*.log` then kills the window
 ```
 
-### Troubleshooting reptyr
+### Tips
 
-If `codex-adopt` shows "Operation not permitted":
-
-1. **Try TTY-stealing mode** (recommended):
-   ```bash
-   sudo reptyr -T -s PID
-   ```
-
-2. **Or temporarily allow ptrace**:
-   ```bash
-   sudo sysctl -w kernel.yama.ptrace_scope=0
-   codex-adopt PID
-   sudo sysctl -w kernel.yama.ptrace_scope=1  # revert
-   ```
-
-Some processes may need a screen redraw after adoption (Ctrl+L).
+- Prefer `codex-add -d` in automation to avoid stealing your current terminal.
 
 ## File Structure
 
@@ -203,8 +169,6 @@ codex-cli-farm/
 ├── setup.sh           # Main setup script
 ├── bin/               # Helper scripts
 │   ├── codex-add      # Add new Codex instances
-│   ├── codex-adopt    # Adopt existing processes
-│   ├── codex-auto-adopt # Auto-adopt running processes
 │   ├── codex-save     # Save manifest of windows
 │   ├── codex-restore  # Restore windows from manifest
 │   ├── codex-watch    # Monitor logs
@@ -223,14 +187,13 @@ codex-cli-farm/
 - Bash shell
 - One of: apt, dnf, yum, pacman, or zypper package managers
 - Root access for package installation
-  - If you don’t have sudo/root, install `tmux reptyr multitail` manually and rerun `./setup.sh` to place scripts in `~/bin`.
+  - If you don’t have sudo/root, install `tmux` and `multitail` manually and rerun `./setup.sh` to place scripts in `~/bin`.
 
 ## Limitations
 
 - `tmux` cannot mirror the same live pane in two windows (use linked windows or logs)
 - `pipe-pane` logs only new output after activation
-- `reptyr` may require elevated privileges depending on system configuration
-- Some TUI applications may need screen redraw after reptyr adoption
+- Note: adoption of already-running processes is not supported in this build.
 - Manifest `cmd/args` are best-effort when saving from existing panes; windows created with `codex-add` restore reliably. Use env `CODEX_CMD/CODEX_ARGS` to override.
 
 ## License

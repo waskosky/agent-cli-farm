@@ -6,20 +6,20 @@ set -euo pipefail
 
 echo "Setting up Codex CLI Farm..."
 
-# Install tmux + reptyr + multitail (runs whichever package manager exists)
+# Install tmux + multitail (runs whichever package manager exists)
 echo "Installing dependencies..."
 if command -v apt >/dev/null; then
-  sudo apt update && sudo apt install -y tmux reptyr multitail
+  sudo apt update && sudo apt install -y tmux multitail
 elif command -v dnf >/dev/null; then
-  sudo dnf install -y tmux reptyr multitail
+  sudo dnf install -y tmux multitail
 elif command -v yum >/dev/null; then
-  sudo yum install -y tmux reptyr multitail
+  sudo yum install -y tmux multitail
 elif command -v pacman >/dev/null; then
-  sudo pacman -Sy --noconfirm tmux reptyr multitail
+  sudo pacman -Sy --noconfirm tmux multitail
 elif command -v zypper >/dev/null; then
-  sudo zypper install -y tmux reptyr multitail
+  sudo zypper install -y tmux multitail
 else
-  echo "No supported package manager found. Please install tmux, reptyr, and multitail manually."
+  echo "No supported package manager found. Please install tmux and multitail manually."
 fi
 
 # Install helper scripts from this repo
@@ -28,6 +28,9 @@ mkdir -p "$HOME/bin" "${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 
 cp -f bin/codex-* "$HOME/bin/"
 chmod +x "$HOME/bin"/codex-*
+
+# Remove deprecated adopt helpers if previously installed
+rm -f "$HOME/bin/codex-adopt" "$HOME/bin/codex-auto-adopt" 2>/dev/null || true
 
 echo "Helper scripts installed in $HOME/bin:"
 ls -1 "$HOME/bin"/codex-* | sed 's/^/  - /'
@@ -105,8 +108,6 @@ echo ""
 echo "Usage examples (re-run ./setup.sh anytime to update scripts):"
 echo "  codex-add                    # Start Codex in current directory"
 echo "  codex-add -d /path/project   # Start without attaching"
-echo "  codex-adopt -d 12345         # Adopt process without attaching"
-echo "  codex-auto-adopt             # Auto-adopt all running codex/cursor"
 echo "  codex-remove name|index      # Remove a window (add -p to purge logs)"
 echo "  codex-save                   # Snapshot current windows to manifest"
 echo "  codex-restore -a             # Restore windows and attach"
