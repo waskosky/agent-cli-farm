@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Create and manage a "board" session for fast navigation between Codex instances
+# Usage: codex-board [create|link|switch]
+
+ACTION="${1:-create}"
+SESSION="${CODEX_SESSION:-codexfarm}"
+BOARD_SESSION="board"
+
+case "$ACTION" in
+    create)
+        # Create board session if it doesn't exist
+        if tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
+            echo "Board session already exists"
+        else
+            tmux new-session -d -s "$BOARD_SESSION"
+            echo "Created board session"
+        fi
+        ;;
+    
+    link)
+        # Link all windows from main session to board
+        if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+            echo "Main session '$SESSION' doesn't exist"
+            exit 1
+        fi
+        
+        if ! tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
+            echo "Board session doesn't exist. Creating it..."
+            tmux new-session -d -s "$BOARD_SESSION"
+        fi
+        
+        # Link all windows except the first one (home)
+        for idx in $(tmux list-windows -t "$SESSION" -F '#{window_index}' | tail -n +2); do
+            tmux link-window -s "$SESSION:$idx" -t "$BOARD_SESSION" 2>/dev/null || true
+        done
+        echo "Linked all Codex windows to board session"
+        ;;
+    
+    switch)
+        # Switch to board session
+        if ! tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
+            echo "Board session doesn't exist. Create it first with 'codex-board create'"
+            exit 1
+        fi
+        
+        if [ -n "${TMUX:-}" ]; then
+            tmux switch-client -t "$BOARD_SESSION"
+        else
+            tmux attach -t "$BOARD_SESSION"
+        fi
+        ;;
+    
+    *)
+        echo "Usage: $(basename "$0") [create|link|switch]"
+        echo "  create - Create board session"
+        echo "  link   - Link all Codex windows to board"
+        echo "  switch - Switch to board session"
+        exit 1
+        ;;
+esac

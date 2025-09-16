@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# List and manage Codex CLI farm sessions
+# Usage: codex-status [sessions|windows|logs]
+
+ACTION="${1:-sessions}"
+SESSION="${CODEX_SESSION:-codexfarm}"
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
+
+case "$ACTION" in
+    sessions)
+        echo "=== Tmux Sessions ==="
+        if tmux list-sessions 2>/dev/null; then
+            echo ""
+            if tmux has-session -t "$SESSION" 2>/dev/null; then
+                echo "Main Codex session '$SESSION' is running"
+            else
+                echo "Main Codex session '$SESSION' is not running"
+            fi
+            
+            if tmux has-session -t board 2>/dev/null; then
+                echo "Board session is running"
+            else
+                echo "Board session is not running"
+            fi
+        else
+            echo "No tmux sessions running"
+        fi
+        ;;
+    
+    windows)
+        echo "=== Codex Windows ==="
+        if tmux has-session -t "$SESSION" 2>/dev/null; then
+            tmux list-windows -t "$SESSION" -F "#{window_index}: #{window_name} (#{pane_current_path})"
+        else
+            echo "Main session '$SESSION' is not running"
+        fi
+        ;;
+    
+    logs)
+        echo "=== Log Files ==="
+        if [ -d "$LOGDIR" ]; then
+            find "$LOGDIR" -name "*.log" -printf "%T@ %Tc %p\n" | sort -n | cut -d' ' -f2-
+            echo ""
+            echo "Total logs: $(find "$LOGDIR" -name "*.log" | wc -l)"
+        else
+            echo "Log directory doesn't exist: $LOGDIR"
+        fi
+        ;;
+    
+    *)
+        echo "Usage: $(basename "$0") [sessions|windows|logs]"
+        echo "  sessions - Show tmux sessions status"
+        echo "  windows  - Show Codex windows in main session"
+        echo "  logs     - Show log files"
+        exit 1
+        ;;
+esac

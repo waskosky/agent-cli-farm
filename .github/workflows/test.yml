@@ -1,0 +1,47 @@
+name: Test Codex CLI Farm
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: ./setup.sh
+      
+    - name: Run validation tests
+      run: ./validate.sh
+      
+    - name: Run demo
+      run: |
+        export PATH="$HOME/bin:$PATH"
+        cd examples
+        ./demo.sh
+        
+    - name: Check script syntax
+      run: |
+        for script in bin/codex-*; do
+          echo "Checking $script..."
+          bash -n "$script"
+        done
+        
+    - name: Test help messages
+      run: |
+        export PATH="$HOME/bin:$PATH"
+        codex-adopt 2>&1 | grep -q "Usage:"
+        codex-board invalid 2>&1 | grep -q "Usage:"
+        codex-status invalid 2>&1 | grep -q "Usage:"
+        
+    - name: Test status commands
+      run: |
+        export PATH="$HOME/bin:$PATH"
+        codex-status sessions
+        codex-status logs
+        codex-status windows
