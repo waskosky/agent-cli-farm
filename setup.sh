@@ -79,11 +79,167 @@ echo "multitail not found; falling back to tail"; exec tail -n 200 -F -q "${file
 EOF
 chmod +x "$HOME/bin/codex-watch"
 
-echo "Setup complete!"
+# Create codex-status script
+cat >"$HOME/bin/codex-status" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+show_usage() {
+    echo "Usage: $(basename "$0") [sessions|windows|logs]"
+    echo "Show status information for Codex CLI Farm"
+    echo ""
+    echo "Commands:"
+    echo "  sessions  Show tmux sessions"
+    echo "  windows   Show Codex windows in the main session"
+    echo "  logs      Show log files"
+    echo ""
+    echo "If no command is provided, shows all information"
+}
+
+show_sessions() {
+    echo "=== Tmux Sessions ==="
+    if tmux list-sessions 2>/dev/null | grep -q .; then
+        tmux list-sessions | while IFS=: read -r name rest; do
+            windows=$(echo "$rest" | sed 's/.*(\([0-9]*\) windows).*/\1/')
+            created=$(echo "$rest" | sed 's/.*(created \([^)]*\)).*/\1/')
+            echo "$name: $windows windows (created $created)"
+        done
+        echo ""
+        SESSION="${CODEX_SESSION:-codexfarm}"
+        if tmux has-session -t "$SESSION" 2>/dev/null; then
+            echo "Main Codex session '$SESSION' is running"
+        else
+            echo "Main Codex session '$SESSION' is not running"
+        fi
+        if tmux has-session -t board 2>/dev/null; then
+            echo "Board session is running"
+        else
+            echo "Board session is not running"
+        fi
+    else
+        echo "No tmux sessions running"
+    fi
+}
+
+show_windows() {
+    echo "=== Codex Windows ==="
+    SESSION="${CODEX_SESSION:-codexfarm}"
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+        tmux list-windows -t "$SESSION" -F "#{window_index}: #{window_name} (#{pane_current_path})"
+    else
+        echo "Main session '$SESSION' is not running"
+    fi
+}
+
+show_logs() {
+    echo "=== Log Files ==="
+    LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
+    if [ -d "$LOGDIR" ]; then
+        shopt -s nullglob
+        files=( "$LOGDIR"/*.log )
+        if [ ${#files[@]} -gt 0 ]; then
+            for file in "${files[@]}"; do
+                mtime=$(stat -c %y "$file" 2>/dev/null || stat -f %Sm "$file" 2>/dev/null || echo "unknown time")
+                echo "${mtime%.*} $file"
+            done
+            echo ""
+            echo "Total logs: ${#files[@]}"
+        else
+            echo "No log files found in $LOGDIR"
+        fi
+    else
+        echo "Log directory $LOGDIR does not exist"
+    fi
+}
+
+case "${1:-all}" in
+    sessions) show_sessions ;;
+    windows) show_windows ;;
+    logs) show_logs ;;
+    all) show_sessions; echo ""; show_windows; echo ""; show_logs ;;
+    *) show_usage; exit 1 ;;
+esac
+EOF
+chmod +x "$HOME/bin/codex-status"
+
+# Create codex-board script
+cat >"$HOME/bin/codex-board" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+show_usage() {
+    echo "Usage: $(basename "$0") [create|link|switch]"
+    echo "Manage board session for fast navigation between Codex instances"
+    echo ""
+    echo "Commands:"
+    echo "  create  Create a new board session"
+    echo "  link    Link all Codex windows to the board session"
+    echo "  switch  Switch to the board session"
+    echo ""
+    echo "The board session provides a separate tmux session for quick navigation"
+    echo "while keeping the main Codex session running independently."
+}
+
+create_board() {
+    if tmux has-session -t board 2>/dev/null; then
+        echo "Board session already exists"
+        return 0
+    fi
+    tmux new-session -d -s board -n navigation
+    echo "Created board session"
+}
+
+link_windows() {
+    SESSION="${CODEX_SESSION:-codexfarm}"
+    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+        echo "Main session '$SESSION' is not running"
+        return 1
+    fi
+    
+    if ! tmux has-session -t board 2>/dev/null; then
+        echo "Board session does not exist. Creating it..."
+        create_board
+    fi
+    
+    # Link all windows from main session to board
+    tmux list-windows -t "$SESSION" -F "#{window_index}" | while read -r win; do
+        # Check if window is already linked
+        if ! tmux list-windows -t board | grep -q ":$win\*"; then
+            tmux link-window -s "$SESSION:$win" -t board: 2>/dev/null || true
+        fi
+    done
+    echo "Linked all Codex windows to board session"
+}
+
+switch_to_board() {
+    if ! tmux has-session -t board 2>/dev/null; then
+        echo "Board session does not exist. Create it first with: $(basename "$0") create"
+        return 1
+    fi
+    
+    if [ -n "${TMUX:-}" ]; then
+        tmux switch-client -t board
+    else
+        tmux attach -t board
+    fi
+}
+
+case "${1:-}" in
+    create) create_board ;;
+    link) link_windows ;;
+    switch) switch_to_board ;;
+    "") show_usage; exit 1 ;;
+    *) show_usage; exit 1 ;;
+esac
+EOF
+chmod +x "$HOME/bin/codex-board"
+
 echo "Helper scripts created in $HOME/bin:"
 echo "  - codex-add: Add new Codex instances to tmux"
 echo "  - codex-adopt: Adopt existing Codex processes with reptyr"
 echo "  - codex-watch: Monitor all Codex logs"
+echo "  - codex-status: Show status of sessions, windows, and logs"
+echo "  - codex-board: Manage board session for navigation"
 echo ""
 echo "Make sure $HOME/bin is in your PATH:"
 echo "  export PATH=\"\$HOME/bin:\$PATH\""
@@ -93,3 +249,5 @@ echo "  codex-add                    # Start Codex in current directory"
 echo "  codex-add /path/to/project   # Start Codex in specific directory"
 echo "  codex-adopt 12345            # Adopt existing Codex process with PID 12345"
 echo "  codex-watch                  # Watch all Codex logs"
+echo "  codex-status sessions        # Show tmux sessions"
+echo "  codex-board create           # Create navigation board"
