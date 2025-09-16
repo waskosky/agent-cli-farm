@@ -83,6 +83,7 @@ codex-adopt 12345      # adopt just that one
 - **`codex-add [directory]`** - Add new Codex instance to tmux session
 - **`codex-adopt PID`** - Adopt existing Codex process with reptyr
 - **`codex-auto-adopt`** - Auto-adopt all running codex/cursor processes
+- **`codex-remove [-p] [-n] <name|index> [...]`** - Remove/kill Codex window(s); `-a` to remove all, `-p` to purge logs
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-status [sessions|windows|logs]`** - Show status information
 - **`codex-board [create|link|switch]`** - Manage board session for navigation
@@ -106,6 +107,8 @@ CODEX_CMD="cursor" CODEX_ARGS="--wait" codex-add /my/project
 Flags:
 - `codex-add -d`: start without attaching (useful in SSH automation)
 - `codex-adopt -d`: adopt without attaching
+- `codex-remove -a`: remove all windows (except the initial `home`)
+- `codex-remove -p`: purge matching logs for removed windows
 - `codex-restore -a`: attach after restoring; `-f` to replace same-named windows
 
 ## Advanced Usage
@@ -170,6 +173,9 @@ tail -f ~/.local/state/codexfarm/logs/myproject_20240315-143022.log
 
 # Clean old logs (example: older than 7 days)
 find ~/.local/state/codexfarm/logs -name "*.log" -mtime +7 -delete
+
+- Remove logs for specific windows when removing them:
+  - `codex-remove -p myproject`  # deletes `myproject_*.log` then kills the window
 ```
 
 ### Troubleshooting reptyr

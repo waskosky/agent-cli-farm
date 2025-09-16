@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Remove Codex windows from the tmux farm
+# Usage:
+#   codex-remove [-p|--purge-logs] [-n|--dry-run] <name|index> [more ...]
+#   codex-remove [-p|--purge-logs] [-n|--dry-run] -a|--all
+#
+# Flags:
+#   -p, --purge-logs   Delete matching log files for removed windows
+#   -n, --dry-run      Show what would be removed without doing it
+#   -a, --all          Remove all Codex windows (skips the initial 'home' window)
+
+purge=0
+dry_run=0
+all=0
+args_pos=()
+while (( "$#" )); do
+  case "${1:-}" in
+    -p|--purge-logs) purge=1; shift ;;
+    -n|--dry-run) dry_run=1; shift ;;
+    -a|--all) all=1; shift ;;
+    --) shift; while (( "$#" )); do args_pos+=("$1"); shift; done ;;
+    -*) echo "Unknown option: $1" >&2; exit 2 ;;
+    *) args_pos+=("$1"); shift ;;
+  esac
+done
+
+usage() {
+  echo "Usage: $(basename "$0") [-p|--purge-logs] [-n|--dry-run] <name|index> [more ...]" >&2
+  echo "   or: $(basename "$0") [-p|--purge-logs] [-n|--dry-run] -a|--all" >&2
+  exit 1
+}
+
+if [ "$all" -eq 0 ] && [ ${#args_pos[@]} -eq 0 ]; then
+  usage
+fi
+
+SESSION="${CODEX_SESSION:-codexfarm}"
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
+
+if ! command -v tmux >/dev/null; then
+  echo "tmux not found" >&2
+  exit 127
+fi
+
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "Main session '$SESSION' is not running" >&2
+  exit 1
+fi
+
+# Build window list: idx \t name
+mapfile -t win_lines < <(tmux list-windows -t "$SESSION" -F '#{window_index}\t#{window_name}')
+
+declare -A idx_to_name
+for l in "${win_lines[@]}"; do
+  idx=${l%%$'\t'*}
+  name=${l#*$'\t'}
+  idx_to_name["$idx"]="$name"
+done
+
+targets=()  # list of window indexes to remove
+
+add_target_idx() {
+  local i="$1"
+  # Skip non-existing
+  [[ -n "${idx_to_name[$i]:-}" ]] || return 0
+  # Skip the initial 'home' window by name
+  if [ "${idx_to_name[$i]}" = "home" ]; then
+    return 0
+  fi
+  # De-duplicate
+  for t in "${targets[@]:-}"; do
+    [ "$t" = "$i" ] && return 0
+  done
+  targets+=("$i")
+}
+
+resolve_by_name() {
+  local needle="$1"
+  for l in "${win_lines[@]}"; do
+    local i=${l%%$'\t'*}
+    local n=${l#*$'\t'}
+    if [ "$n" = "$needle" ]; then
+      add_target_idx "$i"
+    fi
+  done
+}
+
+if [ "$all" -eq 1 ]; then
+  for l in "${win_lines[@]}"; do
+    i=${l%%$'\t'*}
+    n=${l#*$'\t'}
+    [ "$n" = "home" ] && continue
+    add_target_idx "$i"
+  done
+else
+  for a in "${args_pos[@]}"; do
+    if [[ "$a" =~ ^[0-9]+$ ]]; then
+      # Numeric index
+      if [[ -n "${idx_to_name[$a]:-}" ]]; then
+        add_target_idx "$a"
+      else
+        echo "No such window index: $a" >&2
+      fi
+    else
+      # Exact name match (may match multiple indexes)
+      resolve_by_name "$a"
+    fi
+  done
+fi
+
+if [ ${#targets[@]} -eq 0 ]; then
+  echo "No matching windows to remove" >&2
+  exit 1
+fi
+
+echo "Removing ${#targets[@]} window(s) from session '$SESSION'${dry_run:+ (dry-run)}:"
+
+removed_names=()
+for i in "${targets[@]}"; do
+  n="${idx_to_name[$i]}"
+  echo "- $i: $n"
+  if [ "$dry_run" -eq 0 ]; then
+    tmux kill-window -t "$SESSION:$i" || true
+  fi
+  # Track names for optional log purge
+  # Avoid duplicates
+  seen=0
+  for rn in "${removed_names[@]:-}"; do
+    [ "$rn" = "$n" ] && seen=1 && break
+  done
+  [ $seen -eq 0 ] && removed_names+=("$n")
+done
+
+if [ "$purge" -eq 1 ]; then
+  mkdir -p "$LOGDIR"
+  echo "Purging logs in $LOGDIR for: ${removed_names[*]}${dry_run:+ (dry-run)}"
+  for n in "${removed_names[@]}"; do
+    # Match naming pattern used by codex-add/adopt: NAME_YYYYmmdd-HHMMSS.log
+    if [ "$dry_run" -eq 0 ]; then
+      find "$LOGDIR" -maxdepth 1 -type f -name "${n}_*.log" -print -delete || true
+    else
+      find "$LOGDIR" -maxdepth 1 -type f -name "${n}_*.log" -print || true
+    fi
+  done
+fi
+
+exit 0
+
