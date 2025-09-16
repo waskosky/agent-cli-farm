@@ -27,13 +27,13 @@ export CODEX_CMD="mock-codex"
 echo "1. Adding first Codex instance..."
 mkdir -p /tmp/demo-project1
 echo "# Demo Project 1" > /tmp/demo-project1/README.md
-CODEX_NAME="project1" timeout 3 bin/codex-add /tmp/demo-project1 || true
+CODEX_NAME="project1" bin/codex-add -d /tmp/demo-project1 || true
 
 echo ""
 echo "2. Adding second Codex instance..."
 mkdir -p /tmp/demo-project2  
 echo "# Demo Project 2" > /tmp/demo-project2/README.md
-CODEX_NAME="project2" timeout 3 bin/codex-add /tmp/demo-project2 || true
+CODEX_NAME="project2" bin/codex-add -d /tmp/demo-project2 || true
 
 echo ""
 echo "3. Checking status..."
@@ -50,6 +50,11 @@ echo ""
 echo "5. Checking logs..."
 sleep 2
 bin/codex-status logs
+
+echo ""
+echo "6. Saving and restoring manifest..."
+bin/codex-save
+bin/codex-restore
 
 echo ""
 echo "Demo complete! The following sessions are now running:"

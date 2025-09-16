@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Snapshot the current Codex tmux windows to a manifest file
+# Usage: codex-save [manifest-path]
+
+SESSION="${CODEX_SESSION:-codexfarm}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/codexfarm"
+MANIFEST_DEFAULT="$CONFIG_DIR/manifest.tsv"
+MANIFEST_PATH="${1:-$MANIFEST_DEFAULT}"
+
+if ! command -v tmux >/dev/null; then
+  echo "tmux not found" >&2
+  exit 127
+fi
+
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "Main session '$SESSION' is not running" >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "$MANIFEST_PATH")"
+
+tmpfile=$(mktemp)
+trap 'rm -f "$tmpfile"' EXIT
+
+printf 'name\tdir\tcmd\targs\n' > "$tmpfile"
+
+# Collect windows, skipping the initial 'home' window if present
+while IFS=$'\n' read -r idx; do
+  name=$(tmux display-message -p -t "$SESSION:$idx" '#{window_name}')
+  [ "$name" = "home" ] && continue
+  # Prefer the first pane's path
+  dir=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_current_path}')
+  # Best-effort: starting command (may be sh/bash)
+  cmd=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_start_command}')
+  # Sanitize tabs
+  name=${name//$'\t'/ }
+  dir=${dir//$'\t'/ }
+  cmd=${cmd//$'\t'/ }
+  printf '%s\t%s\t%s\t\n' "$name" "$dir" "$cmd" >> "$tmpfile"
+done < <(tmux list-windows -t "$SESSION" -F '#{window_index}')
+
+mv "$tmpfile" "$MANIFEST_PATH"
+echo "Saved manifest to $MANIFEST_PATH"
+

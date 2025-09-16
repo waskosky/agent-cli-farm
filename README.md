@@ -10,6 +10,7 @@ A comprehensive tmux session management system for easily managing and restoring
 - **Unified monitoring**: Watch all Codex instances from a single consolidated view
 - **Fast navigation**: Optional "board" session for quick switching between instances
 - **Cross-platform**: Works with all major Linux package managers
+- **Snapshot/restore**: Save a manifest of windows and restore them later
 
 ## Quick Start
 
@@ -44,14 +45,28 @@ Or specify a path:
 codex-add /path/to/project
 ```
 
-### 3. Watch All Instances
+### 3. Save/Restore Your Farm
+
+Snapshot your current Codex windows:
+```bash
+codex-save              # writes to ~/.config/codexfarm/manifest.tsv
+```
+
+Restore them later (e.g., after reboot or on SSH login):
+```bash
+codex-restore -a        # recreates and attaches to the session
+```
+
+Use `-f` to force re-creation of existing-named windows.
+
+### 4. Watch All Instances
 
 Monitor all Codex logs in real-time:
 ```bash
 codex-watch
 ```
 
-### 4. Adopt Existing Processes
+### 5. Adopt Existing Processes
 
 If you have Codex already running outside tmux:
 
@@ -74,6 +89,8 @@ If you have Codex already running outside tmux:
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-status [sessions|windows|logs]`** - Show status information
 - **`codex-board [create|link|switch]`** - Manage board session for navigation
+- **`codex-save [manifest]`** - Snapshot current windows to a manifest (TSV)
+- **`codex-restore [-a] [-f] [manifest]`** - Restore windows from a manifest
 
 ### Environment Variables
 
@@ -88,6 +105,11 @@ Example:
 ```bash
 CODEX_CMD="cursor" CODEX_ARGS="--wait" codex-add /my/project
 ```
+
+Flags:
+- `codex-add -d`: start without attaching (useful in SSH automation)
+- `codex-adopt -d`: adopt without attaching
+- `codex-restore -a`: attach after restoring; `-f` to replace same-named windows
 
 ## Advanced Usage
 
@@ -107,6 +129,36 @@ codex-board switch
 ```
 
 Now you can use `tmux switch-client -t board` to scan through all Codex instances while the main `codexfarm` session continues running.
+
+### Remote SSH Tips
+
+- Start or restore your farm, then safely detach: `codex-restore; tmux detach`.
+- Reattach anytime: `tmux attach -t ${CODEX_SESSION:-codexfarm}`.
+- Prefer `codex-add -d` in automation to avoid stealing your current terminal.
+
+## Examples
+
+- Start many projects at once (non-attaching):
+  ```bash
+  examples/batch-add.sh ~/proj/a ~/proj/b ~/proj/c
+  tmux attach -t ${CODEX_SESSION:-codexfarm}
+  ```
+
+- Adopt all running Codex-like processes into the farm:
+  ```bash
+  examples/adopt-running.sh
+  ```
+
+- Auto-restore on login (add to shell rc):
+  ```bash
+  # ~/.bashrc or ~/.zshrc
+  source $(pwd)/examples/restore-on-login.sh
+  ```
+
+- One-liners:
+  - Save then restore and attach: `codex-save && codex-restore -a`
+  - Start with a different command: `CODEX_CMD="cursor" CODEX_ARGS="--wait" codex-add -d /path`
+  - Watch logs with multitail if available: `codex-watch`
 
 ### Log Management
 
@@ -149,9 +201,15 @@ codex-cli-farm/
 ├── bin/               # Helper scripts
 │   ├── codex-add      # Add new Codex instances
 │   ├── codex-adopt    # Adopt existing processes
+│   ├── codex-save     # Save manifest of windows
+│   ├── codex-restore  # Restore windows from manifest
 │   ├── codex-watch    # Monitor logs
 │   ├── codex-board    # Navigation helper
 │   └── codex-status   # Status information
+├── examples/
+│   ├── demo.sh        # End-to-end demo of farm
+│   └── mock-codex     # Fake CLI used by the demo
+├── validate.sh        # Basic repo validation script
 └── README.md          # This file
 ```
 
@@ -161,6 +219,7 @@ codex-cli-farm/
 - Bash shell
 - One of: apt, dnf, yum, pacman, or zypper package managers
 - Root access for package installation
+  - If you don’t have sudo/root, install `tmux reptyr multitail` manually and rerun `./setup.sh` to place scripts in `~/bin`.
 
 ## Limitations
 
@@ -168,6 +227,7 @@ codex-cli-farm/
 - `pipe-pane` logs only new output after activation
 - `reptyr` may require elevated privileges depending on system configuration
 - Some TUI applications may need screen redraw after reptyr adoption
+- Manifest `cmd/args` are best-effort when saving from existing panes; windows created with `codex-add` restore reliably. Use env `CODEX_CMD/CODEX_ARGS` to override.
 
 ## License
 

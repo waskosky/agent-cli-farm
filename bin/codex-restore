@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Restore Codex windows from a manifest file created by codex-save
+# Usage: codex-restore [-a] [-f] [manifest-path]
+#  -a, --attach   Attach/switch to session after restore
+#  -f, --force    Recreate windows if names already exist
+
+attach=0
+force=0
+args_pos=()
+while (( "$#" )); do
+  case "${1:-}" in
+    -a|--attach) attach=1; shift ;;
+    -f|--force) force=1; shift ;;
+    --) shift; while (( "$#" )); do args_pos+=("$1"); shift; done ;;
+    -*) echo "Unknown option: $1" >&2; exit 2 ;;
+    *) args_pos+=("$1"); shift ;;
+  esac
+done
+
+SESSION="${CODEX_SESSION:-codexfarm}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/codexfarm"
+MANIFEST_PATH="${args_pos[0]:-$CONFIG_DIR/manifest.tsv}"
+
+if ! command -v tmux >/dev/null; then
+  echo "tmux not found" >&2
+  exit 127
+fi
+
+if [ ! -f "$MANIFEST_PATH" ]; then
+  echo "Manifest not found: $MANIFEST_PATH" >&2
+  exit 1
+fi
+
+# Ensure session exists
+tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
+
+# Read manifest; skip header
+{ read -r _header || true; cat; } < "$MANIFEST_PATH" | while IFS=$'\t' read -r name dir cmd args || [ -n "${name:-}" ]; do
+  [ -z "${name:-}" ] && continue
+  # Skip if window exists and not forcing
+  if tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -Fxq "$name"; then
+    if [ "$force" -eq 1 ]; then
+      tmux kill-window -t "$SESSION:$name" || true
+    else
+      echo "Skipping existing window: $name"
+      continue
+    fi
+  fi
+  # Fallbacks
+  cmd=${cmd:-}
+  case "$cmd" in
+    sh|bash|zsh|'') cmd="${CODEX_CMD:-codex}" ;; 
+  esac
+  args=${args:-${CODEX_ARGS:-}}
+  CODEX_NAME="$name" CODEX_CMD="$cmd" CODEX_ARGS="$args" codex-add -d "${dir:-$HOME}"
+done
+
+if [ "$attach" -eq 1 ]; then
+  if [ -n "${TMUX:-}" ]; then
+    tmux switch-client -t "$SESSION"
+  else
+    tmux attach -t "$SESSION"
+  fi
+fi
+
+echo "Restore complete from $MANIFEST_PATH"
+

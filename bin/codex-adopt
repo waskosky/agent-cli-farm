@@ -2,14 +2,25 @@
 set -euo pipefail
 
 # Adopt an existing Codex process into tmux using reptyr
-# Usage: codex-adopt PID
+# Usage: codex-adopt [-d] PID
 
-[ $# -eq 1 ] || { 
-    echo "Usage: $(basename "$0") PID" >&2
+detach=0
+args_pos=()
+while (( "$#" )); do
+  case "${1:-}" in
+    -d|--detach) detach=1; shift ;;
+    --) shift; while (( "$#" )); do args_pos+=("$1"); shift; done ;;
+    -*) echo "Unknown option: $1" >&2; exit 2 ;;
+    *) args_pos+=("$1"); shift ;;
+  esac
+done
+
+[ ${#args_pos[@]} -eq 1 ] || { 
+    echo "Usage: $(basename "$0") [-d] PID" >&2
     exit 1
 }
 
-PID="$1"
+PID="${args_pos[0]}"
 SESSION="${CODEX_SESSION:-codexfarm}"
 
 # Validate PID
@@ -42,11 +53,13 @@ tmux pipe-pane -o -t "$SESSION:$WIN" "cat >> \"$LOGFILE\""
 # Link to board session if it exists
 tmux has-session -t board 2>/dev/null && tmux link-window -s "$SESSION:$WIN" -t board
 
-# Attach or switch to window
-if [ -n "${TMUX:-}" ]; then 
-    tmux select-window -t "$SESSION:$WIN"
-else 
-    tmux attach -t "$SESSION"
+# Attach or switch to window unless detaching
+if [ "$detach" -eq 0 ]; then
+  if [ -n "${TMUX:-}" ]; then 
+      tmux select-window -t "$SESSION:$WIN"
+  else 
+      tmux attach -t "$SESSION"
+  fi
 fi
 
 printf 'Adopted PID %s into %s:%s\nLogging to %s\n' "$PID" "$SESSION" "$WIN" "$LOGFILE"
