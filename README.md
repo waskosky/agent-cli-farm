@@ -82,7 +82,7 @@ codex-adopt 12345      # adopt just that one
 
 - **`codex-add [directory]`** - Add new Codex instance to tmux session
 - **`codex-adopt PID`** - Adopt existing Codex process with reptyr
-- **`codex-auto-adopt`** - Auto-adopt all running codex/cursor processes
+- **`codex-auto-adopt [-d]`** - Auto-adopt all running codex/cursor processes
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-status [sessions|windows|logs]`** - Show status information
 - **`codex-board [create|link|switch]`** - Manage board session for navigation
@@ -97,6 +97,7 @@ You can customize behavior with these environment variables:
 - **`CODEX_NAME`** - window name (default: directory basename)
 - **`CODEX_CMD`** - command to run (default: `codex`)
 - **`CODEX_ARGS`** - additional arguments for codex
+- **`CODEX_MATCH`** - pgrep pattern for `codex-auto-adopt` (default: `\bcodex\b|\bcursor\b`)
 
 Example:
 ```bash
@@ -106,6 +107,7 @@ CODEX_CMD="cursor" CODEX_ARGS="--wait" codex-add /my/project
 Flags:
 - `codex-add -d`: start without attaching (useful in SSH automation)
 - `codex-adopt -d`: adopt without attaching
+- `codex-auto-adopt -d`: adopt all processes without attaching
 - `codex-restore -a`: attach after restoring; `-f` to replace same-named windows
 
 ## Advanced Usage
@@ -144,6 +146,8 @@ Now you can use `tmux switch-client -t board` to scan through all Codex instance
 - Adopt all running Codex-like processes into the farm:
   ```bash
   codex-auto-adopt
+  # Or use the example script with manual review:
+  examples/adopt-running.sh
   ```
 
 - Auto-restore on login (add to shell rc):
@@ -206,6 +210,9 @@ codex-cli-farm/
 │   └── codex-status   # Status information
 ├── examples/
 │   ├── demo.sh        # End-to-end demo of farm
+│   ├── batch-add.sh   # Batch add multiple projects
+│   ├── adopt-running.sh # Adopt running processes with review
+│   ├── restore-on-login.sh # Auto-restore example for shell rc
 │   └── mock-codex     # Fake CLI used by the demo
 ├── validate.sh        # Basic repo validation script
 └── README.md          # This file
