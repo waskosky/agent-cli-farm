@@ -5,7 +5,6 @@ A comprehensive tmux session management system for easily managing and restoring
 ## Features
 
 - **Automated session management**: Long-lived tmux session that persists across reboots
-- **Process adoption**: Reparent already-running Codex instances into tmux with reptyr
 - **Centralized logging**: Each Codex pane logs to individual files with timestamps
 - **Unified monitoring**: Watch all Codex instances from a single consolidated view
 - **Fast navigation**: Optional "board" session for quick switching between instances
@@ -16,14 +15,14 @@ A comprehensive tmux session management system for easily managing and restoring
 
 ### 1. One-time Setup
 
-Run the setup script to install dependencies and create helper scripts:
+Run the setup script to install dependencies and create helper scripts (source it to auto-reload your shell):
 
 ```bash
-./setup.sh
+source ./setup.sh
 ```
 
 This will:
-- Install `tmux`, `reptyr`, and `multitail` using your system's package manager
+- Install `tmux` and `multitail` using your system's package manager
 - Create helper scripts in `$HOME/bin/`
 - Set up logging directories
 - Add `$HOME/bin` to your PATH automatically (bash/zsh/fish) and the current session
@@ -60,29 +59,16 @@ Monitor all Codex logs in real-time:
 ```bash
 codex-watch
 ```
-
-### 5. Adopt Existing Processes
-
-If you have Codex already running outside tmux, you can auto-adopt them all:
-
-```bash
-codex-auto-adopt       # adopts all running codex/cursor processes
-```
-
-Or adopt a specific PID manually:
-
-```bash
-pgrep -fa codex        # find PID
-codex-adopt 12345      # adopt just that one
-```
+Notes:
+- On small terminals (phones), `codex-watch` auto-switches to a simpler mode.
+- Force simple mode: `codex-watch --simple` or `CODEX_WATCH_MODE=tail codex-watch`.
+- Force full mode: `codex-watch --mode multitail`.
 
 ## Available Commands
 
 ### Core Commands
 
 - **`codex-add [directory]`** - Add new Codex instance to tmux session
-- **`codex-adopt PID`** - Adopt existing Codex process with reptyr
-- **`codex-auto-adopt [-d]`** - Auto-adopt all running codex/cursor processes
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-status [sessions|windows|logs]`** - Show status information
 - **`codex-board [create|link|switch]`** - Manage board session for navigation
@@ -97,7 +83,6 @@ You can customize behavior with these environment variables:
 - **`CODEX_NAME`** - window name (default: directory basename)
 - **`CODEX_CMD`** - command to run (default: `codex`)
 - **`CODEX_ARGS`** - additional arguments for codex
-- **`CODEX_MATCH`** - pgrep pattern for `codex-auto-adopt` (default: `\bcodex\b|\bcursor\b`)
 
 Example:
 ```bash
@@ -106,8 +91,6 @@ CODEX_CMD="cursor" CODEX_ARGS="--wait" codex-add /my/project
 
 Flags:
 - `codex-add -d`: start without attaching (useful in SSH automation)
-- `codex-adopt -d`: adopt without attaching
-- `codex-auto-adopt -d`: adopt all processes without attaching
 - `codex-restore -a`: attach after restoring; `-f` to replace same-named windows
 
 ## Advanced Usage
@@ -134,6 +117,10 @@ Now you can use `tmux switch-client -t board` to scan through all Codex instance
 - Start or restore your farm, then safely detach: `codex-restore; tmux detach`.
 - Reattach anytime: `tmux attach -t ${CODEX_SESSION:-codexfarm}`.
 - Prefer `codex-add -d` in automation to avoid stealing your current terminal.
+- For mobile networks and roaming devices, use mosh: install `mosh` on the server (and open UDP 60000-61000), then connect with a mosh-capable client and attach your tmux session. Desktop SSH keeps working the same.
+   - Example client wrapper (tries mosh then ssh): `examples/connect.sh user@host`
+- If your terminal is very small (phones), use `codex-watch --simple` and zoom panes in tmux with `Prefix + z`.
+ - Optional tmux tweak for mixed desktop/mobile: `tmux set -g aggressive-resize on` to let windows resize to the current client.
 
 ## Examples
 
@@ -143,10 +130,6 @@ Now you can use `tmux switch-client -t board` to scan through all Codex instance
   tmux attach -t ${CODEX_SESSION:-codexfarm}
   ```
 
-- Adopt all running Codex-like processes into the farm:
-  ```bash
-  codex-auto-adopt
-  ```
 
 - Auto-restore on login (add to shell rc):
   ```bash
@@ -174,24 +157,6 @@ tail -f ~/.local/state/codexfarm/logs/myproject_20240315-143022.log
 find ~/.local/state/codexfarm/logs -name "*.log" -mtime +7 -delete
 ```
 
-### Troubleshooting reptyr
-
-If `codex-adopt` shows "Operation not permitted":
-
-1. **Try TTY-stealing mode** (recommended):
-   ```bash
-   sudo reptyr -T -s PID
-   ```
-
-2. **Or temporarily allow ptrace**:
-   ```bash
-   sudo sysctl -w kernel.yama.ptrace_scope=0
-   codex-adopt PID
-   sudo sysctl -w kernel.yama.ptrace_scope=1  # revert
-   ```
-
-Some processes may need a screen redraw after adoption (Ctrl+L).
-
 ## File Structure
 
 ```
@@ -199,8 +164,6 @@ codex-cli-farm/
 ├── setup.sh           # Main setup script
 ├── bin/               # Helper scripts
 │   ├── codex-add      # Add new Codex instances
-│   ├── codex-adopt    # Adopt existing processes
-│   ├── codex-auto-adopt # Auto-adopt running processes
 │   ├── codex-save     # Save manifest of windows
 │   ├── codex-restore  # Restore windows from manifest
 │   ├── codex-watch    # Monitor logs
@@ -219,14 +182,13 @@ codex-cli-farm/
 - Bash shell
 - One of: apt, dnf, yum, pacman, or zypper package managers
 - Root access for package installation
-  - If you don’t have sudo/root, install `tmux reptyr multitail` manually and rerun `./setup.sh` to place scripts in `~/bin`.
+  - If you don’t have sudo/root, install `tmux` and `multitail` manually and rerun `./setup.sh` to place scripts in `~/bin`.
 
 ## Limitations
 
 - `tmux` cannot mirror the same live pane in two windows (use linked windows or logs)
 - `pipe-pane` logs only new output after activation
-- `reptyr` may require elevated privileges depending on system configuration
-- Some TUI applications may need screen redraw after reptyr adoption
+ 
 - Manifest `cmd/args` are best-effort when saving from existing panes; windows created with `codex-add` restore reliably. Use env `CODEX_CMD/CODEX_ARGS` to override.
 
 ## License

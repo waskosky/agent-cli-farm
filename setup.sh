@@ -6,31 +6,56 @@ set -euo pipefail
 
 echo "Setting up Codex CLI Farm..."
 
-# Install tmux + reptyr + multitail (runs whichever package manager exists)
+# Install tmux + multitail (runs whichever package manager exists)
 echo "Installing dependencies..."
 if command -v apt >/dev/null; then
-  sudo apt update && sudo apt install -y tmux reptyr multitail
+  sudo apt update && sudo apt install -y tmux multitail
 elif command -v dnf >/dev/null; then
-  sudo dnf install -y tmux reptyr multitail
+  sudo dnf install -y tmux multitail
 elif command -v yum >/dev/null; then
-  sudo yum install -y tmux reptyr multitail
+  sudo yum install -y tmux multitail
 elif command -v pacman >/dev/null; then
-  sudo pacman -Sy --noconfirm tmux reptyr multitail
+  sudo pacman -Sy --noconfirm tmux multitail
 elif command -v zypper >/dev/null; then
-  sudo zypper install -y tmux reptyr multitail
+  sudo zypper install -y tmux multitail
 else
-  echo "No supported package manager found. Please install tmux, reptyr, and multitail manually."
+  echo "No supported package manager found. Please install tmux and multitail manually."
 fi
 
 # Install helper scripts from this repo
 echo "Installing helper scripts..."
 mkdir -p "$HOME/bin" "${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 
-cp -f bin/codex-* "$HOME/bin/"
-chmod +x "$HOME/bin"/codex-*
+# Copy all codex-* scripts except removed adopt helpers
+skipped=()
+copied=()
+for f in bin/codex-*; do
+  base=$(basename "$f")
+  case "$base" in
+    codex-adopt|codex-auto-adopt)
+      skipped+=("$base")
+      continue
+      ;;
+  esac
+  cp -f "$f" "$HOME/bin/"
+  chmod +x "$HOME/bin/$base"
+  copied+=("$base")
+done
 
 echo "Helper scripts installed in $HOME/bin:"
-ls -1 "$HOME/bin"/codex-* | sed 's/^/  - /'
+for s in "${copied[@]}"; do
+  echo "  - $s"
+done
+if [ ${#skipped[@]} -gt 0 ]; then
+  echo "(skipped removed commands: ${skipped[*]})"
+fi
+
+# Clean up legacy/removed commands from previous installs
+for legacy in codex-adopt codex-auto-adopt; do
+  if [ -e "$HOME/bin/$legacy" ]; then
+    rm -f "$HOME/bin/$legacy" && echo "Removed legacy command from $HOME/bin: $legacy"
+  fi
+done
 
 # Ensure $HOME/bin is on PATH now and for future shells
 echo ""
@@ -96,17 +121,45 @@ for rc in "${RC_FILES[@]}"; do
 done
 
 if [ "$updated_any" -eq 1 ]; then
-  echo "PATH configuration updated. Open a new shell or 'source' your rc file."
+  echo "PATH configuration updated in your shell rc file(s)."
 else
   echo "PATH already configured for your shell(s)."
+fi
+
+# Attempt to auto-reload the current shell session when sourced
+# Detect if this script is being sourced (bash/zsh)
+is_sourced=0
+if [ -n "${BASH_SOURCE:-}" ] && [ "${BASH_SOURCE[0]:-}" != "$0" ]; then
+  is_sourced=1
+elif [ -n "${ZSH_EVAL_CONTEXT:-}" ] && [[ "$ZSH_EVAL_CONTEXT" == *:file ]]; then
+  is_sourced=1
+fi
+
+if [ "$is_sourced" -eq 1 ]; then
+  for rc in "${RC_FILES[@]}"; do
+    [ -f "$rc" ] || continue
+    # shellcheck disable=SC1090
+    . "$rc" || true
+  done
+  hash -r 2>/dev/null || true
+  echo "Reloaded current shell session (via source)."
+else
+  # Not sourced: we can't modify the parent shell's environment.
+  # Provide a precise next step to the user.
+  primary_rc="${RC_FILES[0]}"
+  echo ""
+  echo "To apply changes in this shell now, run:"
+  if [ -n "$primary_rc" ] && [ -f "$primary_rc" ]; then
+    echo "  source $primary_rc"
+  else
+    echo "  exec \"$SHELL\" -l"
+  fi
 fi
 
 echo ""
 echo "Usage examples (re-run ./setup.sh anytime to update scripts):"
 echo "  codex-add                    # Start Codex in current directory"
 echo "  codex-add -d /path/project   # Start without attaching"
-echo "  codex-adopt -d 12345         # Adopt process without attaching"
-echo "  codex-auto-adopt             # Auto-adopt all running codex/cursor"
 echo "  codex-save                   # Snapshot current windows to manifest"
 echo "  codex-restore -a             # Restore windows and attach"
 echo "  codex-watch                  # Watch all Codex logs"

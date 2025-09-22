@@ -32,13 +32,6 @@ done
 echo ""
 echo "Testing help messages..."
 
-# Test codex-adopt with no args (should show usage)
-if bin/codex-adopt 2>&1 | grep -q "Usage:" || true; then
-    echo "✅ codex-adopt shows usage when called without arguments"
-else
-    echo "❌ codex-adopt doesn't show proper usage message"
-fi
-
 # Test codex-board with invalid action
 if bin/codex-board invalid 2>&1 | grep -q "Usage:" || true; then
     echo "✅ codex-board shows usage for invalid action"

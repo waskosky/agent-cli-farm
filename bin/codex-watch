@@ -2,7 +2,10 @@
 set -euo pipefail
 
 # Watch all Codex logs in a consolidated view
-# Uses multitail if available, otherwise falls back to tail
+# Modes:
+#   - auto (default): use multitail when terminal is large enough; otherwise tail
+#   - multitail: force multitail
+#   - tail: force simple tail
 
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 mkdir -p "$LOGDIR"
@@ -17,12 +20,74 @@ if [ ${#files[@]} -eq 0 ]; then
     exit 0
 fi
 
-echo "Watching ${#files[@]} log file(s) in $LOGDIR"
+mode="${CODEX_WATCH_MODE:-auto}"
 
-# Use multitail if available, otherwise fall back to tail
-if command -v multitail >/dev/null; then
-    exec multitail -n 200 "${files[@]}"
-else
-    echo "multitail not found; falling back to tail"
-    exec tail -n 200 -F -q "${files[@]}"
+# Parse simple flags
+while (( "$#" )); do
+  case "${1:-}" in
+    -s|--simple) mode="tail"; shift ;;
+    -m|--mode)
+      shift
+      mode="${1:-auto}"
+      shift || true
+      ;;
+    -h|--help)
+      cat <<EOF
+Usage: $(basename "$0") [--simple] [--mode auto|multitail|tail]
+
+Watches ${#files[@]} log file(s) in $LOGDIR
+- auto (default): multitail when terminal is big enough, else tail
+- tail: simpler output, best for small/phone screens
+- multitail: force multitail (may error on very small screens)
+EOF
+      exit 0
+      ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
+echo "Watching ${#files[@]} log file(s) in $LOGDIR (mode: $mode)"
+
+# Terminal size detection
+cols=$( (tput cols 2>/dev/null) || echo "${COLUMNS:-80}" )
+lines=$( (tput lines 2>/dev/null) || echo "${LINES:-24}" )
+small_term=0
+if [ "${cols:-80}" -lt 60 ] || [ "${lines:-24}" -lt 20 ]; then
+  small_term=1
 fi
+
+pick_tail() {
+  # Prefer less if available for scrollback; fall back to plain tail
+  if command -v less >/dev/null; then
+    echo "Using tail | less -SR +F (compact)" >&2
+    trap 'kill 0' INT TERM EXIT
+    tail -n 200 -F -q "${files[@]}" | less -SR +F
+  else
+    exec tail -n 200 -F -q "${files[@]}"
+  fi
+}
+
+case "$mode" in
+  tail)
+    pick_tail
+    ;;
+  multitail)
+    if ! command -v multitail >/dev/null; then
+      echo "multitail not found; falling back to tail" >&2
+      pick_tail
+    else
+      multitail -n 200 "${files[@]}" || { echo "multitail exited; falling back to tail" >&2; pick_tail; }
+    fi
+    ;;
+  auto|*)
+    if command -v multitail >/dev/null && [ "$small_term" -eq 0 ]; then
+      multitail -n 200 "${files[@]}" || { echo "multitail exited; falling back to tail" >&2; pick_tail; }
+    else
+      [ "$small_term" -eq 1 ] && echo "Terminal small; using simple mode" >&2
+      [ ! "$(command -v multitail || true)" ] && echo "multitail not found; using simple mode" >&2
+      pick_tail
+    fi
+    ;;
+esac
