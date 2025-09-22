@@ -40,6 +40,70 @@ for c in tmux "$CMD"; do
     }
 done
 
+# Offer tmux directions for beginners (interactive only and when attaching)
+show_tmux_tips() {
+  cols=$( (tput cols 2>/dev/null) || echo "${COLUMNS:-80}" )
+  lines=$( (tput lines 2>/dev/null) || echo "${LINES:-24}" )
+  is_mobile=0
+  if [ -n "${TERMUX_VERSION:-}" ] || [ -n "${ANDROID_ROOT:-}" ] || [ "${cols:-80}" -lt 80 ] || [ "${lines:-24}" -lt 24 ]; then
+    is_mobile=1
+  fi
+  echo ""
+  echo "tmux quick guide"
+  echo "- Prefix is Ctrl-b (hold Ctrl, press b)"
+  echo "- Detach session: Prefix then d; reattach: tmux attach -t ${CODEX_SESSION:-codexfarm}"
+  echo "- Switch windows: Prefix + n/p (next/prev), or Prefix + w to choose"
+  echo "- Switch panes: Prefix + arrow keys; cycle panes: Prefix + o"
+  echo "- Zoom a pane full-screen: Prefix + z"
+  echo "- Scroll/copy: Prefix + [ then arrows/PageUp; exit with q"
+  echo "- Split panes: Prefix + % (vertical) | Prefix + \" (horizontal)"
+  if [ "$is_mobile" -eq 1 ]; then
+    echo ""
+    echo "Mobile tips"
+    echo "- Small screen? Use Prefix + z to focus one pane at a time"
+    echo "- If content scrolls off-screen: Prefix + [ to enter copy-mode, use arrows/PageUp; q to exit"
+    echo "- Consider enabling mouse (per session): :set -g mouse on (then use touch/scroll)"
+    echo "- Navigation when keys are limited: use Prefix + w to pick windows, Prefix + o to cycle panes"
+  fi
+  echo ""
+}
+
+# Interactive prompt only if we plan to attach and not already inside tmux
+if [ -t 0 ] && [ -z "${TMUX:-}" ] && [ "$detach" -eq 0 ]; then
+  STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm"
+  OPT_OUT_FILE="$STATE_DIR/no_tips"
+  tips_env="${CODEX_TIPS_PROMPT:-}"
+  skip_prompt=0
+  force_prompt=0
+  if [ -n "$tips_env" ]; then
+    case "$tips_env" in
+      0|off|false|FALSE|Off) skip_prompt=1 ;;
+      1|on|true|TRUE|On) force_prompt=1 ;;
+    esac
+  fi
+  if [ $force_prompt -eq 0 ] && [ -f "$OPT_OUT_FILE" ]; then
+    skip_prompt=1
+  fi
+  if [ $skip_prompt -eq 0 ]; then
+    printf 'Need a quick tmux cheat sheet? (y/N) '
+    read -r _ans || _ans=
+    case "${_ans:-}" in
+      y|Y)
+        show_tmux_tips
+        ;;
+    esac
+    printf "Don't show this prompt again? (y/N) "
+    read -r _never || _never=
+    case "${_never:-}" in
+      y|Y)
+        mkdir -p "$STATE_DIR"
+        : > "$OPT_OUT_FILE"
+        echo "Okay, disabling future tmux tip prompts."
+        ;;
+    esac
+  fi
+fi
+
 # Setup logging directory
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 mkdir -p "$LOGDIR"

@@ -63,6 +63,7 @@ Notes:
 - On small terminals (phones), `codex-watch` auto-switches to a simpler mode.
 - Force simple mode: `codex-watch --simple` or `CODEX_WATCH_MODE=tail codex-watch`.
 - Force full mode: `codex-watch --mode multitail`.
+- First run shows an optional tmux tips prompt; choose Yes to see basics. Answer "Don't show again" to persist your preference. Re-enable temporarily with `CODEX_TIPS_PROMPT=1` or permanently by removing `~/.local/state/codexfarm/no_tips`.
 
 ## Available Commands
 
@@ -83,6 +84,8 @@ You can customize behavior with these environment variables:
 - **`CODEX_NAME`** - window name (default: directory basename)
 - **`CODEX_CMD`** - command to run (default: `codex`)
 - **`CODEX_ARGS`** - additional arguments for codex
+- **`CODEX_TIPS_PROMPT`** - show tmux tips prompt: `0` to disable, `1` to force (default respects a persisted opt-out)
+ - **`CODEX_WATCH_MODE`** - `auto` (default), `tail`, or `multitail` to control codex-watch display
 
 Example:
 ```bash
