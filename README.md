@@ -208,4 +208,5 @@ codex-cli-farm/
 
 ## License
 
-Created on 2025-09-15T20:12:48Z
+Licensed under the MIT License. See `LICENSE` for full text.
+Unless noted otherwise, all files in this repository are covered by the MIT License.
