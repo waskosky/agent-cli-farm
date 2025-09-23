@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resume into an existing tmux session without needing a manifest.
+# Prefers the main Codex session, then the board session, then falls back
+# to the most recently used tmux session.
+#
+# Usage: codex-resume [--board]
+#   --board  Prefer the 'board' session before the main Codex session
+
+PREFER_BOARD=0
+while (( "$#" )); do
+  case "${1:-}" in
+    -b|--board) PREFER_BOARD=1; shift ;;
+    -h|--help)
+      cat <<EOF
+Usage: $(basename "$0") [--board]
+
+Resumes an existing tmux session, preferring Codex sessions if present.
+Order: main Codex session -> board -> last/most-recent tmux session.
+
+Options:
+  -b, --board  Prefer the 'board' session first
+  -h, --help   Show this help
+
+Environment:
+  CODEX_SESSION   Name of main Codex session (default: codexfarm)
+EOF
+      exit 0
+      ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
+if ! command -v tmux >/dev/null; then
+  echo "tmux not found" >&2
+  exit 127
+fi
+
+SESSION_MAIN="${CODEX_SESSION:-codexfarm}"
+SESSION_BOARD="board"
+
+inside_tmux=0
+if [ -n "${TMUX:-}" ]; then
+  inside_tmux=1
+fi
+
+attach_or_switch() {
+  local target="$1"
+  if [ "$inside_tmux" -eq 1 ]; then
+    tmux switch-client -t "$target"
+  else
+    tmux attach -t "$target"
+  fi
+}
+
+fallback_last() {
+  if [ "$inside_tmux" -eq 1 ]; then
+    # Switch to last session if available, otherwise keep current/print status
+    if ! tmux switch-client -l 2>/dev/null; then
+      echo "No alternate session to switch to (already in the only session)" >&2
+      exit 1
+    fi
+  else
+    # Attach to the most recently used session
+    if ! tmux attach 2>/dev/null; then
+      echo "No tmux sessions to attach to" >&2
+      exit 1
+    fi
+  fi
+}
+
+# If no tmux server, there are no sessions to resume
+if ! tmux list-sessions >/dev/null 2>&1; then
+  echo "No tmux server running; nothing to resume" >&2
+  exit 1
+fi
+
+if [ "$PREFER_BOARD" -eq 1 ]; then
+  if tmux has-session -t "$SESSION_BOARD" 2>/dev/null; then
+    attach_or_switch "$SESSION_BOARD"
+    exit 0
+  fi
+  if tmux has-session -t "$SESSION_MAIN" 2>/dev/null; then
+    attach_or_switch "$SESSION_MAIN"
+    exit 0
+  fi
+else
+  if tmux has-session -t "$SESSION_MAIN" 2>/dev/null; then
+    attach_or_switch "$SESSION_MAIN"
+    exit 0
+  fi
+  if tmux has-session -t "$SESSION_BOARD" 2>/dev/null; then
+    attach_or_switch "$SESSION_BOARD"
+    exit 0
+  fi
+fi
+
+# Otherwise, fall back to the most recent/last session
+fallback_last
+

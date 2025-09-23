@@ -53,6 +53,15 @@ codex-restore -a        # recreates and attaches to the session
 
 Use `-f` to force re-creation of existing-named windows.
 
+### 3b. Resume Existing Sessions
+
+If tmux sessions are already running (no manifest needed):
+```bash
+codex-resume            # joins the main Codex session if present
+```
+Flags:
+- `--board` to prefer the board session first.
+
 ### 4. Watch All Instances
 
 Monitor all Codex logs in real-time:
@@ -73,6 +82,7 @@ Notes:
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-status [sessions|windows|logs]`** - Show status information
 - **`codex-board [create|link|switch]`** - Manage board session for navigation
+- **`codex-resume [--board]`** - Attach/switch to an existing Codex/tmux session
 - **`codex-save [manifest]`** - Snapshot current windows to a manifest (TSV)
 - **`codex-restore [-a] [-f] [manifest]`** - Restore windows from a manifest
 
@@ -86,6 +96,7 @@ You can customize behavior with these environment variables:
 - **`CODEX_ARGS`** - additional arguments for codex
 - **`CODEX_TIPS_PROMPT`** - show tmux tips prompt: `0` to disable, `1` to force (default respects a persisted opt-out)
  - **`CODEX_WATCH_MODE`** - `auto` (default), `tail`, or `multitail` to control codex-watch display
+ - (for resume) `CODEX_SESSION` also controls which main session to prefer
 
 Example:
 ```bash
@@ -118,7 +129,7 @@ Now you can use `tmux switch-client -t board` to scan through all Codex instance
 ### Remote SSH Tips
 
 - Start or restore your farm, then safely detach: `codex-restore; tmux detach`.
-- Reattach anytime: `tmux attach -t ${CODEX_SESSION:-codexfarm}`.
+- Reattach anytime: `codex-resume` (or `tmux attach -t ${CODEX_SESSION:-codexfarm}`).
 - Prefer `codex-add -d` in automation to avoid stealing your current terminal.
 - For mobile networks and roaming devices, use mosh: install `mosh` on the server (and open UDP 60000-61000), then connect with a mosh-capable client and attach your tmux session. Desktop SSH keeps working the same.
    - Example client wrapper (tries mosh then ssh): `examples/connect.sh user@host`
@@ -171,6 +182,7 @@ codex-cli-farm/
 │   ├── codex-restore  # Restore windows from manifest
 │   ├── codex-watch    # Monitor logs
 │   ├── codex-board    # Navigation helper
+│   ├── codex-resume   # Resume into existing session(s)
 │   └── codex-status   # Status information
 ├── examples/
 │   ├── demo.sh        # End-to-end demo of farm
