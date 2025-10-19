@@ -95,6 +95,7 @@ You can customize behavior with these environment variables:
 - **`CODEX_CMD`** - command to run (default: `codex`)
 - **`CODEX_ARGS`** - additional arguments for codex
 - **`CODEX_TIPS_PROMPT`** - show tmux tips prompt: `0` to disable, `1` to force (default respects a persisted opt-out)
+- **`CODEX_LOCK_TITLES`** - set to `0` to let tmux or shell rename windows automatically (default keeps Codex windows named after their directory)
  - **`CODEX_WATCH_MODE`** - `auto` (default), `tail`, or `multitail` to control codex-watch display
  - (for resume) `CODEX_SESSION` also controls which main session to prefer
 

@@ -31,6 +31,7 @@ DIR="${args_pos[0]:-$PWD}"
 NAME="${CODEX_NAME:-$(basename "$DIR")}"
 CMD="${CODEX_CMD:-codex}"
 ARGS="${CODEX_ARGS:-}"
+LOCK_TITLES="${CODEX_LOCK_TITLES:-1}"
 
 # Check dependencies
 for c in tmux "$CMD"; do 
@@ -113,6 +114,15 @@ tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" 
 
 # Create new window and start Codex
 WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" "$CMD $ARGS")
+
+# Keep tmux from overwriting the chosen window title unless explicitly requested
+if [ "${LOCK_TITLES:-1}" -eq 1 ]; then
+  tmux set-option -t "$SESSION" allow-rename off >/dev/null 2>&1 || true
+  tmux set-option -t "$SESSION" automatic-rename off >/dev/null 2>&1 || true
+  tmux set-window-option -t "$SESSION:$WIN" allow-rename off >/dev/null 2>&1 || true
+  tmux set-window-option -t "$SESSION:$WIN" automatic-rename off >/dev/null 2>&1 || true
+  tmux rename-window -t "$SESSION:$WIN" "$NAME" >/dev/null 2>&1 || true
+fi
 
 # Setup logging
 STAMP=$(date +%Y%m%d-%H%M%S)
