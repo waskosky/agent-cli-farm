@@ -32,6 +32,7 @@ NAME="${CODEX_NAME:-$(basename "$DIR")}"
 CMD="${CODEX_CMD:-codex}"
 ARGS="${CODEX_ARGS:-}"
 LOCK_TITLES="${CODEX_LOCK_TITLES:-1}"
+ANNOTATOR_AUTOSTART="${CODEX_ANNOTATOR_AUTOSTART:-1}"
 
 # Check dependencies
 for c in tmux "$CMD"; do 
@@ -105,12 +106,24 @@ if [ -t 0 ] && [ -z "${TMUX:-}" ] && [ "$detach" -eq 0 ]; then
   fi
 fi
 
+start_status_annotator() {
+  [ "$ANNOTATOR_AUTOSTART" -eq 0 ] && return
+  local helper="${CODEX_ANNOTATOR_BIN:-$(dirname "$0")/codex-annotator}"
+  if [ -x "$helper" ]; then
+    # Runs detached; helper enforces a single instance via its lockfile.
+    ( "$helper" >/dev/null 2>&1 || true ) &
+  fi
+}
+
 # Setup logging directory
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 mkdir -p "$LOGDIR"
 
 # Create session if it doesn't exist
 tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
+
+# Start annotator after ensuring tmux is available
+start_status_annotator
 
 # Create new window and start Codex
 WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" "$CMD $ARGS")
