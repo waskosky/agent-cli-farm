@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tmux list-sessions:*)",
+      "Bash(bash -c 'tmux has-session -t nonexistent 2>/dev/null || echo \"\"expected to fail silently\"\"')",
+      "Bash(bash:*)",
+      "Bash(python3:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

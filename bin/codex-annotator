@@ -54,13 +54,13 @@ def strip_status_prefix(name: str) -> str:
 
 def run_tmux(cmd: List[str], *, verbose: bool) -> Optional[str]:
     try:
-        return subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
+        return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
     except FileNotFoundError:
         log("tmux not found; annotator exiting", verbose=verbose)
         return None
     except subprocess.CalledProcessError as exc:
         log(
-            f"tmux command failed ({' '.join(cmd)}): {exc.output.strip()}",
+            f"tmux command failed ({' '.join(cmd)})",
             verbose=verbose,
         )
         return None
