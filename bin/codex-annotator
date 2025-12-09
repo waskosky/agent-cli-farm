@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Background tmux status annotator for Codex sessions.
-Classifies managed tmux sessions as RUN/READY/ERR and prefixes the session name.
+Classifies managed tmux windows as RUN/READY/ERR and prefixes the window title.
 """
 from __future__ import annotations
 
@@ -36,6 +36,15 @@ IGNORE_PREFIX = os.environ.get("CODEX_ANNOTATOR_IGNORE_PREFIX", "!")
 @dataclasses.dataclass
 class SessionInfo:
     sid: str
+    current_name: str
+    base_name: str
+    state: Optional[str] = None
+
+
+@dataclasses.dataclass
+class WindowInfo:
+    sid: str
+    wid: str
     current_name: str
     base_name: str
     state: Optional[str] = None
@@ -89,14 +98,37 @@ def list_sessions(verbose: bool) -> List[SessionInfo]:
     return sessions
 
 
-def pane_states(sid: str, *, verbose: bool) -> Optional[List[tuple[str, bool]]]:
+def list_windows(session: SessionInfo, *, verbose: bool) -> List[WindowInfo]:
+    output = run_tmux(
+        ["tmux", "list-windows", "-t", session.sid, "-F", "#{window_id}\t#{window_name}"],
+        verbose=verbose,
+    )
+    windows: List[WindowInfo] = []
+    if not output:
+        return windows
+    for line in output.splitlines():
+        if "\t" not in line:
+            continue
+        wid, name = line.split("\t", 1)
+        base = strip_status_prefix(name)
+        windows.append(
+            WindowInfo(
+                sid=session.sid,
+                wid=wid.strip(),
+                current_name=name.strip(),
+                base_name=base.strip(),
+            )
+        )
+    return windows
+
+
+def window_pane_states(wid: str, *, verbose: bool) -> Optional[List[tuple[str, bool]]]:
     output = run_tmux(
         [
             "tmux",
             "list-panes",
-            "-s",
             "-t",
-            sid,
+            wid,
             "-F",
             "#{pane_current_command}\t#{pane_dead}",
         ],
@@ -113,16 +145,16 @@ def pane_states(sid: str, *, verbose: bool) -> Optional[List[tuple[str, bool]]]:
     return panes
 
 
-def classify_session(
-    session: SessionInfo,
+def classify_window(
+    window: WindowInfo,
     running_regex: re.Pattern,
     *,
     verbose: bool,
-) -> SessionInfo:
-    panes = pane_states(session.sid, verbose=verbose)
+) -> WindowInfo:
+    panes = window_pane_states(window.wid, verbose=verbose)
     if panes is None:
-        session.state = "ERR"
-        return session
+        window.state = "ERR"
+        return window
 
     has_live = False
     has_running = False
@@ -135,24 +167,24 @@ def classify_session(
             break
 
     if has_running:
-        session.state = "RUN"
+        window.state = "RUN"
     elif not has_live:
-        session.state = "ERR"
+        window.state = "ERR"
     else:
-        session.state = "READY"
-    return session
+        window.state = "READY"
+    return window
 
 
-def desired_name(session: SessionInfo) -> str:
-    prefix = f"*{session.state}* "
-    return f"{prefix}{session.base_name}"
+def desired_name(item: SessionInfo | WindowInfo) -> str:
+    prefix = f"*{item.state}* "
+    return f"{prefix}{item.base_name}"
 
 
-def rename_session(session: SessionInfo, *, verbose: bool) -> None:
-    new_name = desired_name(session)
-    if session.current_name == new_name:
+def rename_window(window: WindowInfo, *, verbose: bool) -> None:
+    new_name = desired_name(window)
+    if window.current_name == new_name:
         return
-    run_tmux(["tmux", "rename-session", "-t", session.sid, new_name], verbose=verbose)
+    run_tmux(["tmux", "rename-window", "-t", window.wid, new_name], verbose=verbose)
 
 
 def should_manage(session: SessionInfo, pattern: re.Pattern) -> bool:
@@ -161,22 +193,34 @@ def should_manage(session: SessionInfo, pattern: re.Pattern) -> bool:
     return bool(pattern.search(session.base_name))
 
 
+def should_manage_window(window: WindowInfo) -> bool:
+    return not window.base_name.startswith(IGNORE_PREFIX)
+
+
 def annotate_once(
     session_pattern: re.Pattern, running_pattern: re.Pattern, *, verbose: bool
 ) -> None:
     sessions = list_sessions(verbose=verbose)
+    seen_windows: set[str] = set()
     for session in sessions:
         if not should_manage(session, session_pattern):
             continue
-        classify_session(session, running_pattern, verbose=verbose)
-        if session.state is None:
-            continue
-        rename_session(session, verbose=verbose)
+        windows = list_windows(session, verbose=verbose)
+        for window in windows:
+            if window.wid in seen_windows:
+                continue
+            if not should_manage_window(window):
+                continue
+            seen_windows.add(window.wid)
+            classify_window(window, running_pattern, verbose=verbose)
+            if window.state is None:
+                continue
+            rename_window(window, verbose=verbose)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Annotate tmux session names with RUN/READY/ERR status."
+        description="Annotate tmux window titles with RUN/READY/ERR status."
     )
     parser.add_argument(
         "--interval",
