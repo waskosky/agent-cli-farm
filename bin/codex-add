@@ -1,38 +1,79 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Add a new Codex instance to tmux session
-# Usage: codex-add [-d] [directory]
-# Flags:
-#   -d, --detach   Do not attach/switch after creating the window
-# Environment variables:
-#   CODEX_SESSION - tmux session name (default: codexfarm)
-#   CODEX_NAME - window name (default: directory basename)
-#   CODEX_CMD - command to run (default: codex)
-#   CODEX_ARGS - additional arguments for codex
+script_name=$(basename "${0:-codex-add}")
+tool_name="${CODEX_TOOL_NAME:-codex}"
+case "$script_name" in
+  claude-add) tool_name="${CODEX_TOOL_NAME:-claude}" ;;
+esac
+
+TOOL_PREFIX=${tool_name^^}
+
+get_env() {
+  # Prefer tool-specific env var, then CODEX_*, then default.
+  local key="${TOOL_PREFIX}_$1"
+  local fallback="CODEX_$1"
+  local default="${2:-}"
+  local val="${!key:-}"
+  if [ -z "$val" ]; then
+    val="${!fallback:-}"
+  fi
+  printf '%s' "${val:-$default}"
+}
 
 detach=0
-args_pos=()
+dir_arg=
+tool_args=()
 while (( "$#" )); do
   case "${1:-}" in
     -d|--detach)
-      detach=1; shift ;;
+      detach=1
+      ;;
+    -dsp)
+      if [ "$tool_name" = "claude" ]; then
+        tool_args+=("--dangerously-skip-permissions")
+      else
+        tool_args+=("$1")
+      fi
+      ;;
+    --dangerously-skip-permissions)
+      tool_args+=("$1")
+      ;;
     --)
-      shift; while (( "$#" )); do args_pos+=("$1"); shift; done ;;
+      shift
+      while (( "$#" )); do
+        tool_args+=("$1")
+        shift
+      done
+      break
+      ;;
     -*)
-      echo "Unknown option: $1" >&2; exit 2 ;;
+      tool_args+=("$1")
+      ;;
     *)
-      args_pos+=("$1"); shift ;;
+      if [ -z "$dir_arg" ]; then
+        dir_arg="$1"
+      else
+        tool_args+=("$1")
+      fi
+      ;;
   esac
+  shift
 done
 
-SESSION="${CODEX_SESSION:-codexfarm}"
-DIR="${args_pos[0]:-$PWD}"
-NAME="${CODEX_NAME:-$(basename "$DIR")}"
-CMD="${CODEX_CMD:-codex}"
-ARGS="${CODEX_ARGS:-}"
-LOCK_TITLES="${CODEX_LOCK_TITLES:-1}"
-ANNOTATOR_AUTOSTART="${CODEX_ANNOTATOR_AUTOSTART:-1}"
+DEFAULT_SESSION="codexfarm"
+SESSION="$(get_env SESSION "$DEFAULT_SESSION")"
+DIR="${dir_arg:-$PWD}"
+NAME="$(get_env NAME "$(basename "$DIR")")"
+CMD="$(get_env CMD "$tool_name")"
+ARGS_ENV="$(get_env ARGS "")"
+LOCK_TITLES="$(get_env LOCK_TITLES 1)"
+ANNOTATOR_AUTOSTART="$(get_env ANNOTATOR_AUTOSTART 1)"
+TIPS_PROMPT="$(get_env TIPS_PROMPT "")"
+STATE_BASENAME="$(get_env STATE_BASENAME "codexfarm")"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$STATE_BASENAME"
+LOGDIR="$STATE_DIR/logs"
+ANNOTATOR_BIN="$(get_env ANNOTATOR_BIN "$(dirname "$0")/codex-annotator")"
 
 # Check dependencies
 for c in tmux "$CMD"; do
@@ -83,7 +124,7 @@ show_tmux_tips() {
   echo ""
   echo "tmux quick guide"
   echo "- Prefix is Ctrl-b (hold Ctrl, press b)"
-  echo "- Detach session: Prefix then d; reattach: tmux attach -t ${CODEX_SESSION:-codexfarm}"
+  echo "- Detach session: Prefix then d; reattach: tmux attach -t ${SESSION}"
   echo "- Switch windows: Prefix + n/p (next/prev), or Prefix + w to choose"
   echo "- Switch panes: Prefix + arrow keys; cycle panes: Prefix + o"
   echo "- Zoom a pane full-screen: Prefix + z"
@@ -102,9 +143,8 @@ show_tmux_tips() {
 
 # Interactive prompt only if we plan to attach and not already inside tmux
 if [ -t 0 ] && [ -z "${TMUX:-}" ] && [ "$detach" -eq 0 ]; then
-  STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm"
   OPT_OUT_FILE="$STATE_DIR/no_tips"
-  tips_env="${CODEX_TIPS_PROMPT:-}"
+  tips_env="$TIPS_PROMPT"
   skip_prompt=0
   force_prompt=0
   if [ -n "$tips_env" ]; then
@@ -138,15 +178,13 @@ fi
 
 start_status_annotator() {
   [ "$ANNOTATOR_AUTOSTART" -eq 0 ] && return
-  local helper="${CODEX_ANNOTATOR_BIN:-$(dirname "$0")/codex-annotator}"
-  if [ -x "$helper" ]; then
+  if [ -x "$ANNOTATOR_BIN" ]; then
     # Runs detached; helper enforces a single instance via its lockfile.
-    ( "$helper" >/dev/null 2>&1 || true ) &
+    ( "$ANNOTATOR_BIN" >/dev/null 2>&1 || true ) &
   fi
 }
 
 # Setup logging directory
-LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 mkdir -p "$LOGDIR"
 
 # Create session if it doesn't exist
@@ -156,7 +194,15 @@ tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" 
 start_status_annotator
 
 # Create new window and start Codex
-WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" "$CMD $ARGS")
+CMDLINE="$CMD"
+if [ -n "$ARGS_ENV" ]; then
+  CMDLINE="$CMDLINE $ARGS_ENV"
+fi
+if [ ${#tool_args[@]} -gt 0 ]; then
+  CMDLINE="$CMDLINE ${tool_args[*]}"
+fi
+
+WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" "$CMDLINE")
 
 # Keep tmux from overwriting the chosen window title unless explicitly requested
 if [ "${LOCK_TITLES:-1}" -eq 1 ]; then
