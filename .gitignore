@@ -30,3 +30,5 @@ Thumbs.db
 
 # Runtime directories that may be created during testing
 /.local/
+/bin
+/tests

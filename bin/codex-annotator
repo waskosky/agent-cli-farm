@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""
+Background tmux status annotator for Codex sessions.
+Classifies managed tmux windows as RUN/READY/ERR and prefixes the window title.
+"""
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import fcntl
+import os
+import re
+import subprocess
+import sys
+import time
+from typing import List, Optional
+
+
+DEFAULT_SESSION_PATTERN = os.environ.get("CODEX_ANNOTATOR_SESSION_REGEX", r"^codex")
+DEFAULT_RUNNING_PATTERN = os.environ.get("CODEX_ANNOTATOR_RUNNING_REGEX", r"codex")
+DEFAULT_INTERVAL = float(os.environ.get("CODEX_ANNOTATOR_INTERVAL", "1.0"))
+DEFAULT_ENABLED = os.environ.get("CODEX_ANNOTATOR_ENABLED", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+STATE_DIR = os.environ.get(
+    "XDG_STATE_HOME", os.path.join(os.path.expanduser("~"), ".local", "state")
+)
+LOCKFILE = os.environ.get(
+    "CODEX_ANNOTATOR_LOCKFILE", os.path.join(STATE_DIR, "codexfarm", "annotator.lock")
+)
+IGNORE_PREFIX = os.environ.get("CODEX_ANNOTATOR_IGNORE_PREFIX", "!")
+
+
+@dataclasses.dataclass
+class SessionInfo:
+    sid: str
+    current_name: str
+    base_name: str
+    state: Optional[str] = None
+
+
+@dataclasses.dataclass
+class WindowInfo:
+    sid: str
+    wid: str
+    current_name: str
+    base_name: str
+    state: Optional[str] = None
+
+
+def log(msg: str, *, verbose: bool) -> None:
+    if verbose:
+        sys.stderr.write(msg.rstrip() + "\n")
+        sys.stderr.flush()
+
+
+def strip_status_prefix(name: str) -> str:
+    """Remove existing *RUN*/*READY*/*ERR* prefix to get stable base name."""
+    return re.sub(r"^\*(READY|RUN|ERR)\*\s*", "", name, flags=re.IGNORECASE).strip()
+
+
+def run_tmux(cmd: List[str], *, verbose: bool) -> Optional[str]:
+    try:
+        return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
+    except FileNotFoundError:
+        log("tmux not found; annotator exiting", verbose=verbose)
+        return None
+    except subprocess.CalledProcessError as exc:
+        log(
+            f"tmux command failed ({' '.join(cmd)})",
+            verbose=verbose,
+        )
+        return None
+
+
+def list_sessions(verbose: bool) -> List[SessionInfo]:
+    output = run_tmux(
+        ["tmux", "list-sessions", "-F", "#{session_id}\t#{session_name}"],
+        verbose=verbose,
+    )
+    sessions: List[SessionInfo] = []
+    if not output:
+        return sessions
+    for line in output.splitlines():
+        if "\t" not in line:
+            continue
+        sid, name = line.split("\t", 1)
+        base = strip_status_prefix(name)
+        sessions.append(
+            SessionInfo(
+                sid=sid.strip(),
+                current_name=name.strip(),
+                base_name=base.strip(),
+            )
+        )
+    return sessions
+
+
+def list_windows(session: SessionInfo, *, verbose: bool) -> List[WindowInfo]:
+    output = run_tmux(
+        ["tmux", "list-windows", "-t", session.sid, "-F", "#{window_id}\t#{window_name}"],
+        verbose=verbose,
+    )
+    windows: List[WindowInfo] = []
+    if not output:
+        return windows
+    for line in output.splitlines():
+        if "\t" not in line:
+            continue
+        wid, name = line.split("\t", 1)
+        base = strip_status_prefix(name)
+        windows.append(
+            WindowInfo(
+                sid=session.sid,
+                wid=wid.strip(),
+                current_name=name.strip(),
+                base_name=base.strip(),
+            )
+        )
+    return windows
+
+
+def window_pane_states(wid: str, *, verbose: bool) -> Optional[List[tuple[str, bool]]]:
+    output = run_tmux(
+        [
+            "tmux",
+            "list-panes",
+            "-t",
+            wid,
+            "-F",
+            "#{pane_current_command}\t#{pane_dead}",
+        ],
+        verbose=verbose,
+    )
+    if not output:
+        return None
+    panes: List[tuple[str, bool]] = []
+    for line in output.splitlines():
+        if "\t" not in line:
+            continue
+        cmd, dead = line.split("\t", 1)
+        panes.append((cmd.strip(), dead.strip() in {"1", "true", "True"}))
+    return panes
+
+
+def classify_window(
+    window: WindowInfo,
+    running_regex: re.Pattern,
+    *,
+    verbose: bool,
+) -> WindowInfo:
+    panes = window_pane_states(window.wid, verbose=verbose)
+    if panes is None:
+        window.state = "ERR"
+        return window
+
+    has_live = False
+    has_running = False
+    for cmd, dead in panes:
+        if dead:
+            continue
+        has_live = True
+        if running_regex.search(cmd):
+            has_running = True
+            break
+
+    if has_running:
+        window.state = "RUN"
+    elif not has_live:
+        window.state = "ERR"
+    else:
+        window.state = "READY"
+    return window
+
+
+def desired_name(item: SessionInfo | WindowInfo) -> str:
+    prefix = f"*{item.state}* "
+    return f"{prefix}{item.base_name}"
+
+
+def rename_window(window: WindowInfo, *, verbose: bool) -> None:
+    new_name = desired_name(window)
+    if window.current_name == new_name:
+        return
+    run_tmux(["tmux", "rename-window", "-t", window.wid, new_name], verbose=verbose)
+
+
+def should_manage(session: SessionInfo, pattern: re.Pattern) -> bool:
+    if session.base_name.startswith(IGNORE_PREFIX):
+        return False
+    return bool(pattern.search(session.base_name))
+
+
+def should_manage_window(window: WindowInfo) -> bool:
+    return not window.base_name.startswith(IGNORE_PREFIX)
+
+
+def annotate_once(
+    session_pattern: re.Pattern, running_pattern: re.Pattern, *, verbose: bool
+) -> None:
+    sessions = list_sessions(verbose=verbose)
+    seen_windows: set[str] = set()
+    for session in sessions:
+        if not should_manage(session, session_pattern):
+            continue
+        windows = list_windows(session, verbose=verbose)
+        for window in windows:
+            if window.wid in seen_windows:
+                continue
+            if not should_manage_window(window):
+                continue
+            seen_windows.add(window.wid)
+            classify_window(window, running_pattern, verbose=verbose)
+            if window.state is None:
+                continue
+            rename_window(window, verbose=verbose)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Annotate tmux window titles with RUN/READY/ERR status."
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=DEFAULT_INTERVAL,
+        help="Polling interval in seconds (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--session-regex",
+        default=DEFAULT_SESSION_PATTERN,
+        help="Regex for base session names to manage (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--running-regex",
+        default=DEFAULT_RUNNING_PATTERN,
+        help="Regex for pane commands considered RUNNING (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single annotation pass then exit.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print tmux errors for debugging.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    if not DEFAULT_ENABLED:
+        return 0
+
+    args = parse_args()
+
+    os.makedirs(os.path.dirname(LOCKFILE), exist_ok=True)
+    with open(LOCKFILE, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log("Annotator already running; exiting.", verbose=args.verbose)
+            return 0
+
+        session_pattern = re.compile(args.session_regex)
+        running_pattern = re.compile(args.running_regex)
+
+        while True:
+            try:
+                annotate_once(
+                    session_pattern,
+                    running_pattern,
+                    verbose=args.verbose,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log(f"Annotator loop error: {exc}", verbose=args.verbose)
+            if args.once:
+                break
+            time.sleep(max(args.interval, 0.1))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

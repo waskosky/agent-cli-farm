@@ -32,14 +32,45 @@ NAME="${CODEX_NAME:-$(basename "$DIR")}"
 CMD="${CODEX_CMD:-codex}"
 ARGS="${CODEX_ARGS:-}"
 LOCK_TITLES="${CODEX_LOCK_TITLES:-1}"
+ANNOTATOR_AUTOSTART="${CODEX_ANNOTATOR_AUTOSTART:-1}"
 
 # Check dependencies
-for c in tmux "$CMD"; do 
-    command -v "$c" >/dev/null || { 
+for c in tmux "$CMD"; do
+    command -v "$c" >/dev/null || {
         echo "$c not found" >&2
         exit 127
     }
 done
+
+# Fix tmux socket directory permissions if needed
+# tmux requires its socket directory to be owned by current user with mode 700
+fix_tmux_socket_dir() {
+    local tmux_dir="/tmp/tmux-$(id -u)"
+    if [ -d "$tmux_dir" ]; then
+        local owner perms
+        owner=$(stat -c '%u' "$tmux_dir" 2>/dev/null) || return 1
+        perms=$(stat -c '%a' "$tmux_dir" 2>/dev/null) || return 1
+
+        if [ "$owner" != "$(id -u)" ]; then
+            echo "Error: $tmux_dir is owned by uid $owner, not you ($(id -u))." >&2
+            echo "This can happen after switching users or if another user created it." >&2
+            echo "Fix with: sudo rm -rf $tmux_dir" >&2
+            return 1
+        fi
+
+        if [ "$perms" != "700" ]; then
+            echo "Fixing permissions on $tmux_dir (was $perms, setting to 700)..." >&2
+            chmod 700 "$tmux_dir" || {
+                echo "Failed to fix permissions. Try: chmod 700 $tmux_dir" >&2
+                return 1
+            }
+        fi
+    fi
+    return 0
+}
+
+# Attempt to fix tmux socket permissions before any tmux commands
+fix_tmux_socket_dir || exit 1
 
 # Offer tmux directions for beginners (interactive only and when attaching)
 show_tmux_tips() {
@@ -105,12 +136,24 @@ if [ -t 0 ] && [ -z "${TMUX:-}" ] && [ "$detach" -eq 0 ]; then
   fi
 fi
 
+start_status_annotator() {
+  [ "$ANNOTATOR_AUTOSTART" -eq 0 ] && return
+  local helper="${CODEX_ANNOTATOR_BIN:-$(dirname "$0")/codex-annotator}"
+  if [ -x "$helper" ]; then
+    # Runs detached; helper enforces a single instance via its lockfile.
+    ( "$helper" >/dev/null 2>&1 || true ) &
+  fi
+}
+
 # Setup logging directory
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 mkdir -p "$LOGDIR"
 
 # Create session if it doesn't exist
 tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
+
+# Start annotator after ensuring tmux is available
+start_status_annotator
 
 # Create new window and start Codex
 WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" "$CMD $ARGS")
