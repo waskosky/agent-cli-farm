@@ -24,10 +24,14 @@ get_env() {
 detach=0
 dir_arg=
 tool_args=()
+install_autoservice_only=0
 while (( "$#" )); do
   case "${1:-}" in
     -d|--detach)
       detach=1
+      ;;
+    --install-autoservice)
+      install_autoservice_only=1
       ;;
     -dsp)
       if [ "$tool_name" = "claude" ]; then
@@ -74,6 +78,12 @@ STATE_BASENAME="$(get_env STATE_BASENAME "codexfarm")"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$STATE_BASENAME"
 LOGDIR="$STATE_DIR/logs"
 ANNOTATOR_BIN="$(get_env ANNOTATOR_BIN "$(dirname "$0")/codex-annotator")"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+SYSTEMD_DIR="$CONFIG_HOME/systemd/user"
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
+AUTOSERVICE_CHOICE_FILE="$STATE_DIR/autoservice_choice"
+SAVE_BIN="${CODEX_SAVE_BIN:-$(dirname "$0")/codex-save}"
+RESTORE_BIN="${CODEX_RESTORE_BIN:-$(dirname "$0")/codex-restore}"
 
 # Check dependencies
 for c in tmux "$CMD"; do
@@ -141,6 +151,89 @@ show_tmux_tips() {
   echo ""
 }
 
+install_autoservice_units() {
+  mkdir -p "$SYSTEMD_DIR"
+  cat > "$SYSTEMD_DIR/codex-autosave.service" <<EOF
+[Unit]
+Description=Codex autosave tmux windows on shutdown
+After=tmux.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=$SAVE_BIN
+
+[Install]
+WantedBy=default.target
+EOF
+
+  cat > "$SYSTEMD_DIR/codex-autorestore.service" <<EOF
+[Unit]
+Description=Codex autorestore tmux session on login
+
+[Service]
+Type=oneshot
+ExecStart=$RESTORE_BIN -a
+
+[Install]
+WantedBy=default.target
+EOF
+
+  if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
+    "$SYSTEMCTL_BIN" --user daemon-reload >/dev/null 2>&1 || true
+    "$SYSTEMCTL_BIN" --user enable codex-autosave.service codex-autorestore.service >/dev/null 2>&1 || true
+    "$SYSTEMCTL_BIN" --user start codex-autosave.service codex-autorestore.service >/dev/null 2>&1 || true
+  else
+    echo "systemctl not found; services written to $SYSTEMD_DIR but not enabled." >&2
+  fi
+}
+
+maybe_prompt_autoservice() {
+  mkdir -p "$STATE_DIR"
+  local choice=""
+  local from_file=0
+  if [ -f "$AUTOSERVICE_CHOICE_FILE" ]; then
+    choice=$(cat "$AUTOSERVICE_CHOICE_FILE")
+    from_file=1
+  fi
+
+  if [ "$install_autoservice_only" -eq 1 ]; then
+    choice="yes"
+  fi
+
+  if [ -z "$choice" ]; then
+    if [ -n "${CODEX_AUTOSERVICE_CHOICE:-}" ]; then
+      choice="$CODEX_AUTOSERVICE_CHOICE"
+    elif [ -t 0 ]; then
+      echo "Install Codex autosave/autorestore background service? [y/N] "
+      read -r reply || reply=
+      case "${reply:-}" in
+        y|Y|yes|Yes) choice="yes" ;;
+        *) choice="no" ;;
+      esac
+    else
+      return 0
+    fi
+    echo "$choice" > "$AUTOSERVICE_CHOICE_FILE"
+  fi
+
+  case "$choice" in
+    y|Y|yes|YES|Yes)
+      install_autoservice_units
+      echo "yes" > "$AUTOSERVICE_CHOICE_FILE"
+      ;;
+    *)
+      if [ "$install_autoservice_only" -eq 1 ]; then
+        echo "Autoservice installation aborted."
+      elif [ "$from_file" -eq 0 ]; then
+        echo "$choice" > "$AUTOSERVICE_CHOICE_FILE"
+        echo "You can enable later with: codex-add --install-autoservice" >&2
+      fi
+      ;;
+  esac
+}
+
 # Interactive prompt only if we plan to attach and not already inside tmux
 if [ -t 0 ] && [ -z "${TMUX:-}" ] && [ "$detach" -eq 0 ]; then
   OPT_OUT_FILE="$STATE_DIR/no_tips"
@@ -186,6 +279,11 @@ start_status_annotator() {
 
 # Setup logging directory
 mkdir -p "$LOGDIR"
+
+maybe_prompt_autoservice
+if [ "$install_autoservice_only" -eq 1 ]; then
+  exit 0
+fi
 
 # Create session if it doesn't exist
 tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
