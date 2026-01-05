@@ -17,7 +17,9 @@ from typing import List, Optional
 
 
 DEFAULT_SESSION_PATTERN = os.environ.get("CODEX_ANNOTATOR_SESSION_REGEX", r"^codex")
-DEFAULT_RUNNING_PATTERN = os.environ.get("CODEX_ANNOTATOR_RUNNING_REGEX", r"codex")
+DEFAULT_RUNNING_PATTERN = os.environ.get(
+    "CODEX_ANNOTATOR_RUNNING_REGEX", r"(codex|node|ssh)"
+)
 DEFAULT_INTERVAL = float(os.environ.get("CODEX_ANNOTATOR_INTERVAL", "1.0"))
 DEFAULT_ENABLED = os.environ.get("CODEX_ANNOTATOR_ENABLED", "1").lower() not in {
     "0",
