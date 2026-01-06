@@ -26,10 +26,10 @@ fi
 echo "Installing helper scripts..."
 mkdir -p "$HOME/bin" "${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 
-# Copy all codex-* scripts except removed adopt helpers
+# Copy helper scripts (codex-* plus claude-* wrappers) except removed adopt helpers
 skipped=()
 copied=()
-for f in bin/codex-*; do
+for f in bin/codex-* bin/claude-*; do
   base=$(basename "$f")
   case "$base" in
     codex-adopt|codex-auto-adopt)
@@ -164,3 +164,4 @@ echo "  codex-save                   # Snapshot current windows to manifest"
 echo "  codex-restore -a             # Restore windows and attach"
 echo "  codex-resume                 # Attach/switch to existing session"
 echo "  codex-watch                  # Watch all Codex logs"
+echo "  claude-add                   # Start Claude in the shared Codex tmux session"
