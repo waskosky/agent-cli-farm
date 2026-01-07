@@ -7,7 +7,8 @@ case "$script_name" in
   claude-add) tool_name="${CODEX_TOOL_NAME:-claude}" ;;
 esac
 
-TOOL_PREFIX=${tool_name^^}
+# Portable uppercasing for older macOS bash (no ${var^^})
+TOOL_PREFIX=$(printf '%s' "$tool_name" | tr '[:lower:]' '[:upper:]')
 
 get_env() {
   # Prefer tool-specific env var, then CODEX_*, then default.
