@@ -30,6 +30,7 @@ mkdir -p "$HOME/bin" "${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 skipped=()
 copied=()
 for f in bin/codex-* bin/claude-*; do
+  [ -e "$f" ] || continue
   base=$(basename "$f")
   case "$base" in
     codex-adopt|codex-auto-adopt)
