@@ -25,6 +25,18 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 shopt -s nullglob
 
+create_claude_wrapper() {
+  local wrapper="$1"
+  local target="${wrapper#claude-}"
+  target="codex-$target"
+  local dest="$HOME/bin/$wrapper"
+  cat > "$dest" <<EOF
+#!/usr/bin/env bash
+CODEX_TOOL_NAME=claude exec "\$(dirname "\$0")/$target" "\$@"
+EOF
+  chmod +x "$dest"
+}
+
 # Install helper scripts from this repo
 echo "Installing helper scripts..."
 mkdir -p "$HOME/bin" "${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
@@ -54,6 +66,16 @@ for f in "${scripts_to_copy[@]}"; do
   chmod +x "$HOME/bin/$base"
   copied+=("$base")
 done
+
+# If any claude wrappers were missing from the repo (e.g., older checkout), generate them directly
+if [ ${#missing[@]} -gt 0 ]; then
+  for wrapper in "${missing[@]}"; do
+    create_claude_wrapper "$wrapper"
+    copied+=("$wrapper")
+  done
+  # Clear missing since we've generated them
+  missing=()
+fi
 
 echo "Helper scripts installed in $HOME/bin:"
 for s in "${copied[@]}"; do
