@@ -33,9 +33,11 @@ mkdir -p "$HOME/bin" "${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 skipped=()
 copied=()
 scripts_to_copy=( "$SCRIPT_DIR"/bin/codex-* )
-if [ -e "$SCRIPT_DIR/bin/claude-add" ]; then
-  scripts_to_copy+=( "$SCRIPT_DIR/bin/claude-add" )
-fi
+for wrapper in claude-add claude-annotator claude-board claude-restore claude-resume claude-save claude-status claude-watch; do
+  if [ -e "$SCRIPT_DIR/bin/$wrapper" ]; then
+    scripts_to_copy+=( "$SCRIPT_DIR/bin/$wrapper" )
+  fi
+done
 
 for f in "${scripts_to_copy[@]}"; do
   base=$(basename "$f")
