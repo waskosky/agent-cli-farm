@@ -22,6 +22,8 @@ else
   echo "No supported package manager found. Please install tmux and multitail manually."
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Install helper scripts from this repo
 echo "Installing helper scripts..."
 mkdir -p "$HOME/bin" "${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
@@ -29,7 +31,7 @@ mkdir -p "$HOME/bin" "${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 # Copy helper scripts (codex-* plus claude-* wrappers) except removed adopt helpers
 skipped=()
 copied=()
-for f in bin/codex-* bin/claude-*; do
+for f in "$SCRIPT_DIR"/bin/codex-* "$SCRIPT_DIR"/bin/claude-*; do
   [ -e "$f" ] || continue
   base=$(basename "$f")
   case "$base" in
