@@ -23,6 +23,7 @@ else
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+shopt -s nullglob
 
 # Install helper scripts from this repo
 echo "Installing helper scripts..."
@@ -31,8 +32,12 @@ mkdir -p "$HOME/bin" "${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 # Copy helper scripts (codex-* plus claude-* wrappers) except removed adopt helpers
 skipped=()
 copied=()
-for f in "$SCRIPT_DIR"/bin/codex-* "$SCRIPT_DIR"/bin/claude-*; do
-  [ -e "$f" ] || continue
+scripts_to_copy=( "$SCRIPT_DIR"/bin/codex-* )
+if [ -e "$SCRIPT_DIR/bin/claude-add" ]; then
+  scripts_to_copy+=( "$SCRIPT_DIR/bin/claude-add" )
+fi
+
+for f in "${scripts_to_copy[@]}"; do
   base=$(basename "$f")
   case "$base" in
     codex-adopt|codex-auto-adopt)
