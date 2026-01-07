@@ -32,10 +32,13 @@ mkdir -p "$HOME/bin" "${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 # Copy helper scripts (codex-* plus claude-* wrappers) except removed adopt helpers
 skipped=()
 copied=()
+missing=()
 scripts_to_copy=( "$SCRIPT_DIR"/bin/codex-* )
 for wrapper in claude-add claude-annotator claude-board claude-restore claude-resume claude-save claude-status claude-watch; do
   if [ -e "$SCRIPT_DIR/bin/$wrapper" ]; then
     scripts_to_copy+=( "$SCRIPT_DIR/bin/$wrapper" )
+  else
+    missing+=("$wrapper")
   fi
 done
 
@@ -56,6 +59,9 @@ echo "Helper scripts installed in $HOME/bin:"
 for s in "${copied[@]}"; do
   echo "  - $s"
 done
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "Missing helper scripts (not copied): ${missing[*]}" >&2
+fi
 if [ ${#skipped[@]} -gt 0 ]; then
   echo "(skipped removed commands: ${skipped[*]})"
 fi
