@@ -4,6 +4,29 @@ set -euo pipefail
 # Snapshot the current Codex tmux windows to a manifest file
 # Usage: codex-save [manifest-path]
 
+trim_command_field() {
+  local value="$1"
+  # Trim leading/trailing whitespace
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if [ "${#value}" -ge 2 ]; then
+    case "$value" in
+      \"*\")
+        value="${value%\"}"
+        value="${value#\"}"
+        ;;
+      \'*\')
+        value="${value%\'}"
+        value="${value#\'}"
+        ;;
+    esac
+    # Trim again in case whitespace was inside quotes
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+  fi
+  printf '%s' "$value"
+}
+
 SESSION="${CODEX_SESSION:-codexfarm}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/codexfarm"
 MANIFEST_DEFAULT="$CONFIG_DIR/manifest.tsv"
@@ -38,9 +61,9 @@ while IFS=$'\n' read -r idx; do
   name=${name//$'\t'/ }
   dir=${dir//$'\t'/ }
   cmd=${cmd//$'\t'/ }
+  cmd=$(trim_command_field "$cmd")
   printf '%s\t%s\t%s\t\n' "$name" "$dir" "$cmd" >> "$tmpfile"
 done < <(tmux list-windows -t "$SESSION" -F '#{window_index}')
 
 mv "$tmpfile" "$MANIFEST_PATH"
 echo "Saved manifest to $MANIFEST_PATH"
-
