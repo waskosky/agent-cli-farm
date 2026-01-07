@@ -100,8 +100,17 @@ fix_tmux_socket_dir() {
     local tmux_dir="/tmp/tmux-$(id -u)"
     if [ -d "$tmux_dir" ]; then
         local owner perms
-        owner=$(stat -c '%u' "$tmux_dir" 2>/dev/null) || return 1
-        perms=$(stat -c '%a' "$tmux_dir" 2>/dev/null) || return 1
+        # Use a portable stat format across GNU/Linux and macOS/BSD.
+        if stat -c '%u' "$tmux_dir" >/dev/null 2>&1; then
+            owner=$(stat -c '%u' "$tmux_dir") || return 1
+            perms=$(stat -c '%a' "$tmux_dir") || return 1
+        elif stat -f '%u' "$tmux_dir" >/dev/null 2>&1; then
+            owner=$(stat -f '%u' "$tmux_dir") || return 1
+            perms=$(stat -f '%Lp' "$tmux_dir") || return 1
+        else
+            echo "Error: stat does not support required format options." >&2
+            return 1
+        fi
 
         if [ "$owner" != "$(id -u)" ]; then
             echo "Error: $tmux_dir is owned by uid $owner, not you ($(id -u))." >&2

@@ -32,7 +32,7 @@ create_claude_wrapper() {
   local dest="$HOME/bin/$wrapper"
   cat > "$dest" <<EOF
 #!/usr/bin/env bash
-CODEX_TOOL_NAME=claude exec "\$(cd \"\$(dirname \"\$0\")\" && pwd)/$target" "\$@"
+CODEX_TOOL_NAME=claude exec "\$(cd "\$(dirname "\$0")" && pwd)/$target" "\$@"
 EOF
   chmod +x "$dest"
 }

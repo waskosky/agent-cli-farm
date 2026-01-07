@@ -20,13 +20,43 @@ echo "✅ tmux found"
 echo ""
 echo "Checking script syntax..."
 for script in bin/codex-*; do
-    if bash -n "$script"; then
-        echo "✅ $script syntax OK"
+    shebang="$(head -n 1 "$script")"
+    if echo "$shebang" | grep -qE '^#!.*(env[[:space:]]+)?(ba)?sh([[:space:]]|$)'; then
+        if bash -n "$script"; then
+            echo "✅ $script syntax OK"
+        else
+            echo "❌ $script syntax error"
+            exit 1
+        fi
+    elif echo "$shebang" | grep -qE '^#!.*python'; then
+        if command -v python3 >/dev/null; then
+            if PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile "$script"; then
+                echo "✅ $script syntax OK (python3)"
+            else
+                echo "❌ $script syntax error (python3)"
+                exit 1
+            fi
+        else
+            echo "⚠️  python3 not found; skipping $script"
+        fi
     else
-        echo "❌ $script syntax error"
-        exit 1
+        echo "⚠️  Skipping syntax check for $script (unknown shebang)"
     fi
 done
+
+# Check claude wrapper template for over-escaped quotes
+echo ""
+echo "Testing claude wrapper template..."
+wrapper_line="$(grep -n 'CODEX_TOOL_NAME=claude exec' setup.sh || true)"
+if [ -z "$wrapper_line" ]; then
+    echo "❌ claude wrapper template not found in setup.sh"
+    exit 1
+fi
+if echo "$wrapper_line" | grep -q '\\\"'; then
+    echo "❌ claude wrapper template contains escaped quotes"
+    exit 1
+fi
+echo "✅ claude wrapper template uses plain quotes"
 
 # Test help messages
 echo ""
@@ -65,6 +95,28 @@ else
     echo "❌ Log directory not created"
 fi
 
+# Test codex-add in a non-interactive, detached mode
+echo ""
+echo "Testing codex-add..."
+TEST_SESSION="codexfarm-validate-$$"
+TEST_STATE_BASENAME="codexfarm-validate-$$"
+if CODEX_SESSION="$TEST_SESSION" \
+  CODEX_STATE_BASENAME="$TEST_STATE_BASENAME" \
+  CODEX_NAME="validate-test" \
+  CODEX_CMD="sleep" \
+  CODEX_ARGS="2" \
+  CODEX_TIPS_PROMPT=0 \
+  CODEX_AUTOSERVICE_CHOICE=no \
+  CODEX_ANNOTATOR_AUTOSTART=0 \
+  bin/codex-add -d "$PWD"; then
+    echo "✅ codex-add works"
+else
+    echo "❌ codex-add failed"
+    tmux kill-session -t "$TEST_SESSION" >/dev/null 2>&1 || true
+    exit 1
+fi
+tmux kill-session -t "$TEST_SESSION" >/dev/null 2>&1 || true
+
 # Test status commands
 echo ""
 echo "Testing status commands..."
@@ -72,12 +124,14 @@ if bin/codex-status sessions >/dev/null 2>&1; then
     echo "✅ codex-status sessions works"
 else
     echo "❌ codex-status sessions failed"
+    exit 1
 fi
 
 if bin/codex-status logs >/dev/null 2>&1; then
     echo "✅ codex-status logs works"
 else
     echo "❌ codex-status logs failed"
+    exit 1
 fi
 
 echo ""

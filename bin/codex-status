@@ -8,6 +8,28 @@ ACTION="${1:-sessions}"
 SESSION="${CODEX_SESSION:-codexfarm}"
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 
+stat_epoch() {
+    local path="$1"
+    if stat -c '%Y' "$path" >/dev/null 2>&1; then
+        stat -c '%Y' "$path"
+    elif stat -f '%m' "$path" >/dev/null 2>&1; then
+        stat -f '%m' "$path"
+    else
+        return 1
+    fi
+}
+
+stat_human() {
+    local path="$1"
+    if stat -c '%y' "$path" >/dev/null 2>&1; then
+        stat -c '%y' "$path"
+    elif stat -f '%Sm' "$path" >/dev/null 2>&1; then
+        stat -f '%Sm' -t '%c' "$path"
+    else
+        return 1
+    fi
+}
+
 case "$ACTION" in
     sessions)
         echo "=== Tmux Sessions ==="
@@ -41,7 +63,11 @@ case "$ACTION" in
     logs)
         echo "=== Log Files ==="
         if [ -d "$LOGDIR" ]; then
-            find "$LOGDIR" -name "*.log" -printf "%T@ %Tc %p\n" | sort -n | cut -d' ' -f2-
+            find "$LOGDIR" -name "*.log" -print0 | while IFS= read -r -d '' file; do
+                epoch="$(stat_epoch "$file" || true)"
+                human="$(stat_human "$file" || true)"
+                [ -n "$epoch" ] && printf '%s %s %s\n' "$epoch" "$human" "$file"
+            done | sort -n | cut -d' ' -f2-
             echo ""
             echo "Total logs: $(find "$LOGDIR" -name "*.log" | wc -l)"
         else
