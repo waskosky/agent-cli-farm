@@ -26,6 +26,7 @@ DEFAULT_ENABLED = os.environ.get("CODEX_ANNOTATOR_ENABLED", "1").lower() not in 
     "false",
     "no",
 }
+DEFAULT_CAPTURE_LINES = os.environ.get("CODEX_ANNOTATOR_CAPTURE_LINES", "200")
 STATE_DIR = os.environ.get(
     "XDG_STATE_HOME", os.path.join(os.path.expanduser("~"), ".local", "state")
 )
@@ -33,6 +34,30 @@ LOCKFILE = os.environ.get(
     "CODEX_ANNOTATOR_LOCKFILE", os.path.join(STATE_DIR, "codexfarm", "annotator.lock")
 )
 IGNORE_PREFIX = os.environ.get("CODEX_ANNOTATOR_IGNORE_PREFIX", "!")
+
+ANSI_CODE_PATTERN = r"\x1b\[[0-9;]*m"
+CODEX_IDLE_PROMPT_PATTERN = r"(?:\u276f|\u203a|codex>)"
+CODEX_IDLE_PROMPT_AT_END_PATTERN = rf"(?:^\s*{CODEX_IDLE_PROMPT_PATTERN}\s*$)\s*\Z"
+CODEX_WAITING_PROMPT_PATTERN = r"^(?:Approve|Allow)\b.*\b(?:y/n|yes/no|yes|no)\b"
+CODEX_ERROR_PATTERN = r"^(?:Error:|ERROR:|Traceback \(most recent call last\):|panic:)"
+CODEX_PROCESSING_PATTERN = r"\b(thinking|working|running|executing|processing|analyzing)\b"
+
+CLAUDE_IDLE_PROMPT_PATTERN = r">(?:\s|\u00a0)"
+CLAUDE_IDLE_PROMPT_AT_END_PATTERN = rf"(?:^\s*{CLAUDE_IDLE_PROMPT_PATTERN}\s*$)\s*\Z"
+CLAUDE_WAITING_PROMPT_PATTERN = r"\u276f.*\d+\."
+CLAUDE_PROCESSING_PATTERN = (
+    r"[\u2736\u2722\u273d\u273b\u00b7\u2733].*\u2026.*\(esc to interrupt.*\)"
+)
+
+
+def parse_capture_lines(value: str) -> int:
+    try:
+        return max(50, int(value))
+    except ValueError:
+        return 200
+
+
+CAPTURE_LINES = parse_capture_lines(DEFAULT_CAPTURE_LINES)
 
 
 @dataclasses.dataclass
@@ -50,6 +75,13 @@ class WindowInfo:
     current_name: str
     base_name: str
     state: Optional[str] = None
+
+
+@dataclasses.dataclass
+class PaneInfo:
+    pid: str
+    current_command: str
+    dead: bool
 
 
 def log(msg: str, *, verbose: bool) -> None:
@@ -124,7 +156,7 @@ def list_windows(session: SessionInfo, *, verbose: bool) -> List[WindowInfo]:
     return windows
 
 
-def window_pane_states(wid: str, *, verbose: bool) -> Optional[List[tuple[str, bool]]]:
+def window_pane_states(wid: str, *, verbose: bool) -> Optional[List[PaneInfo]]:
     output = run_tmux(
         [
             "tmux",
@@ -132,19 +164,107 @@ def window_pane_states(wid: str, *, verbose: bool) -> Optional[List[tuple[str, b
             "-t",
             wid,
             "-F",
-            "#{pane_current_command}\t#{pane_dead}",
+            "#{pane_id}\t#{pane_current_command}\t#{pane_dead}",
         ],
         verbose=verbose,
     )
     if not output:
         return None
-    panes: List[tuple[str, bool]] = []
+    panes: List[PaneInfo] = []
     for line in output.splitlines():
-        if "\t" not in line:
+        if line.count("\t") < 2:
             continue
-        cmd, dead = line.split("\t", 1)
-        panes.append((cmd.strip(), dead.strip() in {"1", "true", "True"}))
+        pid, cmd, dead = line.split("\t", 2)
+        panes.append(
+            PaneInfo(
+                pid=pid.strip(),
+                current_command=cmd.strip(),
+                dead=dead.strip() in {"1", "true", "True"},
+            )
+        )
     return panes
+
+
+def strip_ansi(text: str) -> str:
+    return re.sub(ANSI_CODE_PATTERN, "", text)
+
+
+def tail_lines(text: str, lines: int = 50) -> str:
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def capture_pane_output(pane_id: str, *, verbose: bool) -> Optional[str]:
+    return run_tmux(
+        ["tmux", "capture-pane", "-t", pane_id, "-e", "-p", "-S", f"-{CAPTURE_LINES}"],
+        verbose=verbose,
+    )
+
+
+def is_codex_command(cmd: str) -> bool:
+    return bool(re.search(r"\bcodex\b", cmd, re.IGNORECASE))
+
+
+def is_claude_command(cmd: str) -> bool:
+    return bool(re.search(r"\bclaude\b", cmd, re.IGNORECASE))
+
+
+def classify_codex_output(output: Optional[str]) -> str:
+    if not output:
+        return "ERR"
+    clean = strip_ansi(output)
+    tail_output = tail_lines(clean)
+    if re.search(CODEX_WAITING_PROMPT_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
+        return "READY"
+    if re.search(CODEX_IDLE_PROMPT_AT_END_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
+        return "READY"
+    if re.search(CODEX_ERROR_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
+        return "ERR"
+    if re.search(CODEX_PROCESSING_PATTERN, tail_output, re.IGNORECASE):
+        return "RUN"
+    return "RUN"
+
+
+def classify_claude_output(output: Optional[str]) -> str:
+    if not output:
+        return "ERR"
+    clean = strip_ansi(output)
+    tail_output = tail_lines(clean)
+    if re.search(CLAUDE_WAITING_PROMPT_PATTERN, tail_output, re.MULTILINE):
+        return "READY"
+    if re.search(CLAUDE_IDLE_PROMPT_AT_END_PATTERN, tail_output, re.MULTILINE):
+        return "READY"
+    if re.search(CLAUDE_PROCESSING_PATTERN, tail_output, re.MULTILINE):
+        return "RUN"
+    return "RUN"
+
+
+def aggregate_window_state(states: List[str]) -> str:
+    if not states:
+        return "ERR"
+    if "RUN" in states:
+        return "RUN"
+    if "ERR" in states:
+        return "ERR"
+    return "READY"
+
+
+def classify_pane(
+    pane: PaneInfo,
+    running_regex: re.Pattern,
+    *,
+    verbose: bool,
+) -> Optional[str]:
+    if pane.dead:
+        return None
+    if is_codex_command(pane.current_command):
+        output = capture_pane_output(pane.pid, verbose=verbose)
+        return classify_codex_output(output)
+    if is_claude_command(pane.current_command):
+        output = capture_pane_output(pane.pid, verbose=verbose)
+        return classify_claude_output(output)
+    if running_regex.search(pane.current_command):
+        return "RUN"
+    return "READY"
 
 
 def classify_window(
@@ -158,22 +278,13 @@ def classify_window(
         window.state = "ERR"
         return window
 
-    has_live = False
-    has_running = False
-    for cmd, dead in panes:
-        if dead:
-            continue
-        has_live = True
-        if running_regex.search(cmd):
-            has_running = True
-            break
+    pane_states: List[str] = []
+    for pane in panes:
+        state = classify_pane(pane, running_regex, verbose=verbose)
+        if state is not None:
+            pane_states.append(state)
 
-    if has_running:
-        window.state = "RUN"
-    elif not has_live:
-        window.state = "ERR"
-    else:
-        window.state = "READY"
+    window.state = aggregate_window_state(pane_states)
     return window
 
 

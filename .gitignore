@@ -32,3 +32,5 @@ Thumbs.db
 /.local/
 /bin
 /tests
+!/tests/
+!/tests/test_annotator_status.py
