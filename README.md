@@ -9,7 +9,7 @@ A tmux session manager for running and restoring multiple Codex CLI instances (p
 - **Unified monitoring**: Watch all Codex instances from a single consolidated view
 - **Fast navigation**: Optional "board" session for quick switching between instances
 - **Snapshot/restore**: Save a manifest of windows and restore them later
-- **Status annotations**: *RUN*/*READY*/*ERR* prefixes in tmux window titles (READY detection is WIP)
+- **Status annotations**: *RUN*/*READY*/*ERR* prefixes in tmux window titles (Codex/Claude READY uses prompt parsing)
 - **Autosave/autorestore (optional)**: Systemd user services to persist sessions across logins
 - **Claude-friendly**: `claude-*` wrappers use the same tmux workflow
 
@@ -93,9 +93,9 @@ Set `CODEX_AUTOSERVICE_CHOICE=yes` to auto-accept the prompt, or `no` to suppres
 
 ## Status Annotations (RUN/READY/ERR)
 
-`codex-add` auto-starts `codex-annotator`, which prefixes tmux window titles with *RUN*, *READY*, or *ERR* based on pane commands.
+`codex-add` auto-starts `codex-annotator`, which prefixes tmux window titles with *RUN*, *READY*, or *ERR*. For Codex/Claude panes it inspects recent output for prompts/approval selections; other panes fall back to the command-based heuristic.
 
-Important: the **READY status** intended to indicate readiness of agents for further commands is still **WIP**. Treat it as best-effort, not a strict readiness signal.
+Important: the **READY status** is best-effort and based on prompt detection. Use it as a signal, not a guarantee.
 
 Tuning and controls:
 - Disable autostart: `CODEX_ANNOTATOR_AUTOSTART=0`
@@ -103,6 +103,7 @@ Tuning and controls:
 - Adjust RUN detection: `CODEX_ANNOTATOR_RUNNING_REGEX` (default: `(codex|node|ssh)`)
 - Scope sessions: `CODEX_ANNOTATOR_SESSION_REGEX` (default: `^codex`)
 - Ignore windows/sessions prefixed with `!` (configurable via `CODEX_ANNOTATOR_IGNORE_PREFIX`)
+- Adjust capture depth: `CODEX_ANNOTATOR_CAPTURE_LINES` (default: `200`)
 
 ## Available Commands
 
@@ -142,6 +143,7 @@ Annotator-specific:
 - **`CODEX_ANNOTATOR_SESSION_REGEX`** - regex for sessions to annotate
 - **`CODEX_ANNOTATOR_INTERVAL`** - polling interval in seconds
 - **`CODEX_ANNOTATOR_IGNORE_PREFIX`** - window/session name prefix to ignore (default: `!`)
+- **`CODEX_ANNOTATOR_CAPTURE_LINES`** - number of lines to capture from panes (default: `200`)
 
 Claude-specific:
 - Use `CLAUDE_*` versions of the common variables to override just the Claude wrappers.
