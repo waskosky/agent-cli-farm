@@ -4,6 +4,8 @@
 /tmp/
 *.tmp
 *.temp
+__pycache__/
+*.pyc
 
 # Log files (these are created in user's home directory)
 *.log
@@ -34,3 +36,6 @@ Thumbs.db
 /tests
 !/tests/
 !/tests/test_annotator_status.py
+!/tests/test_add_scripts.py
+!/tests/test_claude_wrappers.py
+!/tests/test_codex_annotator.py
