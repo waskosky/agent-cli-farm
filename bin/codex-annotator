@@ -41,6 +41,8 @@ CODEX_IDLE_PROMPT_AT_END_PATTERN = rf"(?:^\s*{CODEX_IDLE_PROMPT_PATTERN}\s*$)\s*
 CODEX_WAITING_PROMPT_PATTERN = r"^(?:Approve|Allow)\b.*\b(?:y/n|yes/no|yes|no)\b"
 CODEX_ERROR_PATTERN = r"^(?:Error:|ERROR:|Traceback \(most recent call last\):|panic:)"
 CODEX_PROCESSING_PATTERN = r"\b(thinking|working|running|executing|processing|analyzing)\b"
+CODEX_USER_PREFIX_PATTERN = r"^You\b"
+CODEX_ASSISTANT_PREFIX_PATTERN = r"^(?:assistant|codex|agent)\s*:"
 
 CLAUDE_IDLE_PROMPT_PATTERN = r">(?:\s|\u00a0)"
 CLAUDE_IDLE_PROMPT_AT_END_PATTERN = rf"(?:^\s*{CLAUDE_IDLE_PROMPT_PATTERN}\s*$)\s*\Z"
@@ -213,15 +215,46 @@ def classify_codex_output(output: Optional[str]) -> str:
         return "ERR"
     clean = strip_ansi(output)
     tail_output = tail_lines(clean)
-    if re.search(CODEX_WAITING_PROMPT_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
-        return "READY"
+    last_user = None
+    for match in re.finditer(CODEX_USER_PREFIX_PATTERN, clean, re.IGNORECASE | re.MULTILINE):
+        last_user = match
+
+    output_after_last_user = clean[last_user.start() :] if last_user else clean
+    assistant_after_last_user = bool(
+        last_user
+        and re.search(
+            CODEX_ASSISTANT_PREFIX_PATTERN,
+            output_after_last_user,
+            re.IGNORECASE | re.MULTILINE,
+        )
+    )
+
+    if last_user is not None:
+        if not assistant_after_last_user:
+            if re.search(
+                CODEX_WAITING_PROMPT_PATTERN,
+                output_after_last_user,
+                re.IGNORECASE | re.MULTILINE,
+            ):
+                return "READY"
+            if re.search(
+                CODEX_ERROR_PATTERN,
+                output_after_last_user,
+                re.IGNORECASE | re.MULTILINE,
+            ):
+                return "ERR"
+    else:
+        if re.search(CODEX_WAITING_PROMPT_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
+            return "READY"
+        if re.search(CODEX_ERROR_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
+            return "ERR"
+
     if re.search(CODEX_IDLE_PROMPT_AT_END_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
         return "READY"
-    if re.search(CODEX_ERROR_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
-        return "ERR"
+
     if re.search(CODEX_PROCESSING_PATTERN, tail_output, re.IGNORECASE):
         return "RUN"
-    return "RUN"
+    return "READY"
 
 
 def classify_claude_output(output: Optional[str]) -> str:
@@ -231,11 +264,11 @@ def classify_claude_output(output: Optional[str]) -> str:
     tail_output = tail_lines(clean)
     if re.search(CLAUDE_WAITING_PROMPT_PATTERN, tail_output, re.MULTILINE):
         return "READY"
-    if re.search(CLAUDE_IDLE_PROMPT_AT_END_PATTERN, tail_output, re.MULTILINE):
-        return "READY"
     if re.search(CLAUDE_PROCESSING_PATTERN, tail_output, re.MULTILINE):
         return "RUN"
-    return "RUN"
+    if re.search(CLAUDE_IDLE_PROMPT_AT_END_PATTERN, tail_output, re.MULTILINE):
+        return "READY"
+    return "READY"
 
 
 def aggregate_window_state(states: List[str]) -> str:

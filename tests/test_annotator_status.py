@@ -31,6 +31,10 @@ class AnnotatorStatusTests(unittest.TestCase):
         output = "thinking about this"
         self.assertEqual(self.mod.classify_codex_output(output), "RUN")
 
+    def test_codex_ready_without_processing_marker(self):
+        output = "still busy...\nno prompt yet"
+        self.assertEqual(self.mod.classify_codex_output(output), "READY")
+
     def test_claude_ready_at_prompt(self):
         output = "Result\n> "
         self.assertEqual(self.mod.classify_claude_output(output), "READY")
@@ -42,6 +46,10 @@ class AnnotatorStatusTests(unittest.TestCase):
     def test_claude_run_when_processing(self):
         output = "\u2736 ... \u2026 (esc to interrupt)"
         self.assertEqual(self.mod.classify_claude_output(output), "RUN")
+
+    def test_claude_ready_without_processing_marker(self):
+        output = "Output line without prompt"
+        self.assertEqual(self.mod.classify_claude_output(output), "READY")
 
     def test_window_state_prefers_run(self):
         states = ["READY", "RUN", "READY"]
