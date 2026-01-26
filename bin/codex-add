@@ -216,7 +216,10 @@ maybe_prompt_autoservice() {
     if [ -n "${CODEX_AUTOSERVICE_CHOICE:-}" ]; then
       choice="$CODEX_AUTOSERVICE_CHOICE"
     elif [ -t 0 ]; then
-      echo "Install Codex autosave/autorestore background service? [y/N] "
+      echo "Install Codex autosave/autorestore background service?"
+      echo "This saves your tmux window manifest on logout and restores it on login."
+      echo "Without it, you must run codex-save/codex-restore manually."
+      printf "Install now? [y/N] "
       read -r reply || reply=
       case "${reply:-}" in
         y|Y|yes|Yes) choice="yes" ;;
