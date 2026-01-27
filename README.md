@@ -235,7 +235,8 @@ codex-cli-farm/
 ├── setup.sh           # Main setup script
 ├── bin/               # Helper scripts
 │   ├── codex-add      # Add new Codex instances
-│   ├── codex-annotator  # Annotate tmux window titles
+│   ├── codex-annotator  # Bash wrapper for annotator
+│   ├── codex-annotator.py # Annotate tmux window titles (python)
 │   ├── codex-save     # Save manifest of windows
 │   ├── codex-restore  # Restore windows from manifest
 │   ├── codex-watch    # Monitor logs

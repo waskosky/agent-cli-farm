@@ -33,6 +33,7 @@ Thumbs.db
 # Runtime directories that may be created during testing
 /.local/
 /bin
+!/bin/codex-annotator.py
 /tests
 !/tests/
 !/tests/test_annotator_status.py

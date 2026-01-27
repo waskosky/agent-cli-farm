@@ -8,7 +8,7 @@ from pathlib import Path
 
 def load_annotator_module():
     """Load the codex-annotator script as a module for testing."""
-    annotator_path = Path(__file__).resolve().parent.parent / "bin" / "codex-annotator"
+    annotator_path = Path(__file__).resolve().parent.parent / "bin" / "codex-annotator.py"
     loader = importlib.machinery.SourceFileLoader(
         "codex_annotator_test_module", str(annotator_path)
     )

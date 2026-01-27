@@ -6,7 +6,7 @@ import unittest
 
 
 def load_annotator_module():
-    annotator_path = Path(__file__).resolve().parents[1] / "bin" / "codex-annotator"
+    annotator_path = Path(__file__).resolve().parents[1] / "bin" / "codex-annotator.py"
     loader = SourceFileLoader("codex_annotator", str(annotator_path))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     module = importlib.util.module_from_spec(spec)

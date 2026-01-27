@@ -46,6 +46,9 @@ skipped=()
 copied=()
 missing=()
 scripts_to_copy=( "$SCRIPT_DIR"/bin/codex-* )
+if [ -e "$SCRIPT_DIR/bin/codex-annotator.py" ]; then
+  scripts_to_copy+=( "$SCRIPT_DIR/bin/codex-annotator.py" )
+fi
 for wrapper in claude-add claude-annotator claude-board claude-restore claude-resume claude-save claude-status claude-watch; do
   if [ -e "$SCRIPT_DIR/bin/$wrapper" ]; then
     scripts_to_copy+=( "$SCRIPT_DIR/bin/$wrapper" )
