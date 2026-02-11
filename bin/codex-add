@@ -165,17 +165,28 @@ install_autoservice_units() {
   mkdir -p "$SYSTEMD_DIR"
   cat > "$SYSTEMD_DIR/codex-autosave.service" <<EOF
 [Unit]
-Description=Codex autosave tmux windows on shutdown
+Description=Codex autosave tmux windows
 After=tmux.service
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/true
-ExecStop=$SAVE_BIN
+ExecStart=$SAVE_BIN
 
 [Install]
 WantedBy=default.target
+EOF
+
+  cat > "$SYSTEMD_DIR/codex-autosave.timer" <<EOF
+[Unit]
+Description=Run Codex autosave every hour
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=codex-autosave.service
+
+[Install]
+WantedBy=timers.target
 EOF
 
   cat > "$SYSTEMD_DIR/codex-autorestore.service" <<EOF
@@ -192,8 +203,8 @@ EOF
 
   if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
     "$SYSTEMCTL_BIN" --user daemon-reload >/dev/null 2>&1 || true
-    "$SYSTEMCTL_BIN" --user enable codex-autosave.service codex-autorestore.service >/dev/null 2>&1 || true
-    "$SYSTEMCTL_BIN" --user start codex-autosave.service codex-autorestore.service >/dev/null 2>&1 || true
+    "$SYSTEMCTL_BIN" --user enable codex-autosave.timer codex-autorestore.service >/dev/null 2>&1 || true
+    "$SYSTEMCTL_BIN" --user start codex-autosave.timer codex-autorestore.service >/dev/null 2>&1 || true
   else
     echo "systemctl not found; services written to $SYSTEMD_DIR but not enabled." >&2
   fi
@@ -217,7 +228,7 @@ maybe_prompt_autoservice() {
       choice="$CODEX_AUTOSERVICE_CHOICE"
     elif [ -t 0 ]; then
       echo "Install Codex autosave/autorestore background service?"
-      echo "This saves your tmux window manifest on logout and restores it on login."
+      echo "This saves your tmux window manifest hourly and restores it on login."
       echo "Without it, you must run codex-save/codex-restore manually."
       printf "Install now? [y/N] "
       read -r reply || reply=

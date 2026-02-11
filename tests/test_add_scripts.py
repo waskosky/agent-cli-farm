@@ -130,12 +130,18 @@ exit 0
 
         systemd_dir = Path(env["XDG_CONFIG_HOME"]) / "systemd" / "user"
         autosave = systemd_dir / "codex-autosave.service"
+        autosave_timer = systemd_dir / "codex-autosave.timer"
         autorestore = systemd_dir / "codex-autorestore.service"
         self.assertTrue(autosave.exists(), "autosave unit missing")
+        self.assertTrue(autosave_timer.exists(), "autosave timer missing")
         self.assertTrue(autorestore.exists(), "autorestore unit missing")
         autosave_content = autosave.read_text()
+        autosave_timer_content = autosave_timer.read_text()
         autorestore_content = autorestore.read_text()
         self.assertIn("codex-save", autosave_content)
+        self.assertIn("ExecStart=", autosave_content)
+        self.assertIn("OnCalendar=hourly", autosave_timer_content)
+        self.assertIn("Unit=codex-autosave.service", autosave_timer_content)
         self.assertIn("codex-restore -a", autorestore_content)
 
         choice_file = Path(env["XDG_STATE_HOME"]) / "codexfarm" / "autoservice_choice"
@@ -143,6 +149,10 @@ exit 0
 
         systemctl_calls = systemctl_log.read_text().splitlines()
         self.assertTrue(any("--user" in line for line in systemctl_calls))
+        self.assertTrue(
+            any("codex-autosave.timer" in line for line in systemctl_calls),
+            f"Expected timer-related systemctl calls, got: {systemctl_calls}",
+        )
 
 
 if __name__ == "__main__":

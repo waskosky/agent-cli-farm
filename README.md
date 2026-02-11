@@ -82,7 +82,7 @@ Flags:
 
 ### 5. (Optional) Enable Autosave/Autorestore
 
-`codex-add` can install systemd user services to autosave on logout and restore on login.
+`codex-add` can install systemd user services to autosave hourly and restore on login.
 You can trigger it directly:
 
 ```bash
