@@ -6,21 +6,71 @@ set -euo pipefail
 
 echo "Setting up Codex CLI Farm..."
 
-# Install tmux + multitail (runs whichever package manager exists)
-echo "Installing dependencies..."
-if command -v apt >/dev/null; then
-  sudo apt update && sudo apt install -y tmux multitail
-elif command -v dnf >/dev/null; then
-  sudo dnf install -y tmux multitail
-elif command -v yum >/dev/null; then
-  sudo yum install -y tmux multitail
-elif command -v pacman >/dev/null; then
-  sudo pacman -Sy --noconfirm tmux multitail
-elif command -v zypper >/dev/null; then
-  sudo zypper install -y tmux multitail
-else
-  echo "No supported package manager found. Please install tmux and multitail manually."
-fi
+have_command() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+install_dependencies() {
+  local missing=()
+  local install_failed=0
+
+  have_command tmux || missing+=("tmux")
+  have_command multitail || missing+=("multitail")
+
+  if [ ${#missing[@]} -eq 0 ]; then
+    echo "Dependencies already available; skipping package installation."
+    return 0
+  fi
+
+  echo "Installing dependencies..."
+  echo "Missing commands: ${missing[*]}"
+
+  if command -v apt >/dev/null; then
+    if ! sudo apt update; then
+      install_failed=1
+    fi
+    if ! sudo apt install -y "${missing[@]}"; then
+      install_failed=1
+    fi
+  elif command -v dnf >/dev/null; then
+    if ! sudo dnf install -y "${missing[@]}"; then
+      install_failed=1
+    fi
+  elif command -v yum >/dev/null; then
+    if ! sudo yum install -y "${missing[@]}"; then
+      install_failed=1
+    fi
+  elif command -v pacman >/dev/null; then
+    if ! sudo pacman -Sy --noconfirm "${missing[@]}"; then
+      install_failed=1
+    fi
+  elif command -v zypper >/dev/null; then
+    if ! sudo zypper install -y "${missing[@]}"; then
+      install_failed=1
+    fi
+  else
+    install_failed=1
+    echo "No supported package manager found. Please install tmux and multitail manually."
+  fi
+
+  if [ "$install_failed" -eq 1 ]; then
+    echo "Dependency installation did not complete cleanly."
+  fi
+
+  if have_command tmux; then
+    echo "tmux is available."
+  else
+    echo "tmux is still missing; core tmux commands will not work until you install it."
+  fi
+
+  if have_command multitail; then
+    echo "multitail is available."
+  else
+    echo "multitail is still missing; codex-watch will fall back to simple tail mode."
+  fi
+}
+
+install_dependencies
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 shopt -s nullglob

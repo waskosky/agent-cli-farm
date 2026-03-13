@@ -24,10 +24,12 @@ source ./setup.sh
 ```
 
 This will:
-- Install `tmux` and `multitail` using your system's package manager
+- Install missing `tmux` and `multitail` packages when needed
 - Create helper scripts in `$HOME/bin/`
 - Set up logging directories
 - Add `$HOME/bin` to your PATH automatically (bash/zsh/fish) and the current session
+
+If `tmux` and `multitail` are already on your `PATH`, the setup script skips package-manager work. If `multitail` is unavailable, `codex-watch` falls back to a simpler `tail` view.
 
 ### 2. Add Codex (or Claude) Instances
 
@@ -257,7 +259,8 @@ codex-cli-farm/
 - Bash shell
 - One of: apt, dnf, yum, pacman, or zypper package managers
 - Root access for package installation
-  - If you don't have sudo/root, install `tmux` and `multitail` manually and rerun `./setup.sh` to place scripts in `~/bin`.
+  - If you don't have sudo/root, install `tmux` manually and rerun `./setup.sh` to place scripts in `~/bin`.
+  - `multitail` is optional; without it, `codex-watch` uses simple mode automatically.
 
 ## Limitations
 
