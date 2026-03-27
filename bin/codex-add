@@ -5,6 +5,7 @@ script_name=$(basename "${0:-codex-add}")
 tool_name="${CODEX_TOOL_NAME:-codex}"
 case "$script_name" in
   claude-add) tool_name="${CODEX_TOOL_NAME:-claude}" ;;
+  gemini-add) tool_name="${CODEX_TOOL_NAME:-gemini}" ;;
 esac
 
 # Portable uppercasing for older macOS bash (no ${var^^})
@@ -22,14 +23,43 @@ get_env() {
   printf '%s' "${val:-$default}"
 }
 
+looks_like_path() {
+  local value="${1:-}"
+  case "$value" in
+    "" ) return 1 ;;
+    .|..|~|~/*|/*|./*|../*|*/*) return 0 ;;
+  esac
+  [ -e "$value" ]
+}
+
+board_session_name() {
+  local session="$1"
+  local default_session="$2"
+  if [ "$session" = "$default_session" ]; then
+    printf '%s' "board"
+  else
+    printf '%s-board' "$session"
+  fi
+}
+
 detach=0
 dir_arg=
+session_arg=
+positionals=()
 tool_args=()
 install_autoservice_only=0
 while (( "$#" )); do
   case "${1:-}" in
     -d|--detach)
       detach=1
+      ;;
+    -s|--session)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for $1" >&2
+        exit 2
+      fi
+      session_arg="$2"
+      shift
       ;;
     --install-autoservice)
       install_autoservice_only=1
@@ -56,18 +86,41 @@ while (( "$#" )); do
       tool_args+=("$1")
       ;;
     *)
-      if [ -z "$dir_arg" ]; then
-        dir_arg="$1"
-      else
-        tool_args+=("$1")
-      fi
+      positionals+=("$1")
       ;;
   esac
   shift
 done
 
 DEFAULT_SESSION="codexfarm"
-SESSION="$(get_env SESSION "$DEFAULT_SESSION")"
+if [ -n "$session_arg" ]; then
+  if [ ${#positionals[@]} -gt 0 ]; then
+    dir_arg="${positionals[0]}"
+  fi
+  if [ ${#positionals[@]} -gt 1 ]; then
+    tool_args+=("${positionals[@]:1}")
+  fi
+elif [ ${#positionals[@]} -eq 1 ]; then
+  if looks_like_path "${positionals[0]}"; then
+    dir_arg="${positionals[0]}"
+  else
+    session_arg="${positionals[0]}"
+  fi
+elif [ ${#positionals[@]} -ge 2 ]; then
+  if looks_like_path "${positionals[0]}"; then
+    dir_arg="${positionals[0]}"
+    tool_args+=("${positionals[@]:1}")
+  else
+    session_arg="${positionals[0]}"
+    dir_arg="${positionals[1]}"
+    if [ ${#positionals[@]} -gt 2 ]; then
+      tool_args+=("${positionals[@]:2}")
+    fi
+  fi
+fi
+
+SESSION="${session_arg:-$(get_env SESSION "$DEFAULT_SESSION")}"
+BOARD_SESSION="$(board_session_name "$SESSION" "$DEFAULT_SESSION")"
 DIR="${dir_arg:-$PWD}"
 NAME="$(get_env NAME "$(basename "$DIR")")"
 CMD="$(get_env CMD "$tool_name")"
@@ -341,7 +394,7 @@ LOGFILE="$LOGDIR/${NAME}_${STAMP}.log"
 tmux pipe-pane -o -t "$SESSION:$WIN" "cat >> \"$LOGFILE\""
 
 # Link to board session if it exists
-tmux has-session -t board 2>/dev/null && tmux link-window -s "$SESSION:$WIN" -t board
+tmux has-session -t "$BOARD_SESSION" 2>/dev/null && tmux link-window -s "$SESSION:$WIN" -t "$BOARD_SESSION"
 
 # Attach or switch to window unless detaching
 if [ "$detach" -eq 0 ]; then

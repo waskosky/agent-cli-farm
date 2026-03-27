@@ -1,6 +1,6 @@
 # Codex CLI Farm
 
-A tmux session manager for running and restoring multiple Codex CLI instances (plus optional Claude wrappers), with logging and monitoring built in.
+A tmux session manager for running and restoring multiple Codex CLI instances, with Claude and Gemini wrappers, logging, and monitoring built in.
 
 ## Features
 
@@ -11,7 +11,7 @@ A tmux session manager for running and restoring multiple Codex CLI instances (p
 - **Snapshot/restore**: Save a manifest of windows and restore them later
 - **Status annotations**: *RUN*/*READY*/*ERR* prefixes in tmux window titles (Codex/Claude READY uses prompt parsing)
 - **Autosave/autorestore (optional)**: Systemd user services to persist sessions across logins
-- **Claude-friendly**: `claude-*` wrappers use the same tmux workflow
+- **Tool wrappers**: `claude-*` and `gemini-*` commands use the same tmux workflow
 
 ## Quick Start
 
@@ -31,7 +31,7 @@ This will:
 
 If `tmux` and `multitail` are already on your `PATH`, the setup script skips package-manager work. If `multitail` is unavailable, `codex-watch` falls back to a simpler `tail` view.
 
-### 2. Add Codex (or Claude) Instances
+### 2. Add Codex, Claude, or Gemini Instances
 
 From any project directory:
 ```bash
@@ -43,9 +43,16 @@ Or specify a path:
 codex-add /path/to/project
 ```
 
-Claude uses the same session with wrappers:
+Use a named farm without exporting `CODEX_SESSION`:
+```bash
+codex-add work /path/to/project
+codex-add work              # current directory in the "work" farm
+```
+
+Claude and Gemini use the same tmux workflow with wrappers:
 ```bash
 claude-add /path/to/project
+gemini-add /path/to/project
 ```
 
 ### 3. Watch All Instances
@@ -78,9 +85,12 @@ Use `-f` to force re-creation of existing-named windows.
 If tmux sessions are already running (no manifest needed):
 ```bash
 codex-resume            # joins the main Codex session if present
+codex-resume work       # joins the named "work" farm
+codex-resume work --board
 ```
 Flags:
 - `--board` to prefer the board session first.
+- `--session NAME` to force a specific farm when a positional argument would be ambiguous.
 
 ### 5. (Optional) Enable Autosave/Autorestore
 
@@ -111,19 +121,19 @@ Tuning and controls:
 
 ### Core Commands
 
-- **`codex-add [directory]`** - Add new Codex instance to tmux session
+- **`codex-add [session] [directory]`** - Add a new Codex instance, optionally selecting a named farm
 - **`codex-annotator`** - Annotate tmux window titles with RUN/READY/ERR status
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-status [sessions|windows|logs]`** - Show status information
-- **`codex-board [create|link|switch]`** - Manage board session for navigation
-- **`codex-resume [--board]`** - Attach/switch to an existing Codex/tmux session
+- **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
+- **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
 - **`codex-save [manifest]`** - Snapshot current windows to a manifest (TSV)
 - **`codex-restore [-a] [-f] [manifest]`** - Restore windows from a manifest
 
-### Claude Wrappers
+### Claude and Gemini Wrappers
 
-Claude equivalents use the same tmux workflow and accept the same flags:
-`claude-add`, `claude-annotator`, `claude-board`, `claude-restore`, `claude-resume`, `claude-save`, `claude-status`, `claude-watch`.
+Claude and Gemini equivalents use the same tmux workflow and accept the same flags:
+`claude-add`, `claude-annotator`, `claude-board`, `claude-restore`, `claude-resume`, `claude-save`, `claude-status`, `claude-watch`, `gemini-add`, `gemini-annotator`, `gemini-board`, `gemini-restore`, `gemini-resume`, `gemini-save`, `gemini-status`, `gemini-watch`.
 
 ## Environment Variables
 
@@ -147,8 +157,8 @@ Annotator-specific:
 - **`CODEX_ANNOTATOR_IGNORE_PREFIX`** - window/session name prefix to ignore (default: `!`)
 - **`CODEX_ANNOTATOR_CAPTURE_LINES`** - number of lines to capture from panes (default: `200`)
 
-Claude-specific:
-- Use `CLAUDE_*` versions of the common variables to override just the Claude wrappers.
+Tool-specific:
+- Use `CLAUDE_*` or `GEMINI_*` versions of the common variables to override just those wrapper commands.
 
 Example:
 ```bash
@@ -163,20 +173,26 @@ Flags:
 
 ### Board Session for Fast Navigation
 
-Create a separate "board" session for quick navigation:
+Create a separate board session for quick navigation. The default farm uses the legacy `board` session name; named farms use `<farm>-board`:
 
 ```bash
-# Create board session
+# Create board session for the default farm
 codex-board create
 
-# Link all Codex windows to board
+# Create and use a named board
+codex-board create work
+codex-board link work
+codex-board switch work
+
+# Link all Codex windows to the default board
 codex-board link
 
-# Switch to board session
+# Switch to the default board session
 codex-board switch
 ```
 
 Now you can use `tmux switch-client -t board` to scan through all Codex instances while the main `codexfarm` session continues running.
+For named farms, `codex-resume work --board` jumps directly to `work-board`.
 
 ### Remote SSH Tips
 
@@ -205,6 +221,7 @@ Now you can use `tmux switch-client -t board` to scan through all Codex instance
 - One-liners:
   - Save then restore and attach: `codex-save && codex-restore -a`
   - Start with a different command: `CODEX_CMD="cursor" CODEX_ARGS="--wait" codex-add -d /path`
+  - Start in a named farm without env vars: `codex-add work /path`
   - Watch logs with multitail if available: `codex-watch`
 
 ### Log Management
@@ -245,7 +262,7 @@ codex-cli-farm/
 │   ├── codex-board    # Navigation helper
 │   ├── codex-resume   # Resume into existing session(s)
 │   ├── codex-status   # Status information
-│   └── claude-*       # Claude wrappers for the same commands
+│   └── claude-* / gemini-*  # Tool wrappers for the same commands
 ├── examples/
 │   ├── demo.sh        # End-to-end demo of farm
 │   └── mock-codex     # Fake CLI used by the demo
@@ -267,6 +284,7 @@ codex-cli-farm/
 - `tmux` cannot mirror the same live pane in two windows (use linked windows or logs)
 - `pipe-pane` logs only new output after activation
 - Manifest `cmd/args` are best-effort when saving from existing panes; windows created with `codex-add` restore reliably. Use env `CODEX_CMD/CODEX_ARGS` to override.
+- A single positional argument to `codex-add` is interpreted as a farm name when it does not look like a path. Use `--session NAME` to force farm selection when needed.
 
 ## License
 

@@ -1,62 +1,117 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Create and manage a "board" session for fast navigation between Codex instances
-# Usage: codex-board [create|link|switch]
+# Create and manage a board session for fast navigation between Codex instances.
+# Usage: codex-board [create|link|switch] [session]
 
-ACTION="${1:-create}"
-SESSION="${CODEX_SESSION:-codexfarm}"
-BOARD_SESSION="board"
+DEFAULT_SESSION="codexfarm"
+ACTION="create"
+SESSION_ARG=""
+POSITIONALS=()
+
+board_session_name() {
+  local session="$1"
+  if [ "$session" = "$DEFAULT_SESSION" ]; then
+    printf '%s' "board"
+  else
+    printf '%s-board' "$session"
+  fi
+}
+
+while (( "$#" )); do
+  case "${1:-}" in
+    create|link|switch)
+      ACTION="$1"
+      ;;
+    -s|--session)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for $1" >&2
+        exit 2
+      fi
+      SESSION_ARG="$2"
+      shift
+      ;;
+    -h|--help)
+      cat <<EOF
+Usage: $(basename "$0") [create|link|switch] [session]
+
+Manage a board session for the default or named farm.
+
+Examples:
+  $(basename "$0") create
+  $(basename "$0") switch work
+  $(basename "$0") link --session work
+EOF
+      exit 0
+      ;;
+    --)
+      shift
+      while (( "$#" )); do
+        POSITIONALS+=("$1")
+        shift
+      done
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      POSITIONALS+=("$1")
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$SESSION_ARG" ] && [ ${#POSITIONALS[@]} -gt 0 ]; then
+  SESSION_ARG="${POSITIONALS[0]}"
+fi
+
+SESSION="${SESSION_ARG:-${CODEX_SESSION:-$DEFAULT_SESSION}}"
+BOARD_SESSION="$(board_session_name "$SESSION")"
 
 case "$ACTION" in
-    create)
-        # Create board session if it doesn't exist
-        if tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
-            echo "Board session already exists"
-        else
-            tmux new-session -d -s "$BOARD_SESSION"
-            echo "Created board session"
-        fi
-        ;;
-    
-    link)
-        # Link all windows from main session to board
-        if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-            echo "Main session '$SESSION' doesn't exist"
-            exit 1
-        fi
-        
-        if ! tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
-            echo "Board session doesn't exist. Creating it..."
-            tmux new-session -d -s "$BOARD_SESSION"
-        fi
-        
-        # Link all windows except the first one (home)
-        for idx in $(tmux list-windows -t "$SESSION" -F '#{window_index}' | tail -n +2); do
-            tmux link-window -s "$SESSION:$idx" -t "$BOARD_SESSION" 2>/dev/null || true
-        done
-        echo "Linked all Codex windows to board session"
-        ;;
-    
-    switch)
-        # Switch to board session
-        if ! tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
-            echo "Board session doesn't exist. Create it first with 'codex-board create'"
-            exit 1
-        fi
-        
-        if [ -n "${TMUX:-}" ]; then
-            tmux switch-client -t "$BOARD_SESSION"
-        else
-            tmux attach -t "$BOARD_SESSION"
-        fi
-        ;;
-    
-    *)
-        echo "Usage: $(basename "$0") [create|link|switch]"
-        echo "  create - Create board session"
-        echo "  link   - Link all Codex windows to board"
-        echo "  switch - Switch to board session"
-        exit 1
-        ;;
+  create)
+    if tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
+      echo "Board session already exists"
+    else
+      tmux new-session -d -s "$BOARD_SESSION"
+      echo "Created board session"
+    fi
+    ;;
+
+  link)
+    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+      echo "Main session '$SESSION' doesn't exist"
+      exit 1
+    fi
+
+    if ! tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
+      echo "Board session doesn't exist. Creating it..."
+      tmux new-session -d -s "$BOARD_SESSION"
+    fi
+
+    for idx in $(tmux list-windows -t "$SESSION" -F '#{window_index}' | tail -n +2); do
+      tmux link-window -s "$SESSION:$idx" -t "$BOARD_SESSION" 2>/dev/null || true
+    done
+    echo "Linked all Codex windows to board session"
+    ;;
+
+  switch)
+    if ! tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
+      echo "Board session doesn't exist. Create it first with '$(basename "$0") create${SESSION_ARG:+ $SESSION_ARG}'"
+      exit 1
+    fi
+
+    if [ -n "${TMUX:-}" ]; then
+      tmux switch-client -t "$BOARD_SESSION"
+    else
+      tmux attach -t "$BOARD_SESSION"
+    fi
+    ;;
+
+  *)
+    echo "Usage: $(basename "$0") [create|link|switch] [session]"
+    exit 1
+    ;;
 esac

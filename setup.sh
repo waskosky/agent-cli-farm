@@ -75,14 +75,15 @@ install_dependencies
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 shopt -s nullglob
 
-create_claude_wrapper() {
-  local wrapper="$1"
-  local target="${wrapper#claude-}"
+create_tool_wrapper() {
+  local tool="$1"
+  local wrapper="$2"
+  local target="${wrapper#${tool}-}"
   target="codex-$target"
   local dest="$HOME/bin/$wrapper"
   cat > "$dest" <<EOF
 #!/usr/bin/env bash
-CODEX_TOOL_NAME=claude exec "\$(cd "\$(dirname "\$0")" && pwd)/$target" "\$@"
+CODEX_TOOL_NAME=$tool exec "\$(cd "\$(dirname "\$0")" && pwd)/$target" "\$@"
 EOF
   chmod +x "$dest"
 }
@@ -91,7 +92,7 @@ EOF
 echo "Installing helper scripts..."
 mkdir -p "$HOME/bin" "${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
 
-# Copy helper scripts (codex-* plus claude-* wrappers) except removed adopt helpers
+# Copy helper scripts (codex-* plus tool wrappers) except removed adopt helpers
 skipped=()
 copied=()
 missing=()
@@ -99,12 +100,17 @@ scripts_to_copy=( "$SCRIPT_DIR"/bin/codex-* )
 if [ -e "$SCRIPT_DIR/bin/codex-annotator.py" ]; then
   scripts_to_copy+=( "$SCRIPT_DIR/bin/codex-annotator.py" )
 fi
-for wrapper in claude-add claude-annotator claude-board claude-restore claude-resume claude-save claude-status claude-watch; do
-  if [ -e "$SCRIPT_DIR/bin/$wrapper" ]; then
-    scripts_to_copy+=( "$SCRIPT_DIR/bin/$wrapper" )
-  else
-    missing+=("$wrapper")
-  fi
+wrapper_tools=(claude gemini)
+wrapper_suffixes=(add annotator board restore resume save status watch)
+for tool in "${wrapper_tools[@]}"; do
+  for suffix in "${wrapper_suffixes[@]}"; do
+    wrapper="$tool-$suffix"
+    if [ -e "$SCRIPT_DIR/bin/$wrapper" ]; then
+      scripts_to_copy+=( "$SCRIPT_DIR/bin/$wrapper" )
+    else
+      missing+=("$wrapper")
+    fi
+  done
 done
 
 for f in "${scripts_to_copy[@]}"; do
@@ -120,10 +126,10 @@ for f in "${scripts_to_copy[@]}"; do
   copied+=("$base")
 done
 
-# If any claude wrappers were missing from the repo (e.g., older checkout), generate them directly
+# If any tool wrappers were missing from the repo (e.g., older checkout), generate them directly
 if [ ${#missing[@]} -gt 0 ]; then
   for wrapper in "${missing[@]}"; do
-    create_claude_wrapper "$wrapper"
+    create_tool_wrapper "${wrapper%%-*}" "$wrapper"
     copied+=("$wrapper")
   done
   # Clear missing since we've generated them
@@ -250,9 +256,13 @@ fi
 echo ""
 echo "Usage examples (re-run ./setup.sh anytime to update scripts):"
 echo "  codex-add                    # Start Codex in current directory"
+echo "  codex-add work               # Start current directory in the 'work' farm"
+echo "  codex-add work /path/project # Start a project in the 'work' farm"
 echo "  codex-add -d /path/project   # Start without attaching"
 echo "  codex-save                   # Snapshot current windows to manifest"
 echo "  codex-restore -a             # Restore windows and attach"
 echo "  codex-resume                 # Attach/switch to existing session"
+echo "  codex-resume work --board    # Jump to the board for the 'work' farm"
 echo "  codex-watch                  # Watch all Codex logs"
 echo "  claude-add                   # Start Claude in the shared Codex tmux session"
+echo "  gemini-add                   # Start Gemini in the shared Codex tmux session"

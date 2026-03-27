@@ -40,10 +40,12 @@ esac
         make_executable(self.tmpdir / "tmux", tmux_stub)
         make_executable(self.tmpdir / "codex", "#!/usr/bin/env bash\nexit 0\n")
         make_executable(self.tmpdir / "claude", "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(self.tmpdir / "gemini", "#!/usr/bin/env bash\nexit 0\n")
 
         self.env = os.environ.copy()
         self.env["PATH"] = f"{self.tmpdir}:{self.env.get('PATH', '')}"
         self.env["TMUX_LOG"] = str(self.tmux_log)
+        self.env.pop("TMUX", None)
         self.env["XDG_STATE_HOME"] = str(self.tmpdir / "state")
         self.env["XDG_CONFIG_HOME"] = str(self.tmpdir / "config")
         self.env["HOME"] = str(self.tmpdir)
@@ -87,6 +89,44 @@ esac
         new_window = [cmd for cmd in commands if cmd and cmd[0] == "new-window"]
         self.assertEqual(len(new_window), 1)
         self.assertIn("codex --some-flag", " ".join(new_window[0]))
+
+    def test_gemini_add_uses_named_session(self):
+        target_dir = self.tmpdir / "proj-gemini"
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "gemini-add", "work", str(target_dir)],
+            check=True,
+            env=self.env,
+        )
+
+        commands = self.read_tmux_commands()
+        new_window = [cmd for cmd in commands if cmd and cmd[0] == "new-window"]
+        self.assertEqual(len(new_window), 1, f"Unexpected tmux commands: {commands}")
+        self.assertIn("work", new_window[0], "Named farm should be used as session")
+        self.assertIn(
+            "gemini",
+            " ".join(new_window[0]),
+            "gemini wrapper should launch the gemini tool",
+        )
+
+    def test_codex_add_single_named_session_uses_current_directory(self):
+        target_dir = self.tmpdir / "proj-current"
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "work"],
+            check=True,
+            env=self.env,
+            cwd=target_dir,
+        )
+
+        commands = self.read_tmux_commands()
+        new_window = [cmd for cmd in commands if cmd and cmd[0] == "new-window"]
+        self.assertEqual(len(new_window), 1, f"Unexpected tmux commands: {commands}")
+        command = " ".join(new_window[0])
+        self.assertIn("-t work", command)
+        self.assertIn(f"-c {target_dir}", command)
 
     def test_autoservice_choice_persist_no(self):
         target_dir = self.tmpdir / "proj3"
@@ -157,3 +197,98 @@ exit 0
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResumeAndBoardScriptsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="resume-script-test-"))
+        self.tmux_log = self.tmpdir / "tmux.log"
+
+        tmux_stub = """#!/usr/bin/env bash
+set -euo pipefail
+log="${TMUX_LOG}"
+echo "$*" >> "$log"
+existing=" ${TMUX_EXISTING_SESSIONS:-} "
+case "$1" in
+  list-sessions)
+    exit 0
+    ;;
+  has-session)
+    if [[ "$existing" == *" $3 "* ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  list-windows)
+    printf '0\n1\n2\n'
+    exit 0
+    ;;
+  new-window)
+    echo "1"
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"""
+        make_executable(self.tmpdir / "tmux", tmux_stub)
+
+        self.env = os.environ.copy()
+        self.env["PATH"] = f"{self.tmpdir}:{self.env.get('PATH', '')}"
+        self.env["TMUX_LOG"] = str(self.tmux_log)
+        self.env.pop("TMUX", None)
+
+    def read_tmux_commands(self) -> list[list[str]]:
+        lines = self.tmux_log.read_text(encoding="utf-8").splitlines()
+        return [line.split() for line in lines]
+
+    def test_codex_resume_named_farm_attaches_to_that_session(self):
+        env = self.env.copy()
+        env["TMUX_EXISTING_SESSIONS"] = "work"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-resume", "work"],
+            check=True,
+            env=env,
+        )
+
+        commands = self.read_tmux_commands()
+        self.assertIn(["attach", "-t", "work"], commands)
+
+    def test_codex_resume_named_farm_board_attaches_to_derived_board(self):
+        env = self.env.copy()
+        env["TMUX_EXISTING_SESSIONS"] = "work work-board"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-resume", "work", "--board"],
+            check=True,
+            env=env,
+        )
+
+        commands = self.read_tmux_commands()
+        self.assertIn(["attach", "-t", "work-board"], commands)
+
+    def test_codex_board_named_farm_create_uses_derived_board_name(self):
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-board", "create", "work"],
+            check=True,
+            env=self.env,
+        )
+
+        commands = self.read_tmux_commands()
+        self.assertIn(["new-session", "-d", "-s", "work-board"], commands)
+
+    def test_codex_board_named_farm_link_uses_named_main_and_board_sessions(self):
+        env = self.env.copy()
+        env["TMUX_EXISTING_SESSIONS"] = "work work-board"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-board", "link", "work"],
+            check=True,
+            env=env,
+        )
+
+        commands = self.read_tmux_commands()
+        self.assertIn(["list-windows", "-t", "work", "-F", "#{window_index}"], commands)
+        self.assertIn(["link-window", "-s", "work:1", "-t", "work-board"], commands)

@@ -74,6 +74,17 @@ exit 98
         self.assertFalse(self.pkg_log.exists(), "package manager should not be called")
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-add").exists())
 
+    def test_installs_claude_and_gemini_wrappers(self) -> None:
+        make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(self.bin_dir / "multitail", "#!/usr/bin/env bash\nexit 0\n")
+
+        result = self.run_setup()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        home_bin = Path(self.env["HOME"]) / "bin"
+        self.assertTrue((home_bin / "claude-add").exists())
+        self.assertTrue((home_bin / "gemini-add").exists())
+
     def test_continues_when_optional_multitail_install_fails(self) -> None:
         make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
         make_executable(

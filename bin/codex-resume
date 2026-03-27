@@ -2,45 +2,84 @@
 set -euo pipefail
 
 # Resume into an existing tmux session without needing a manifest.
-# Prefers the main Codex session, then the board session, then falls back
-# to the most recently used tmux session.
-#
-# Usage: codex-resume [--board]
-#   --board  Prefer the 'board' session before the main Codex session
+# Usage: codex-resume [session] [--board]
 
+DEFAULT_SESSION="codexfarm"
 PREFER_BOARD=0
+SESSION_ARG=""
+POSITIONALS=()
+
+board_session_name() {
+  local session="$1"
+  if [ "$session" = "$DEFAULT_SESSION" ]; then
+    printf '%s' "board"
+  else
+    printf '%s-board' "$session"
+  fi
+}
+
 while (( "$#" )); do
   case "${1:-}" in
-    -b|--board) PREFER_BOARD=1; shift ;;
+    -b|--board)
+      PREFER_BOARD=1
+      ;;
+    -s|--session)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for $1" >&2
+        exit 2
+      fi
+      SESSION_ARG="$2"
+      shift
+      ;;
     -h|--help)
       cat <<EOF
-Usage: $(basename "$0") [--board]
+Usage: $(basename "$0") [session] [--board]
 
-Resumes an existing tmux session, preferring Codex sessions if present.
-Order: main Codex session -> board -> last/most-recent tmux session.
+Resumes an existing tmux session, preferring the selected farm if present.
+Order: selected farm -> selected board -> last/most-recent tmux session.
 
 Options:
-  -b, --board  Prefer the 'board' session first
-  -h, --help   Show this help
+  -b, --board          Prefer the selected board session first
+  -s, --session NAME   Explicitly choose a farm/session name
+  -h, --help           Show this help
 
-Environment:
-  CODEX_SESSION   Name of main Codex session (default: codexfarm)
+Examples:
+  $(basename "$0")
+  $(basename "$0") work
+  $(basename "$0") work --board
 EOF
       exit 0
       ;;
-    --) shift; break ;;
-    -*) echo "Unknown option: $1" >&2; exit 2 ;;
-    *) break ;;
+    --)
+      shift
+      while (( "$#" )); do
+        POSITIONALS+=("$1")
+        shift
+      done
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      POSITIONALS+=("$1")
+      ;;
   esac
+  shift
 done
+
+if [ -z "$SESSION_ARG" ] && [ ${#POSITIONALS[@]} -gt 0 ]; then
+  SESSION_ARG="${POSITIONALS[0]}"
+fi
 
 if ! command -v tmux >/dev/null; then
   echo "tmux not found" >&2
   exit 127
 fi
 
-SESSION_MAIN="${CODEX_SESSION:-codexfarm}"
-SESSION_BOARD="board"
+SESSION_MAIN="${SESSION_ARG:-${CODEX_SESSION:-$DEFAULT_SESSION}}"
+SESSION_BOARD="$(board_session_name "$SESSION_MAIN")"
 
 inside_tmux=0
 if [ -n "${TMUX:-}" ]; then
@@ -56,15 +95,22 @@ attach_or_switch() {
   fi
 }
 
+attach_if_exists() {
+  local target="$1"
+  if tmux has-session -t "$target" 2>/dev/null; then
+    attach_or_switch "$target"
+    return 0
+  fi
+  return 1
+}
+
 fallback_last() {
   if [ "$inside_tmux" -eq 1 ]; then
-    # Switch to last session if available, otherwise keep current/print status
     if ! tmux switch-client -l 2>/dev/null; then
       echo "No alternate session to switch to (already in the only session)" >&2
       exit 1
     fi
   else
-    # Attach to the most recently used session
     if ! tmux attach 2>/dev/null; then
       echo "No tmux sessions to attach to" >&2
       exit 1
@@ -72,32 +118,17 @@ fallback_last() {
   fi
 }
 
-# If no tmux server, there are no sessions to resume
 if ! tmux list-sessions >/dev/null 2>&1; then
   echo "No tmux server running; nothing to resume" >&2
   exit 1
 fi
 
 if [ "$PREFER_BOARD" -eq 1 ]; then
-  if tmux has-session -t "$SESSION_BOARD" 2>/dev/null; then
-    attach_or_switch "$SESSION_BOARD"
-    exit 0
-  fi
-  if tmux has-session -t "$SESSION_MAIN" 2>/dev/null; then
-    attach_or_switch "$SESSION_MAIN"
-    exit 0
-  fi
+  attach_if_exists "$SESSION_BOARD" && exit 0
+  attach_if_exists "$SESSION_MAIN" && exit 0
 else
-  if tmux has-session -t "$SESSION_MAIN" 2>/dev/null; then
-    attach_or_switch "$SESSION_MAIN"
-    exit 0
-  fi
-  if tmux has-session -t "$SESSION_BOARD" 2>/dev/null; then
-    attach_or_switch "$SESSION_BOARD"
-    exit 0
-  fi
+  attach_if_exists "$SESSION_MAIN" && exit 0
+  attach_if_exists "$SESSION_BOARD" && exit 0
 fi
 
-# Otherwise, fall back to the most recent/last session
 fallback_last
-
