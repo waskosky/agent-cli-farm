@@ -32,6 +32,7 @@ Thumbs.db
 
 # Runtime directories that may be created during testing
 /.local/
+/.worktrees/
 /bin
 !/bin/codex-annotator.py
 /tests
