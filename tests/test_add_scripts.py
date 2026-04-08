@@ -195,6 +195,103 @@ exit 0
         )
 
 
+class RestoreScriptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="restore-script-test-"))
+        self.tmux_log = self.tmpdir / "tmux.log"
+        self.codex_add_log = self.tmpdir / "codex-add.log"
+        self.manifest = self.tmpdir / "manifest.tsv"
+
+        tmux_stub = """#!/usr/bin/env bash
+set -euo pipefail
+log="${TMUX_LOG}"
+echo "$*" >> "$log"
+case "$1" in
+  has-session)
+    exit 1
+    ;;
+  list-windows)
+    if [ -n "${TMUX_WINDOWS_OUTPUT:-}" ]; then
+      printf '%s\n' "${TMUX_WINDOWS_OUTPUT}"
+    fi
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"""
+        codex_add_stub = """#!/usr/bin/env bash
+set -euo pipefail
+echo "$CODEX_NAME|$CODEX_CMD|$CODEX_ARGS|$*" >> "${CODEX_ADD_LOG}"
+exit 0
+"""
+        make_executable(self.tmpdir / "tmux", tmux_stub)
+        make_executable(self.tmpdir / "codex-add", codex_add_stub)
+
+        self.manifest.write_text(
+            "name\tdir\tcmd\targs\nproj\t/tmp/project\tcodex\t\n",
+            encoding="utf-8",
+        )
+
+        self.env = os.environ.copy()
+        self.env["PATH"] = f"{self.tmpdir}:{self.env.get('PATH', '')}"
+        self.env["TMUX_LOG"] = str(self.tmux_log)
+        self.env["CODEX_ADD_LOG"] = str(self.codex_add_log)
+        self.env["CODEX_AUTOSERVICE_CHOICE"] = "no"
+        self.env.pop("TMUX", None)
+        self.env["HOME"] = str(self.tmpdir)
+
+    def read_tmux_commands(self) -> list[list[str]]:
+        lines = self.tmux_log.read_text(encoding="utf-8").splitlines()
+        return [line.split() for line in lines]
+
+    def test_codex_restore_sends_codex_resume_command(self):
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=self.env,
+        )
+
+        commands = self.read_tmux_commands()
+        self.assertIn(
+            ["send-keys", "-t", "codexfarm:proj", "codex", "resume", "--last", "C-m"],
+            commands,
+        )
+
+    def test_codex_restore_sends_claude_continue_command(self):
+        env = self.env.copy()
+        env["CODEX_TOOL_NAME"] = "claude"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        commands = self.read_tmux_commands()
+        self.assertIn(
+            ["send-keys", "-t", "codexfarm:proj", "claude", "--continue", "C-m"],
+            commands,
+        )
+
+    def test_codex_restore_sends_gemini_resume_command(self):
+        env = self.env.copy()
+        env["CODEX_TOOL_NAME"] = "gemini"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        commands = self.read_tmux_commands()
+        self.assertIn(
+            ["send-keys", "-t", "codexfarm:proj", "gemini", "--resume", "latest", "C-m"],
+            commands,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 

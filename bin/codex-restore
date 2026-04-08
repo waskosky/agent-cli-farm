@@ -6,6 +6,29 @@ set -euo pipefail
 #  -a, --attach   Attach/switch to session after restore
 #  -f, --force    Recreate windows if names already exist
 
+script_name=$(basename "${0:-codex-restore}")
+tool_name="${CODEX_TOOL_NAME:-codex}"
+case "$script_name" in
+  claude-restore) tool_name="${CODEX_TOOL_NAME:-claude}" ;;
+  gemini-restore) tool_name="${CODEX_TOOL_NAME:-gemini}" ;;
+esac
+
+send_resume_command() {
+  local session="$1"
+  local window_name="$2"
+  case "$tool_name" in
+    codex)
+      tmux send-keys -t "$session:$window_name" codex resume --last C-m
+      ;;
+    claude)
+      tmux send-keys -t "$session:$window_name" claude --continue C-m
+      ;;
+    gemini)
+      tmux send-keys -t "$session:$window_name" gemini --resume latest C-m
+      ;;
+  esac
+}
+
 attach=0
 force=0
 args_pos=()
@@ -55,6 +78,7 @@ tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" 
   esac
   args=${args:-${CODEX_ARGS:-}}
   CODEX_NAME="$name" CODEX_CMD="$cmd" CODEX_ARGS="$args" codex-add -d "${dir:-$HOME}"
+  send_resume_command "$SESSION" "$name"
 done
 
 if [ "$attach" -eq 1 ]; then
@@ -66,4 +90,3 @@ if [ "$attach" -eq 1 ]; then
 fi
 
 echo "Restore complete from $MANIFEST_PATH"
-

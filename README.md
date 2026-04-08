@@ -81,6 +81,8 @@ codex-restore -a        # recreates and attaches to the session
 ```
 
 Use `-f` to force re-creation of existing-named windows.
+Each restored Codex window also sends `codex resume --last` after the pane is recreated.
+Wrapper restores send the equivalent command for their tool: `claude --continue` or `gemini --resume latest`.
 
 If tmux sessions are already running (no manifest needed):
 ```bash
