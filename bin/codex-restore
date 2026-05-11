@@ -7,26 +7,133 @@ set -euo pipefail
 #  -f, --force    Recreate windows if names already exist
 
 script_name=$(basename "${0:-codex-restore}")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tool_name="${CODEX_TOOL_NAME:-codex}"
 case "$script_name" in
   claude-restore) tool_name="${CODEX_TOOL_NAME:-claude}" ;;
   gemini-restore) tool_name="${CODEX_TOOL_NAME:-gemini}" ;;
 esac
+ADD_BIN="${CODEX_ADD_BIN:-$SCRIPT_DIR/codex-add}"
 
-send_resume_command() {
+trim_command_field() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if [ "${#value}" -ge 2 ]; then
+    case "$value" in
+      \"*\")
+        value="${value%\"}"
+        value="${value#\"}"
+        ;;
+      \'*\')
+        value="${value%\'}"
+        value="${value#\'}"
+        ;;
+    esac
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+  fi
+  printf '%s' "$value"
+}
+
+strip_status_prefix() {
+  local value="$1"
+  case "$value" in
+    "*READY* "*) value="${value#\*READY\* }" ;;
+    "*RUN* "*) value="${value#\*RUN\* }" ;;
+    "*ERR* "*) value="${value#\*ERR\* }" ;;
+  esac
+  printf '%s' "$value"
+}
+
+existing_window_target() {
   local session="$1"
-  local window_name="$2"
-  case "$tool_name" in
-    codex)
-      tmux send-keys -t "$session:$window_name" codex resume --last C-m
-      ;;
-    claude)
-      tmux send-keys -t "$session:$window_name" claude --continue C-m
-      ;;
-    gemini)
-      tmux send-keys -t "$session:$window_name" gemini --resume latest C-m
+  local wanted_name="$2"
+  local line target name base_name
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    if [[ "$line" == *$'\t'* ]]; then
+      target="${line%%$'\t'*}"
+      name="${line#*$'\t'}"
+    else
+      target="$line"
+      name="$line"
+    fi
+    base_name="$(strip_status_prefix "$name")"
+    if [ "$base_name" = "$wanted_name" ]; then
+      printf '%s' "$target"
+      return 0
+    fi
+  done < <(tmux list-windows -t "$session" -F '#{window_id}\t#{window_name}')
+
+  return 1
+}
+
+tool_from_command() {
+  local value
+  value="$(trim_command_field "$1")"
+  local first="${value%%[[:space:]]*}"
+  local base="${first##*/}"
+  case "$base" in
+    codex|claude|gemini)
+      printf '%s' "$base"
+      return 0
       ;;
   esac
+  return 1
+}
+
+command_args_after_tool() {
+  local value
+  value="$(trim_command_field "$1")"
+  local first="${value%%[[:space:]]*}"
+  if [ "$first" = "$value" ]; then
+    return 0
+  fi
+  value="${value#"$first"}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  printf '%s' "$value"
+}
+
+default_resume_args_for_tool() {
+  case "$1" in
+    codex) printf '%s' "resume --last" ;;
+    claude) printf '%s' "--continue" ;;
+    gemini) printf '%s' "--resume latest" ;;
+  esac
+}
+
+normalize_restore_command() {
+  local raw_cmd="$1"
+  local raw_args="$2"
+  local parsed_tool parsed_args
+
+  RESTORE_CMD="$(trim_command_field "${raw_cmd:-}")"
+  RESTORE_ARGS="${raw_args:-}"
+
+  case "$RESTORE_CMD" in
+    sh|bash|zsh|'')
+      RESTORE_CMD="${CODEX_CMD:-$tool_name}"
+      ;;
+  esac
+
+  parsed_tool="$(tool_from_command "$RESTORE_CMD" || true)"
+  if [ -n "$parsed_tool" ]; then
+    parsed_args="$(command_args_after_tool "$RESTORE_CMD")"
+    RESTORE_CMD="$parsed_tool"
+    if [ -z "$RESTORE_ARGS" ]; then
+      RESTORE_ARGS="$parsed_args"
+    fi
+  fi
+
+  if [ -z "$RESTORE_ARGS" ]; then
+    RESTORE_ARGS="$(default_resume_args_for_tool "$RESTORE_CMD")"
+  fi
+
+  if [ -z "$RESTORE_ARGS" ]; then
+    RESTORE_ARGS="${CODEX_ARGS:-}"
+  fi
 }
 
 attach=0
@@ -63,22 +170,17 @@ tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" 
 { read -r _header || true; cat; } < "$MANIFEST_PATH" | while IFS=$'\t' read -r name dir cmd args || [ -n "${name:-}" ]; do
   [ -z "${name:-}" ] && continue
   # Skip if window exists and not forcing
-  if tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -Fxq "$name"; then
+  existing_target="$(existing_window_target "$SESSION" "$name" || true)"
+  if [ -n "$existing_target" ]; then
     if [ "$force" -eq 1 ]; then
-      tmux kill-window -t "$SESSION:$name" || true
+      tmux kill-window -t "$existing_target" || true
     else
       echo "Skipping existing window: $name"
       continue
     fi
   fi
-  # Fallbacks
-  cmd=${cmd:-}
-  case "$cmd" in
-    sh|bash|zsh|'') cmd="${CODEX_CMD:-codex}" ;; 
-  esac
-  args=${args:-${CODEX_ARGS:-}}
-  CODEX_NAME="$name" CODEX_CMD="$cmd" CODEX_ARGS="$args" codex-add -d "${dir:-$HOME}"
-  send_resume_command "$SESSION" "$name"
+  normalize_restore_command "${cmd:-}" "${args:-}"
+  CODEX_NAME="$name" CODEX_CMD="$RESTORE_CMD" CODEX_ARGS="$RESTORE_ARGS" "$ADD_BIN" -d "${dir:-$HOME}"
 done
 
 if [ "$attach" -eq 1 ]; then

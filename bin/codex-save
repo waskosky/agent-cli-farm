@@ -27,6 +27,163 @@ trim_command_field() {
   printf '%s' "$value"
 }
 
+strip_status_prefix() {
+  local value="$1"
+  case "$value" in
+    "*READY* "*) value="${value#\*READY\* }" ;;
+    "*RUN* "*) value="${value#\*RUN\* }" ;;
+    "*ERR* "*) value="${value#\*ERR\* }" ;;
+  esac
+  printf '%s' "$value"
+}
+
+extract_uuid_from_session_path() {
+  local path="$1"
+  local base="${path##*/}"
+  base="${base%.jsonl}"
+  base="${base%.json}"
+  if [[ "$base" =~ ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
+extract_session_id_from_metadata() {
+  local path="$1"
+  local line count=0
+  [ -r "$path" ] || return 1
+
+  while IFS= read -r line && [ "$count" -lt 50 ]; do
+    count=$((count + 1))
+    if [[ "$line" =~ \"sessionId\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done < "$path"
+
+  return 1
+}
+
+session_file_matches_tool() {
+  local tool="$1"
+  local path="$2"
+  case "$tool:$path" in
+    codex:*/.codex/sessions/*.jsonl)
+      return 0
+      ;;
+    claude:*/.claude/projects/*.jsonl)
+      return 0
+      ;;
+    gemini:*/.gemini/*/chats/*.jsonl|gemini:*/.gemini/*/chats/*.json)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+session_id_from_path() {
+  local path="$1"
+  local session_id
+  session_id="$(extract_uuid_from_session_path "$path")"
+  if [ -n "$session_id" ]; then
+    printf '%s' "$session_id"
+    return 0
+  fi
+
+  extract_session_id_from_metadata "$path"
+}
+
+descendant_pids() {
+  local root="$1"
+  local pid child
+  printf '%s\n' "$root"
+
+  command -v pgrep >/dev/null 2>&1 || return 0
+
+  local queue=("$root")
+  local index=0
+  while [ "$index" -lt "${#queue[@]}" ]; do
+    pid="${queue[$index]}"
+    index=$((index + 1))
+    while IFS= read -r child; do
+      [ -z "$child" ] && continue
+      printf '%s\n' "$child"
+      queue+=("$child")
+    done < <(pgrep -P "$pid" 2>/dev/null || true)
+  done
+}
+
+session_id_from_lsof() {
+  local tool="$1"
+  local pane_pid="$2"
+  local pid line path session_id
+  [ -n "$pane_pid" ] || return 1
+  command -v lsof >/dev/null 2>&1 || return 1
+
+  while IFS= read -r pid; do
+    [ -z "$pid" ] && continue
+    while IFS= read -r line; do
+      case "$line" in
+        n*)
+          path="${line#n}"
+          if session_file_matches_tool "$tool" "$path"; then
+            session_id="$(session_id_from_path "$path" || true)"
+            if [ -n "$session_id" ]; then
+              printf '%s' "$session_id"
+              return 0
+            fi
+          fi
+          ;;
+      esac
+    done < <(lsof -Fn -p "$pid" 2>/dev/null || true)
+  done < <(descendant_pids "$pane_pid")
+
+  return 1
+}
+
+tool_from_command() {
+  local value
+  value="$(trim_command_field "$1")"
+  local first="${value%%[[:space:]]*}"
+  local base="${first##*/}"
+  case "$base" in
+    codex|claude|gemini)
+      printf '%s' "$base"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+resume_args_for_pane() {
+  local tool="$1"
+  local pane_pid="$2"
+  local session_id
+  session_id="$(session_id_from_lsof "$tool" "$pane_pid" || true)"
+  case "$tool" in
+    codex)
+      if [ -n "$session_id" ]; then
+        printf 'resume %s' "$session_id"
+      else
+        printf 'resume --last'
+      fi
+      ;;
+    claude)
+      if [ -n "$session_id" ]; then
+        printf -- '--resume %s' "$session_id"
+      else
+        printf -- '--continue'
+      fi
+      ;;
+    gemini)
+      if [ -n "$session_id" ]; then
+        printf -- '--resume %s' "$session_id"
+      else
+        printf -- '--resume latest'
+      fi
+      ;;
+  esac
+}
+
 SESSION="${CODEX_SESSION:-codexfarm}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/codexfarm"
 MANIFEST_DEFAULT="$CONFIG_DIR/manifest.tsv"
@@ -52,17 +209,38 @@ printf 'name\tdir\tcmd\targs\n' > "$tmpfile"
 # Collect windows, skipping the initial 'home' window if present
 while IFS=$'\n' read -r idx; do
   name=$(tmux display-message -p -t "$SESSION:$idx" '#{window_name}')
+  name=$(strip_status_prefix "$name")
   [ "$name" = "home" ] && continue
   # Prefer the first pane's path
   dir=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_current_path}')
   # Best-effort: starting command (may be sh/bash)
   cmd=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_start_command}')
+  pane_pid=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_pid}')
+  args=
+  tool="$(tool_from_command "$cmd" || true)"
+  case "$tool" in
+    codex)
+      cmd="codex"
+      args="$(resume_args_for_pane "$tool" "$pane_pid")"
+      ;;
+    claude)
+      cmd="claude"
+      args="$(resume_args_for_pane "$tool" "$pane_pid")"
+      ;;
+    gemini)
+      cmd="gemini"
+      args="$(resume_args_for_pane "$tool" "$pane_pid")"
+      ;;
+    *)
+      cmd=$(trim_command_field "$cmd")
+      ;;
+  esac
   # Sanitize tabs
   name=${name//$'\t'/ }
   dir=${dir//$'\t'/ }
   cmd=${cmd//$'\t'/ }
-  cmd=$(trim_command_field "$cmd")
-  printf '%s\t%s\t%s\t\n' "$name" "$dir" "$cmd" >> "$tmpfile"
+  args=${args//$'\t'/ }
+  printf '%s\t%s\t%s\t%s\n' "$name" "$dir" "$cmd" "$args" >> "$tmpfile"
 done < <(tmux list-windows -t "$SESSION" -F '#{window_index}')
 
 mv "$tmpfile" "$MANIFEST_PATH"

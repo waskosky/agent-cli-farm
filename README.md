@@ -81,8 +81,7 @@ codex-restore -a        # recreates and attaches to the session
 ```
 
 Use `-f` to force re-creation of existing-named windows.
-Each restored Codex window also sends `codex resume --last` after the pane is recreated.
-Wrapper restores send the equivalent command for their tool: `claude --continue` or `gemini --resume latest`.
+Saved Codex, Claude, and Gemini windows restore with exact session IDs when `codex-save` can read the live session file from the pane's process tree. If the exact session is unavailable, restore falls back by tool: `codex resume --last`, `claude --continue`, or `gemini --resume latest`.
 
 If tmux sessions are already running (no manifest needed):
 ```bash
@@ -102,6 +101,8 @@ You can trigger it directly:
 ```bash
 codex-add --install-autoservice
 ```
+
+The installed units pin the selected tmux farm via `CODEX_SESSION`, so `codex-add --session work --install-autoservice` autosaves and restores the `work` farm.
 
 Set `CODEX_AUTOSERVICE_CHOICE=yes` to auto-accept the prompt, or `no` to suppress it.
 
@@ -160,7 +161,7 @@ Annotator-specific:
 - **`CODEX_ANNOTATOR_CAPTURE_LINES`** - number of lines to capture from panes (default: `200`)
 
 Tool-specific:
-- Use `CLAUDE_*` or `GEMINI_*` versions of the common variables to override just those wrapper commands.
+- `claude-add` and `gemini-add` honor `CLAUDE_*` or `GEMINI_*` versions of the common launch variables. For save/restore/resume/status/watch/board commands, select the farm with `CODEX_SESSION` or the command's positional/`--session` argument where supported.
 
 Example:
 ```bash
@@ -276,6 +277,7 @@ codex-cli-farm/
 
 - Linux or Unix-like system
 - Bash shell
+- `lsof` is optional but recommended so autosaved Codex, Claude, and Gemini windows can record exact resume commands
 - One of: apt, dnf, yum, pacman, or zypper package managers
 - Root access for package installation
   - If you don't have sudo/root, install `tmux` manually and rerun `./setup.sh` to place scripts in `~/bin`.
@@ -285,7 +287,7 @@ codex-cli-farm/
 
 - `tmux` cannot mirror the same live pane in two windows (use linked windows or logs)
 - `pipe-pane` logs only new output after activation
-- Manifest `cmd/args` are best-effort when saving from existing panes; windows created with `codex-add` restore reliably. Use env `CODEX_CMD/CODEX_ARGS` to override.
+- Manifest `cmd/args` are best-effort when saving from existing panes. Exact session IDs are captured from live processes when `lsof` can see the open session file: Codex under `~/.codex/sessions`, Claude under `~/.claude/projects`, and Gemini under a `.gemini/.../chats` directory. Missing IDs fall back to each tool's latest/continue behavior.
 - A single positional argument to `codex-add` is interpreted as a farm name when it does not look like a path. Use `--session NAME` to force farm selection when needed.
 
 ## License

@@ -78,7 +78,7 @@ shopt -s nullglob
 create_tool_wrapper() {
   local tool="$1"
   local wrapper="$2"
-  local target="${wrapper#${tool}-}"
+  local target="${wrapper#"${tool}"-}"
   target="codex-$target"
   local dest="$HOME/bin/$wrapper"
   cat > "$dest" <<EOF
@@ -180,6 +180,7 @@ for rc in "${RC_FILES[@]}"; do
   [ -d "$dir_rc" ] || mkdir -p "$dir_rc"
   if [[ "$rc" == *.fish ]]; then
     # Fish shell syntax
+    # shellcheck disable=SC2016
     if ! grep -qsE '(^|\s)\$HOME/bin(\s|:|$)' "$rc" && ! grep -qsE 'set -gx PATH .*\$HOME/bin' "$rc"; then
       {
         echo ""
@@ -192,6 +193,7 @@ for rc in "${RC_FILES[@]}"; do
   else
     # POSIX-ish shells (bash, zsh, sh, etc.)
     if [ -f "$rc" ]; then
+      # shellcheck disable=SC2016
       if ! grep -qsE '(^|:)\$HOME/bin(:|$)' "$rc" && ! grep -qs 'export PATH="\$HOME/bin:\$PATH"' "$rc"; then
         {
           echo ""

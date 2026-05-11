@@ -150,7 +150,8 @@ done
 # Fix tmux socket directory permissions if needed
 # tmux requires its socket directory to be owned by current user with mode 700
 fix_tmux_socket_dir() {
-    local tmux_dir="/tmp/tmux-$(id -u)"
+    local tmux_dir
+    tmux_dir="/tmp/tmux-$(id -u)"
     if [ -d "$tmux_dir" ]; then
         local owner perms
         # Use a portable stat format across GNU/Linux and macOS/BSD.
@@ -223,6 +224,7 @@ After=tmux.service
 
 [Service]
 Type=oneshot
+Environment=CODEX_SESSION=$SESSION
 ExecStart=$SAVE_BIN
 
 [Install]
@@ -248,6 +250,7 @@ Description=Codex autorestore tmux session on login
 
 [Service]
 Type=oneshot
+Environment=CODEX_SESSION=$SESSION
 ExecStart=$RESTORE_BIN -a
 
 [Install]

@@ -19,7 +19,8 @@ echo "Starting demo with mock Codex instances..."
 echo ""
 
 # Add to PATH for this demo
-export PATH="$(pwd)/bin:$(pwd)/examples:$PATH"
+demo_root="$(pwd)"
+export PATH="$demo_root/bin:$demo_root/examples:$PATH"
 
 # Use mock-codex instead of real codex
 export CODEX_CMD="mock-codex"

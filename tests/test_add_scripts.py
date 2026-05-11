@@ -194,6 +194,162 @@ exit 0
             f"Expected timer-related systemctl calls, got: {systemctl_calls}",
         )
 
+    def test_autoservice_install_pins_selected_session(self):
+        systemctl_log = self.tmpdir / "systemctl-session.log"
+        systemctl_stub = f"""#!/usr/bin/env bash
+echo "$*" >> "{systemctl_log}"
+exit 0
+"""
+        make_executable(self.tmpdir / "systemctl", systemctl_stub)
+
+        env = self.env.copy()
+        env["SYSTEMCTL_BIN"] = str(self.tmpdir / "systemctl")
+
+        subprocess.run(
+            [
+                REPO_ROOT / "bin" / "codex-add",
+                "--install-autoservice",
+                "--session",
+                "work",
+            ],
+            check=True,
+            env=env,
+        )
+
+        systemd_dir = Path(env["XDG_CONFIG_HOME"]) / "systemd" / "user"
+        autosave_content = (systemd_dir / "codex-autosave.service").read_text()
+        autorestore_content = (systemd_dir / "codex-autorestore.service").read_text()
+        self.assertIn("Environment=CODEX_SESSION=work", autosave_content)
+        self.assertIn("Environment=CODEX_SESSION=work", autorestore_content)
+
+
+class SaveScriptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="save-script-test-"))
+        self.manifest = self.tmpdir / "manifest.tsv"
+
+        codex_session_path = (
+            "/home/test/.codex/sessions/2026/05/11/"
+            "rollout-2026-05-11T03-23-27-019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4.jsonl"
+        )
+        claude_session_path = (
+            "/home/test/.claude/projects/-tmp-project/"
+            "54f5b65c-a31c-4aa1-b91b-896b35e2a759.jsonl"
+        )
+        gemini_session_path = (
+            self.tmpdir
+            / ".gemini"
+            / "tmp"
+            / "project-hash"
+            / "chats"
+            / "session-2026-05-11T03-23-27bd36d0.jsonl"
+        )
+        gemini_session_path.parent.mkdir(parents=True)
+        gemini_session_path.write_text(
+            '{"sessionId":"27bd36d0-2977-4cce-9d5d-33764d915f1d","projectHash":"project-hash"}\n',
+            encoding="utf-8",
+        )
+        tmux_stub = """#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  has-session)
+    exit 0
+    ;;
+  list-windows)
+    printf '0\\n1\\n2\\n3\\n'
+    exit 0
+    ;;
+  display-message)
+    target=""
+    format=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) target="$2"; shift 2 ;;
+        -p) shift ;;
+        *) format="$1"; shift ;;
+      esac
+    done
+    case "$target|$format" in
+      codexfarm:0'|#{window_name}') printf '*READY* home\\n' ;;
+      codexfarm:1'|#{window_name}') printf '*RUN* proj\\n' ;;
+      codexfarm:1.0'|#{pane_current_path}') printf '/tmp/project\\n' ;;
+      codexfarm:1.0'|#{pane_start_command}') printf 'codex\\n' ;;
+      codexfarm:1.0'|#{pane_pid}') printf '100\\n' ;;
+      codexfarm:2'|#{window_name}') printf 'claude-proj\\n' ;;
+      codexfarm:2.0'|#{pane_current_path}') printf '/tmp/claude-project\\n' ;;
+      codexfarm:2.0'|#{pane_start_command}') printf 'claude\\n' ;;
+      codexfarm:2.0'|#{pane_pid}') printf '200\\n' ;;
+      codexfarm:3'|#{window_name}') printf 'gemini-proj\\n' ;;
+      codexfarm:3.0'|#{pane_current_path}') printf '/tmp/gemini-project\\n' ;;
+      codexfarm:3.0'|#{pane_start_command}') printf 'gemini\\n' ;;
+      codexfarm:3.0'|#{pane_pid}') printf '300\\n' ;;
+      *) exit 1 ;;
+    esac
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+"""
+        pgrep_stub = """#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "-P" ] && [ "$2" = "100" ]; then
+  printf '101\\n'
+elif [ "$1" = "-P" ] && [ "$2" = "200" ]; then
+  printf '201\\n'
+elif [ "$1" = "-P" ] && [ "$2" = "300" ]; then
+  printf '301\\n'
+fi
+"""
+        lsof_stub = f"""#!/usr/bin/env bash
+set -euo pipefail
+case "$3" in
+  101)
+    printf 'p101\\n'
+    printf 'n{codex_session_path}\\n'
+    ;;
+  201)
+    printf 'p201\\n'
+    printf 'n{claude_session_path}\\n'
+    ;;
+  301)
+    printf 'p301\\n'
+    printf 'n{gemini_session_path}\\n'
+    ;;
+esac
+"""
+        make_executable(self.tmpdir / "tmux", tmux_stub)
+        make_executable(self.tmpdir / "pgrep", pgrep_stub)
+        make_executable(self.tmpdir / "lsof", lsof_stub)
+
+        self.env = os.environ.copy()
+        self.env["PATH"] = f"{self.tmpdir}:{self.env.get('PATH', '')}"
+        self.env["HOME"] = str(self.tmpdir)
+
+    def test_codex_save_records_exact_codex_resume_session_id(self):
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+            check=True,
+            env=self.env,
+        )
+
+        rows = self.manifest.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(rows[0], "name\tdir\tcmd\targs")
+        self.assertEqual(len(rows), 4, "annotated home window should still be skipped")
+        self.assertIn(
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+            rows,
+        )
+        self.assertIn(
+            "claude-proj\t/tmp/claude-project\tclaude\t--resume 54f5b65c-a31c-4aa1-b91b-896b35e2a759",
+            rows,
+        )
+        self.assertIn(
+            "gemini-proj\t/tmp/gemini-project\tgemini\t--resume 27bd36d0-2977-4cce-9d5d-33764d915f1d",
+            rows,
+        )
+
 
 class RestoreScriptTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -230,7 +386,8 @@ exit 0
         make_executable(self.tmpdir / "codex-add", codex_add_stub)
 
         self.manifest.write_text(
-            "name\tdir\tcmd\targs\nproj\t/tmp/project\tcodex\t\n",
+            "name\tdir\tcmd\targs\n"
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4\n",
             encoding="utf-8",
         )
 
@@ -241,27 +398,79 @@ exit 0
         self.env["CODEX_AUTOSERVICE_CHOICE"] = "no"
         self.env.pop("TMUX", None)
         self.env["HOME"] = str(self.tmpdir)
+        self.env["CODEX_ADD_BIN"] = str(self.tmpdir / "codex-add")
 
     def read_tmux_commands(self) -> list[list[str]]:
         lines = self.tmux_log.read_text(encoding="utf-8").splitlines()
         return [line.split() for line in lines]
 
-    def test_codex_restore_sends_codex_resume_command(self):
+    def test_codex_restore_launches_saved_codex_resume_command(self):
         subprocess.run(
             [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
             check=True,
             env=self.env,
         )
 
-        commands = self.read_tmux_commands()
-        self.assertIn(
-            ["send-keys", "-t", "codexfarm:proj", "codex", "resume", "--last", "C-m"],
-            commands,
+        add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            add_calls,
+            [
+                "proj|codex|resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4|-d /tmp/project"
+            ],
+        )
+        self.assertFalse(
+            any(cmd and cmd[0] == "send-keys" for cmd in self.read_tmux_commands()),
+            "restore should launch the resume command instead of typing it into a running CLI",
         )
 
-    def test_codex_restore_sends_claude_continue_command(self):
+    def test_codex_restore_adds_legacy_codex_resume_last(self):
+        self.manifest.write_text(
+            "name\tdir\tcmd\targs\nproj\t/tmp/project\tcodex\t\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=self.env,
+        )
+
+        add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(add_calls, ["proj|codex|resume --last|-d /tmp/project"])
+
+    def test_codex_restore_uses_manifest_tool_for_claude(self):
+        self.manifest.write_text(
+            "name\tdir\tcmd\targs\nproj\t/tmp/project\tclaude\t--continue\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=self.env,
+        )
+
+        add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(add_calls, ["proj|claude|--continue|-d /tmp/project"])
+
+    def test_codex_restore_uses_manifest_tool_for_gemini(self):
+        self.manifest.write_text(
+            "name\tdir\tcmd\targs\nproj\t/tmp/project\tgemini\t--resume latest\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=self.env,
+        )
+
+        add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(add_calls, ["proj|gemini|--resume latest|-d /tmp/project"])
+
+    def test_codex_restore_skips_existing_annotated_window_name(self):
         env = self.env.copy()
-        env["CODEX_TOOL_NAME"] = "claude"
+        env["TMUX_WINDOWS_OUTPUT"] = "@9\t*RUN* proj"
 
         subprocess.run(
             [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
@@ -269,31 +478,12 @@ exit 0
             env=env,
         )
 
-        commands = self.read_tmux_commands()
-        self.assertIn(
-            ["send-keys", "-t", "codexfarm:proj", "claude", "--continue", "C-m"],
-            commands,
+        add_calls = (
+            self.codex_add_log.read_text(encoding="utf-8").splitlines()
+            if self.codex_add_log.exists()
+            else []
         )
-
-    def test_codex_restore_sends_gemini_resume_command(self):
-        env = self.env.copy()
-        env["CODEX_TOOL_NAME"] = "gemini"
-
-        subprocess.run(
-            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
-            check=True,
-            env=env,
-        )
-
-        commands = self.read_tmux_commands()
-        self.assertIn(
-            ["send-keys", "-t", "codexfarm:proj", "gemini", "--resume", "latest", "C-m"],
-            commands,
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertEqual(add_calls, [])
 
 
 class ResumeAndBoardScriptsTests(unittest.TestCase):
@@ -389,3 +579,7 @@ esac
         commands = self.read_tmux_commands()
         self.assertIn(["list-windows", "-t", "work", "-F", "#{window_index}"], commands)
         self.assertIn(["link-window", "-s", "work:1", "-t", "work-board"], commands)
+
+
+if __name__ == "__main__":
+    unittest.main()

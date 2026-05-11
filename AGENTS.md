@@ -6,7 +6,7 @@ Our tmux window READY/RUN/ERR detection mirrors the heuristics used by the **CLI
 Because Codex/Claude CLIs do not emit a structured status channel, we rely on prompt patterns and spinner/selection cues. This document records the CAO source files used so we can re-sync if their logic changes.
 
 ## Reference sources (CAO)
-We based our rules on these files in `~/repos/cli-agent-orchestrator`:
+We based our rules on these files in a local checkout of `cli-agent-orchestrator` when available:
 
 - **Codex provider**: `src/cli_agent_orchestrator/providers/codex.py`
   - Patterns: `IDLE_PROMPT_AT_END_PATTERN`, `WAITING_PROMPT_PATTERN`, `PROCESSING_PATTERN`, `ERROR_PATTERN`
@@ -17,7 +17,7 @@ We based our rules on these files in `~/repos/cli-agent-orchestrator`:
   - Patterns: `PROCESSING_PATTERN`, `WAITING_USER_ANSWER_PATTERN`, `IDLE_PROMPT_PATTERN`
   - Status decisions: `get_status()` around lines ~84-110 (see in repo)
 
-If CAO updates those patterns or ordering, re-check our implementation and update `bin/codex-annotator` accordingly.
+If the local checkout is absent, fetch or inspect the current CAO source before re-syncing these rules. If CAO updates those patterns or ordering, re-check our implementation and update `bin/codex-annotator` accordingly.
 
 ## Our implementation (Codex CLI Farm)
 Current rules live here:
