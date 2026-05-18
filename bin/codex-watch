@@ -7,33 +7,49 @@ set -euo pipefail
 #   - multitail: force multitail
 #   - tail: force simple tail
 
-LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
-mkdir -p "$LOGDIR"
-
-# Find all log files
-shopt -s nullglob
-files=( "$LOGDIR"/*.log )
-
-if [ ${#files[@]} -eq 0 ]; then
-    echo "No logs yet in $LOGDIR"
-    echo "Start some Codex instances with 'codex-add' first"
-    exit 0
-fi
-
+DEFAULT_SESSION="codexfarm"
+SESSION="${CODEX_SESSION:-$DEFAULT_SESSION}"
+STATE_BASENAME="${CODEX_STATE_BASENAME:-codexfarm}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$STATE_BASENAME"
+LOGDIR="$STATE_DIR/logs"
 mode="${CODEX_WATCH_MODE:-auto}"
+show_help=0
 
-# Parse simple flags
 while (( "$#" )); do
   case "${1:-}" in
     -s|--simple) mode="tail"; shift ;;
+    --session)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for $1" >&2
+        exit 2
+      fi
+      SESSION="$2"
+      shift 2
+      ;;
     -m|--mode)
       shift
       mode="${1:-auto}"
       shift || true
       ;;
     -h|--help)
+      show_help=1
+      shift
+      ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
+mkdir -p "$LOGDIR"
+
+# Find all log files
+shopt -s nullglob
+files=( "$LOGDIR"/*.log )
+
+if [ "$show_help" -eq 1 ]; then
       cat <<EOF
-Usage: $(basename "$0") [--simple] [--mode auto|multitail|tail]
+Usage: $(basename "$0") [--session SESSION] [--simple] [--mode auto|multitail|tail]
 
 Watches ${#files[@]} log file(s) in $LOGDIR
 - auto (default): multitail when terminal is big enough, else tail
@@ -41,12 +57,13 @@ Watches ${#files[@]} log file(s) in $LOGDIR
 - multitail: force multitail (may error on very small screens)
 EOF
       exit 0
-      ;;
-    --) shift; break ;;
-    -*) echo "Unknown option: $1" >&2; exit 2 ;;
-    *) break ;;
-  esac
-done
+fi
+
+if [ ${#files[@]} -eq 0 ]; then
+    echo "No logs yet in $LOGDIR"
+    echo "Start some Codex instances with 'codex-add' first"
+    exit 0
+fi
 
 # Offer tmux directions for beginners (interactive only)
 show_tmux_tips() {
@@ -59,7 +76,7 @@ show_tmux_tips() {
   echo ""
   echo "tmux quick guide"
   echo "- Prefix is Ctrl-b (hold Ctrl, press b)"
-  echo "- Detach session: Prefix then d; reattach: tmux attach -t ${CODEX_SESSION:-codexfarm}"
+  echo "- Detach session: Prefix then d; reattach: tmux attach -t ${SESSION}"
   echo "- Switch windows: Prefix + n/p (next/prev), or Prefix + w to choose"
   echo "- Switch panes: Prefix + arrow keys; cycle panes: Prefix + o"
   echo "- Zoom a pane full-screen: Prefix + z"
@@ -76,7 +93,6 @@ show_tmux_tips() {
   echo ""
 }
 
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm"
 OPT_OUT_FILE="$STATE_DIR/no_tips"
 tips_env="${CODEX_TIPS_PROMPT:-}"
 skip_prompt=0

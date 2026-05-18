@@ -33,6 +33,10 @@ STATE_DIR = os.environ.get(
 LOCKFILE = os.environ.get(
     "CODEX_ANNOTATOR_LOCKFILE", os.path.join(STATE_DIR, "codexfarm", "annotator.lock")
 )
+SESSION_REGISTRY = os.environ.get(
+    "CODEX_ANNOTATOR_SESSION_REGISTRY",
+    os.path.join(STATE_DIR, "codexfarm", "managed_sessions"),
+)
 IGNORE_PREFIX = os.environ.get("CODEX_ANNOTATOR_IGNORE_PREFIX", "!")
 
 ANSI_CODE_PATTERN = r"\x1b\[[0-9;]*m"
@@ -333,10 +337,33 @@ def rename_window(window: WindowInfo, *, verbose: bool) -> None:
     run_tmux(["tmux", "rename-window", "-t", window.wid, new_name], verbose=verbose)
 
 
-def should_manage(session: SessionInfo, pattern: re.Pattern) -> bool:
+def registered_sessions() -> set[str]:
+    sessions: set[str] = set()
+    try:
+        with open(SESSION_REGISTRY, encoding="utf-8") as registry:
+            for line in registry:
+                value = line.strip()
+                if not value or value.startswith("#"):
+                    continue
+                if "\t" in value:
+                    value = value.split("\t", 1)[0].strip()
+                if value and value != "session":
+                    sessions.add(strip_status_prefix(value))
+    except FileNotFoundError:
+        return sessions
+    except OSError:
+        return sessions
+    return sessions
+
+
+def should_manage(
+    session: SessionInfo, pattern: re.Pattern, registered: set[str] | None = None
+) -> bool:
     if session.base_name.startswith(IGNORE_PREFIX):
         return False
-    return bool(pattern.search(session.base_name))
+    if pattern.search(session.base_name):
+        return True
+    return session.base_name in (registered or set())
 
 
 def should_manage_window(window: WindowInfo) -> bool:
@@ -347,9 +374,10 @@ def annotate_once(
     session_pattern: re.Pattern, running_pattern: re.Pattern, *, verbose: bool
 ) -> None:
     sessions = list_sessions(verbose=verbose)
+    registered = registered_sessions()
     seen_windows: set[str] = set()
     for session in sessions:
-        if not should_manage(session, session_pattern):
+        if not should_manage(session, session_pattern, registered):
             continue
         windows = list_windows(session, verbose=verbose)
         for window in windows:

@@ -2,11 +2,72 @@
 set -euo pipefail
 
 # List and manage Codex CLI farm sessions
-# Usage: codex-status [sessions|windows|logs]
+# Usage: codex-status [--session SESSION] [sessions|windows|logs]
 
-ACTION="${1:-sessions}"
-SESSION="${CODEX_SESSION:-codexfarm}"
-LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs"
+DEFAULT_SESSION="codexfarm"
+
+board_session_name() {
+    local session="$1"
+    if [ "$session" = "$DEFAULT_SESSION" ]; then
+        printf '%s' "board"
+    else
+        printf '%s-board' "$session"
+    fi
+}
+
+ACTION="sessions"
+SESSION="${CODEX_SESSION:-$DEFAULT_SESSION}"
+action_set=0
+session_set=0
+
+while (( "$#" )); do
+    case "${1:-}" in
+        -s|--session)
+            if [ "$#" -lt 2 ]; then
+                echo "Missing value for $1" >&2
+                exit 2
+            fi
+            SESSION="$2"
+            session_set=1
+            shift 2
+            ;;
+        sessions|windows|logs)
+            ACTION="$1"
+            action_set=1
+            shift
+            ;;
+        -h|--help)
+            ACTION="help"
+            action_set=1
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 2
+            ;;
+        *)
+            if [ "$session_set" -eq 0 ] && [ "$action_set" -eq 0 ]; then
+                SESSION="$1"
+                session_set=1
+            elif [ "$action_set" -eq 0 ]; then
+                ACTION="$1"
+                action_set=1
+            else
+                echo "Unexpected argument: $1" >&2
+                exit 2
+            fi
+            shift
+            ;;
+    esac
+done
+
+BOARD_SESSION="$(board_session_name "$SESSION")"
+STATE_BASENAME="${CODEX_STATE_BASENAME:-codexfarm}"
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/$STATE_BASENAME/logs"
 
 stat_epoch() {
     local path="$1"
@@ -41,10 +102,10 @@ case "$ACTION" in
                 echo "Main Codex session '$SESSION' is not running"
             fi
             
-            if tmux has-session -t board 2>/dev/null; then
-                echo "Board session is running"
+            if tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
+                echo "Board session '$BOARD_SESSION' is running"
             else
-                echo "Board session is not running"
+                echo "Board session '$BOARD_SESSION' is not running"
             fi
         else
             echo "No tmux sessions running"
@@ -75,11 +136,14 @@ case "$ACTION" in
         fi
         ;;
     
-    *)
-        echo "Usage: $(basename "$0") [sessions|windows|logs]"
+    help|*)
+        echo "Usage: $(basename "$0") [--session SESSION] [sessions|windows|logs]"
         echo "  sessions - Show tmux sessions status"
         echo "  windows  - Show Codex windows in main session"
         echo "  logs     - Show log files"
+        if [ "$ACTION" = "help" ]; then
+            exit 0
+        fi
         exit 1
         ;;
 esac

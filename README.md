@@ -73,6 +73,8 @@ Notes:
 Snapshot your current Codex windows:
 ```bash
 codex-save              # writes to ~/.config/codexfarm/manifest.tsv
+CODEX_SESSION=work codex-save
+# writes to ~/.config/codexfarm/manifests/work.tsv
 ```
 
 Restore them later (e.g., after reboot or on SSH login):
@@ -102,7 +104,14 @@ You can trigger it directly:
 codex-add --install-autoservice
 ```
 
-The installed units pin the selected tmux farm via `CODEX_SESSION`, so `codex-add --session work --install-autoservice` autosaves and restores the `work` farm.
+The installed systemd unit names are always the same: `codex-autosave.service`, `codex-autosave.timer`, and `codex-autorestore.service`. Installing autoservice for a named farm adds that farm to `~/.config/codexfarm/farms.tsv`; it does not create a second background service:
+
+```bash
+codex-add --session work --install-autoservice
+codex-add --session personal --install-autoservice
+```
+
+Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session.
 
 Set `CODEX_AUTOSERVICE_CHOICE=yes` to auto-accept the prompt, or `no` to suppress it.
 
@@ -127,7 +136,7 @@ Tuning and controls:
 - **`codex-add [session] [directory]`** - Add a new Codex instance, optionally selecting a named farm
 - **`codex-annotator`** - Annotate tmux window titles with RUN/READY/ERR status
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
-- **`codex-status [sessions|windows|logs]`** - Show status information
+- **`codex-status [--session SESSION] [sessions|windows|logs]`** - Show status information
 - **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
 - **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
 - **`codex-save [manifest]`** - Snapshot current windows to a manifest (TSV)
@@ -156,6 +165,7 @@ Annotator-specific:
 - **`CODEX_ANNOTATOR_ENABLED`** - set to `0` to disable the annotator loop
 - **`CODEX_ANNOTATOR_RUNNING_REGEX`** - regex for pane commands considered RUNNING
 - **`CODEX_ANNOTATOR_SESSION_REGEX`** - regex for sessions to annotate
+- **`CODEX_ANNOTATOR_SESSION_REGISTRY`** - file of additional tmux session names to annotate (default: `${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/managed_sessions`)
 - **`CODEX_ANNOTATOR_INTERVAL`** - polling interval in seconds
 - **`CODEX_ANNOTATOR_IGNORE_PREFIX`** - window/session name prefix to ignore (default: `!`)
 - **`CODEX_ANNOTATOR_CAPTURE_LINES`** - number of lines to capture from panes (default: `200`)
@@ -229,7 +239,7 @@ For named farms, `codex-resume work --board` jumps directly to `work-board`.
 
 ### Log Management
 
-All logs are stored in `${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/logs/` with timestamps:
+All logs are stored in `${XDG_STATE_HOME:-$HOME/.local/state}/${CODEX_STATE_BASENAME:-codexfarm}/logs/` with timestamps:
 
 ```bash
 # View log status

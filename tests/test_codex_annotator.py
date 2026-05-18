@@ -2,6 +2,7 @@ import importlib.machinery
 import importlib.util
 import sys
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -75,6 +76,49 @@ class AnnotatorWindowTests(unittest.TestCase):
                 ["tmux", "rename-window", "-t", "@1", "*RUN* alpha"],
                 ["tmux", "rename-window", "-t", "@2", "*READY* beta"],
             ],
+        )
+
+    def test_annotates_named_farm_from_session_registry(self):
+        annotator = load_annotator_module()
+
+        class RegistryRunTmuxStub:
+            def __init__(self):
+                self.commands = []
+
+            def __call__(self, cmd, *, verbose=False):  # noqa: ARG002
+                self.commands.append(cmd)
+                if cmd == ["tmux", "list-sessions", "-F", "#{session_id}\t#{session_name}"]:
+                    return "$1\tcodexfarm\n$2\twork\n"
+                if cmd[:2] == ["tmux", "list-windows"] and cmd[3] == "$1":
+                    return ""
+                if cmd[:2] == ["tmux", "list-windows"] and cmd[3] == "$2":
+                    return "@10\talpha\n"
+                if cmd[:2] == ["tmux", "list-panes"] and cmd[3] == "@10":
+                    return "%10\tbash\t0\n"
+                if cmd[:2] == ["tmux", "rename-window"]:
+                    return ""
+                raise AssertionError(f"Unexpected tmux command: {cmd}")
+
+        stub = RegistryRunTmuxStub()
+        annotator.run_tmux = stub  # type: ignore[assignment]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "managed_sessions"
+            registry.write_text("work\n", encoding="utf-8")
+            annotator.SESSION_REGISTRY = str(registry)
+
+            annotator.annotate_once(
+                re.compile(r"^codex"),
+                re.compile(r"python"),
+                verbose=False,
+            )
+
+        rename_window_calls = [
+            cmd for cmd in stub.commands if cmd[:2] == ["tmux", "rename-window"]
+        ]
+        self.assertEqual(
+            rename_window_calls,
+            [["tmux", "rename-window", "-t", "@10", "*READY* alpha"]],
         )
 
 

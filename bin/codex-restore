@@ -136,26 +136,100 @@ normalize_restore_command() {
   fi
 }
 
+DEFAULT_SESSION="codexfarm"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/codexfarm"
+AUTOSERVICE_REGISTRY="$CONFIG_DIR/farms.tsv"
+
+safe_name() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+default_manifest_path_for_session() {
+  local session="$1"
+  if [ "$session" = "$DEFAULT_SESSION" ]; then
+    printf '%s/manifest.tsv' "$CONFIG_DIR"
+  else
+    printf '%s/manifests/%s.tsv' "$CONFIG_DIR" "$(safe_name "$session")"
+  fi
+}
+
+attach_to_session() {
+  local session="$1"
+  if [ -n "${TMUX:-}" ]; then
+    tmux switch-client -t "$session"
+  else
+    tmux attach -t "$session"
+  fi
+}
+
+restore_all_registered() {
+  local attach_requested="$1"
+  local force_requested="$2"
+  local session manifest status count first_session
+  status=0
+  count=0
+  first_session=""
+
+  if [ ! -f "$AUTOSERVICE_REGISTRY" ]; then
+    echo "No registered farms found at $AUTOSERVICE_REGISTRY"
+    return 0
+  fi
+
+  while IFS=$'\t' read -r session manifest _rest || [ -n "${session:-}" ]; do
+    case "${session:-}" in
+      ""|"session"|\#*) continue ;;
+    esac
+    if [ -z "$first_session" ]; then
+      first_session="$session"
+    fi
+    if [ -z "${manifest:-}" ]; then
+      manifest="$(default_manifest_path_for_session "$session")"
+    fi
+
+    restore_args=()
+    if [ "$force_requested" -eq 1 ]; then
+      restore_args+=("--force")
+    fi
+    if CODEX_SESSION="$session" "$0" "${restore_args[@]}" "$manifest"; then
+      count=$((count + 1))
+    else
+      status=1
+    fi
+  done < "$AUTOSERVICE_REGISTRY"
+
+  if [ "$attach_requested" -eq 1 ] && [ -n "$first_session" ]; then
+    attach_to_session "$first_session"
+  fi
+  echo "Restored $count registered farm(s)"
+  return "$status"
+}
+
 attach=0
 force=0
+all_registered=0
 args_pos=()
 while (( "$#" )); do
   case "${1:-}" in
     -a|--attach) attach=1; shift ;;
     -f|--force) force=1; shift ;;
+    --all-registered) all_registered=1; shift ;;
     --) shift; while (( "$#" )); do args_pos+=("$1"); shift; done ;;
     -*) echo "Unknown option: $1" >&2; exit 2 ;;
     *) args_pos+=("$1"); shift ;;
   esac
 done
 
-SESSION="${CODEX_SESSION:-codexfarm}"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/codexfarm"
-MANIFEST_PATH="${args_pos[0]:-$CONFIG_DIR/manifest.tsv}"
+SESSION="${CODEX_SESSION:-$DEFAULT_SESSION}"
+MANIFEST_PATH="${args_pos[0]:-$(default_manifest_path_for_session "$SESSION")}"
 
 if ! command -v tmux >/dev/null; then
   echo "tmux not found" >&2
   exit 127
+fi
+
+if [ "$all_registered" -eq 1 ]; then
+  restore_all_registered "$attach" "$force"
+  exit $?
 fi
 
 if [ ! -f "$MANIFEST_PATH" ]; then
@@ -184,11 +258,7 @@ tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" 
 done
 
 if [ "$attach" -eq 1 ]; then
-  if [ -n "${TMUX:-}" ]; then
-    tmux switch-client -t "$SESSION"
-  else
-    tmux attach -t "$SESSION"
-  fi
+  attach_to_session "$SESSION"
 fi
 
 echo "Restore complete from $MANIFEST_PATH"

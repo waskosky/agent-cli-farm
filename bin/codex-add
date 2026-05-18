@@ -42,6 +42,42 @@ board_session_name() {
   fi
 }
 
+safe_name() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+default_manifest_path_for_session() {
+  local session="$1"
+  if [ "$session" = "$DEFAULT_SESSION" ]; then
+    printf '%s/manifest.tsv' "$CONFIG_DIR"
+  else
+    printf '%s/manifests/%s.tsv' "$CONFIG_DIR" "$(safe_name "$session")"
+  fi
+}
+
+register_managed_session() {
+  mkdir -p "$(dirname "$ANNOTATOR_SESSION_REGISTRY")"
+  touch "$ANNOTATOR_SESSION_REGISTRY"
+  if ! grep -Fxq -- "$SESSION" "$ANNOTATOR_SESSION_REGISTRY"; then
+    printf '%s\n' "$SESSION" >> "$ANNOTATOR_SESSION_REGISTRY"
+  fi
+}
+
+register_autoservice_farm() {
+  local manifest tmp
+  manifest="$(default_manifest_path_for_session "$SESSION")"
+  mkdir -p "$CONFIG_DIR" "$(dirname "$manifest")"
+  tmp="$(mktemp)"
+  printf 'session\tmanifest\n' > "$tmp"
+  if [ -f "$AUTOSERVICE_REGISTRY" ]; then
+    awk -F '\t' -v session="$SESSION" \
+      'NF && $1 != "session" && $1 != session { print }' \
+      "$AUTOSERVICE_REGISTRY" >> "$tmp"
+  fi
+  printf '%s\t%s\n' "$SESSION" "$manifest" >> "$tmp"
+  mv "$tmp" "$AUTOSERVICE_REGISTRY"
+}
+
 detach=0
 dir_arg=
 session_arg=
@@ -133,9 +169,12 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$STATE_BASENAME"
 LOGDIR="$STATE_DIR/logs"
 ANNOTATOR_BIN="$(get_env ANNOTATOR_BIN "$(dirname "$0")/codex-annotator")"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+CONFIG_DIR="$CONFIG_HOME/codexfarm"
 SYSTEMD_DIR="$CONFIG_HOME/systemd/user"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 AUTOSERVICE_CHOICE_FILE="$STATE_DIR/autoservice_choice"
+AUTOSERVICE_REGISTRY="$CONFIG_DIR/farms.tsv"
+ANNOTATOR_SESSION_REGISTRY="$STATE_DIR/managed_sessions"
 SAVE_BIN="${CODEX_SAVE_BIN:-$(dirname "$0")/codex-save}"
 RESTORE_BIN="${CODEX_RESTORE_BIN:-$(dirname "$0")/codex-restore}"
 
@@ -216,6 +255,7 @@ show_tmux_tips() {
 }
 
 install_autoservice_units() {
+  register_autoservice_farm
   mkdir -p "$SYSTEMD_DIR"
   cat > "$SYSTEMD_DIR/codex-autosave.service" <<EOF
 [Unit]
@@ -224,8 +264,8 @@ After=tmux.service
 
 [Service]
 Type=oneshot
-Environment=CODEX_SESSION=$SESSION
-ExecStart=$SAVE_BIN
+Environment=XDG_CONFIG_HOME=$CONFIG_HOME
+ExecStart=$SAVE_BIN --all-registered
 
 [Install]
 WantedBy=default.target
@@ -250,8 +290,8 @@ Description=Codex autorestore tmux session on login
 
 [Service]
 Type=oneshot
-Environment=CODEX_SESSION=$SESSION
-ExecStart=$RESTORE_BIN -a
+Environment=XDG_CONFIG_HOME=$CONFIG_HOME
+ExecStart=$RESTORE_BIN --all-registered
 
 [Install]
 WantedBy=default.target
@@ -369,6 +409,7 @@ fi
 tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
 
 # Start annotator after ensuring tmux is available
+register_managed_session
 start_status_annotator
 
 # Create new window and start Codex

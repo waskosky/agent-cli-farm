@@ -109,6 +109,8 @@ esac
             " ".join(new_window[0]),
             "gemini wrapper should launch the gemini tool",
         )
+        registry = Path(self.env["XDG_STATE_HOME"]) / "codexfarm" / "managed_sessions"
+        self.assertEqual(registry.read_text(encoding="utf-8").splitlines(), ["work"])
 
     def test_codex_add_single_named_session_uses_current_directory(self):
         target_dir = self.tmpdir / "proj-current"
@@ -179,10 +181,12 @@ exit 0
         autosave_timer_content = autosave_timer.read_text()
         autorestore_content = autorestore.read_text()
         self.assertIn("codex-save", autosave_content)
+        self.assertIn("--all-registered", autosave_content)
         self.assertIn("ExecStart=", autosave_content)
         self.assertIn("OnCalendar=hourly", autosave_timer_content)
         self.assertIn("Unit=codex-autosave.service", autosave_timer_content)
-        self.assertIn("codex-restore -a", autorestore_content)
+        self.assertIn("codex-restore", autorestore_content)
+        self.assertIn("--all-registered", autorestore_content)
 
         choice_file = Path(env["XDG_STATE_HOME"]) / "codexfarm" / "autoservice_choice"
         self.assertEqual(choice_file.read_text().strip(), "yes")
@@ -194,7 +198,7 @@ exit 0
             f"Expected timer-related systemctl calls, got: {systemctl_calls}",
         )
 
-    def test_autoservice_install_pins_selected_session(self):
+    def test_autoservice_install_registers_multiple_farms_with_single_units(self):
         systemctl_log = self.tmpdir / "systemctl-session.log"
         systemctl_stub = f"""#!/usr/bin/env bash
 echo "$*" >> "{systemctl_log}"
@@ -215,12 +219,47 @@ exit 0
             check=True,
             env=env,
         )
+        subprocess.run(
+            [
+                REPO_ROOT / "bin" / "codex-add",
+                "--install-autoservice",
+                "--session",
+                "personal",
+            ],
+            check=True,
+            env=env,
+        )
 
         systemd_dir = Path(env["XDG_CONFIG_HOME"]) / "systemd" / "user"
         autosave_content = (systemd_dir / "codex-autosave.service").read_text()
         autorestore_content = (systemd_dir / "codex-autorestore.service").read_text()
-        self.assertIn("Environment=CODEX_SESSION=work", autosave_content)
-        self.assertIn("Environment=CODEX_SESSION=work", autorestore_content)
+        self.assertNotIn("Environment=CODEX_SESSION=", autosave_content)
+        self.assertNotIn("Environment=CODEX_SESSION=", autorestore_content)
+        self.assertIn("ExecStart=", autosave_content)
+        self.assertIn("--all-registered", autosave_content)
+        self.assertIn("--all-registered", autorestore_content)
+
+        unit_names = sorted(path.name for path in systemd_dir.glob("codex-auto*"))
+        self.assertEqual(
+            unit_names,
+            [
+                "codex-autorestore.service",
+                "codex-autosave.service",
+                "codex-autosave.timer",
+            ],
+        )
+
+        registry = Path(env["XDG_CONFIG_HOME"]) / "codexfarm" / "farms.tsv"
+        rows = registry.read_text(encoding="utf-8").splitlines()
+        config_dir = Path(env["XDG_CONFIG_HOME"]) / "codexfarm"
+        self.assertEqual(
+            rows,
+            [
+                "session\tmanifest",
+                f"work\t{config_dir / 'manifests' / 'work.tsv'}",
+                f"personal\t{config_dir / 'manifests' / 'personal.tsv'}",
+            ],
+        )
 
 
 class SaveScriptTests(unittest.TestCase):
@@ -270,19 +309,19 @@ case "$1" in
       esac
     done
     case "$target|$format" in
-      codexfarm:0'|#{window_name}') printf '*READY* home\\n' ;;
-      codexfarm:1'|#{window_name}') printf '*RUN* proj\\n' ;;
-      codexfarm:1.0'|#{pane_current_path}') printf '/tmp/project\\n' ;;
-      codexfarm:1.0'|#{pane_start_command}') printf 'codex\\n' ;;
-      codexfarm:1.0'|#{pane_pid}') printf '100\\n' ;;
-      codexfarm:2'|#{window_name}') printf 'claude-proj\\n' ;;
-      codexfarm:2.0'|#{pane_current_path}') printf '/tmp/claude-project\\n' ;;
-      codexfarm:2.0'|#{pane_start_command}') printf 'claude\\n' ;;
-      codexfarm:2.0'|#{pane_pid}') printf '200\\n' ;;
-      codexfarm:3'|#{window_name}') printf 'gemini-proj\\n' ;;
-      codexfarm:3.0'|#{pane_current_path}') printf '/tmp/gemini-project\\n' ;;
-      codexfarm:3.0'|#{pane_start_command}') printf 'gemini\\n' ;;
-      codexfarm:3.0'|#{pane_pid}') printf '300\\n' ;;
+      *:0'|#{window_name}') printf '*READY* home\\n' ;;
+      *:1'|#{window_name}') printf '*RUN* proj\\n' ;;
+      *:1.0'|#{pane_current_path}') printf '/tmp/project\\n' ;;
+      *:1.0'|#{pane_start_command}') printf 'codex\\n' ;;
+      *:1.0'|#{pane_pid}') printf '100\\n' ;;
+      *:2'|#{window_name}') printf 'claude-proj\\n' ;;
+      *:2.0'|#{pane_current_path}') printf '/tmp/claude-project\\n' ;;
+      *:2.0'|#{pane_start_command}') printf 'claude\\n' ;;
+      *:2.0'|#{pane_pid}') printf '200\\n' ;;
+      *:3'|#{window_name}') printf 'gemini-proj\\n' ;;
+      *:3.0'|#{pane_current_path}') printf '/tmp/gemini-project\\n' ;;
+      *:3.0'|#{pane_start_command}') printf 'gemini\\n' ;;
+      *:3.0'|#{pane_pid}') printf '300\\n' ;;
       *) exit 1 ;;
     esac
     exit 0
@@ -326,6 +365,7 @@ esac
         self.env = os.environ.copy()
         self.env["PATH"] = f"{self.tmpdir}:{self.env.get('PATH', '')}"
         self.env["HOME"] = str(self.tmpdir)
+        self.env["XDG_CONFIG_HOME"] = str(self.tmpdir / "config")
 
     def test_codex_save_records_exact_codex_resume_session_id(self):
         subprocess.run(
@@ -347,6 +387,52 @@ esac
         )
         self.assertIn(
             "gemini-proj\t/tmp/gemini-project\tgemini\t--resume 27bd36d0-2977-4cce-9d5d-33764d915f1d",
+            rows,
+        )
+
+    def test_codex_save_named_session_uses_named_manifest_by_default(self):
+        env = self.env.copy()
+        env["CODEX_SESSION"] = "work"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save"],
+            check=True,
+            env=env,
+        )
+
+        manifest = (
+            Path(env["XDG_CONFIG_HOME"])
+            / "codexfarm"
+            / "manifests"
+            / "work.tsv"
+        )
+        rows = manifest.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(rows[0], "name\tdir\tcmd\targs")
+        self.assertIn(
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+            rows,
+        )
+
+    def test_codex_save_all_registered_writes_each_registered_manifest(self):
+        registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm" / "farms.tsv"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        work_manifest = self.tmpdir / "work.tsv"
+        registry.write_text(
+            "session\tmanifest\n"
+            f"work\t{work_manifest}\n",
+            encoding="utf-8",
+        )
+        env = self.env.copy()
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", "--all-registered"],
+            check=True,
+            env=env,
+        )
+
+        rows = work_manifest.read_text(encoding="utf-8").splitlines()
+        self.assertIn(
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
             rows,
         )
 
@@ -398,6 +484,7 @@ exit 0
         self.env["CODEX_AUTOSERVICE_CHOICE"] = "no"
         self.env.pop("TMUX", None)
         self.env["HOME"] = str(self.tmpdir)
+        self.env["XDG_CONFIG_HOME"] = str(self.tmpdir / "config")
         self.env["CODEX_ADD_BIN"] = str(self.tmpdir / "codex-add")
 
     def read_tmux_commands(self) -> list[list[str]]:
@@ -484,6 +571,30 @@ exit 0
             else []
         )
         self.assertEqual(add_calls, [])
+
+    def test_codex_restore_all_registered_restores_each_farm_manifest(self):
+        work_manifest = self.tmpdir / "work.tsv"
+        work_manifest.write_text(
+            "name\tdir\tcmd\targs\n"
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4\n",
+            encoding="utf-8",
+        )
+        registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm" / "farms.tsv"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text(
+            "session\tmanifest\n"
+            f"work\t{work_manifest}\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", "--all-registered"],
+            check=True,
+            env=self.env,
+        )
+
+        commands = self.read_tmux_commands()
+        self.assertIn(["new-session", "-d", "-s", "work", "-n", "home"], commands)
 
 
 class ResumeAndBoardScriptsTests(unittest.TestCase):
@@ -579,6 +690,73 @@ esac
         commands = self.read_tmux_commands()
         self.assertIn(["list-windows", "-t", "work", "-F", "#{window_index}"], commands)
         self.assertIn(["link-window", "-s", "work:1", "-t", "work-board"], commands)
+
+
+class StatusAndWatchScriptsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="status-script-test-"))
+        self.tmux_log = self.tmpdir / "tmux.log"
+        tmux_stub = """#!/usr/bin/env bash
+set -euo pipefail
+log="${TMUX_LOG}"
+echo "$*" >> "$log"
+case "$1" in
+  list-sessions)
+    printf 'work: 1 windows (created Mon May 18 10:00:00 2026)\\n'
+    exit 0
+    ;;
+  has-session)
+    case "$3" in
+      work|work-board) exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"""
+        make_executable(self.tmpdir / "tmux", tmux_stub)
+        self.env = os.environ.copy()
+        self.env["PATH"] = f"{self.tmpdir}:{self.env.get('PATH', '')}"
+        self.env["TMUX_LOG"] = str(self.tmux_log)
+        self.env["XDG_STATE_HOME"] = str(self.tmpdir / "state")
+        self.env["HOME"] = str(self.tmpdir)
+
+    def read_tmux_commands(self) -> list[list[str]]:
+        lines = self.tmux_log.read_text(encoding="utf-8").splitlines()
+        return [line.split() for line in lines]
+
+    def test_codex_status_named_session_uses_derived_board(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-status", "--session", "work", "sessions"],
+            check=True,
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertIn("Main Codex session 'work' is running", result.stdout)
+        self.assertIn("Board session 'work-board' is running", result.stdout)
+        commands = self.read_tmux_commands()
+        self.assertIn(["has-session", "-t", "work-board"], commands)
+
+    def test_codex_watch_honors_state_basename_for_help(self):
+        env = self.env.copy()
+        env["CODEX_STATE_BASENAME"] = "workstate"
+        logdir = Path(env["XDG_STATE_HOME"]) / "workstate" / "logs"
+        logdir.mkdir(parents=True)
+        (logdir / "one.log").write_text("hello\n", encoding="utf-8")
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-watch", "--help"],
+            check=True,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertIn(f"Watches 1 log file(s) in {logdir}", result.stdout)
 
 
 if __name__ == "__main__":
