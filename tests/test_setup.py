@@ -85,23 +85,20 @@ exit 98
         self.assertTrue((home_bin / "claude-add").exists())
         self.assertTrue((home_bin / "gemini-add").exists())
 
-    def test_continues_when_optional_multitail_install_fails(self) -> None:
+    def test_skips_package_manager_when_dependencies_missing(self) -> None:
         make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
         make_executable(
             self.bin_dir / "apt",
             f"""#!/bin/bash
 echo "$*" >> "{self.pkg_log}"
-case "$1" in
-  update) exit 0 ;;
-  install) exit 1 ;;
-  *) exit 0 ;;
-esac
+exit 99
 """,
         )
         make_executable(
             self.bin_dir / "sudo",
-            """#!/bin/bash
-exec "$@"
+            f"""#!/bin/bash
+echo "sudo $*" >> "{self.pkg_log}"
+exit 98
 """,
         )
 
@@ -109,12 +106,15 @@ exec "$@"
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Missing commands: multitail", result.stdout)
-        self.assertIn("Dependency installation did not complete cleanly.", result.stdout)
+        self.assertFalse(self.pkg_log.exists(), "package manager and sudo should not be called")
+        self.assertIn(
+            "Dependency installation skipped; install missing commands separately for full functionality.",
+            result.stdout,
+        )
         self.assertIn(
             "multitail is still missing; codex-watch will fall back to simple tail mode.",
             result.stdout,
         )
-        self.assertIn("install -y multitail", self.pkg_log.read_text(encoding="utf-8"))
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-watch").exists())
 
 

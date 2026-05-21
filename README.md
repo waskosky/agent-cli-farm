@@ -24,12 +24,12 @@ source ./setup.sh
 ```
 
 This will:
-- Install missing `tmux` and `multitail` packages when needed
+- Report missing `tmux` and `multitail` commands without running package-manager installs
 - Create helper scripts in `$HOME/bin/`
 - Set up logging directories
 - Add `$HOME/bin` to your PATH automatically (bash/zsh/fish) and the current session
 
-If `tmux` and `multitail` are already on your `PATH`, the setup script skips package-manager work. If `multitail` is unavailable, `codex-watch` falls back to a simpler `tail` view.
+If `tmux` is unavailable, core tmux commands will not work until you install it. If `multitail` is unavailable, `codex-watch` falls back to a simpler `tail` view.
 
 ### 2. Add Codex, Claude, or Gemini Instances
 
@@ -288,10 +288,8 @@ codex-cli-farm/
 - Linux or Unix-like system
 - Bash shell
 - `lsof` is optional but recommended so autosaved Codex, Claude, and Gemini windows can record exact resume commands
-- One of: apt, dnf, yum, pacman, or zypper package managers
-- Root access for package installation
-  - If you don't have sudo/root, install `tmux` manually and rerun `./setup.sh` to place scripts in `~/bin`.
-  - `multitail` is optional; without it, `codex-watch` uses simple mode automatically.
+- `tmux` installed on `PATH` for the core tmux workflow
+- `multitail` is optional; without it, `codex-watch` uses simple mode automatically.
 
 ## Limitations
 

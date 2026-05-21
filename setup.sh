@@ -12,7 +12,6 @@ have_command() {
 
 install_dependencies() {
   local missing=()
-  local install_failed=0
 
   have_command tmux || missing+=("tmux")
   have_command multitail || missing+=("multitail")
@@ -22,40 +21,8 @@ install_dependencies() {
     return 0
   fi
 
-  echo "Installing dependencies..."
   echo "Missing commands: ${missing[*]}"
-
-  if command -v apt >/dev/null; then
-    if ! sudo apt update; then
-      install_failed=1
-    fi
-    if ! sudo apt install -y "${missing[@]}"; then
-      install_failed=1
-    fi
-  elif command -v dnf >/dev/null; then
-    if ! sudo dnf install -y "${missing[@]}"; then
-      install_failed=1
-    fi
-  elif command -v yum >/dev/null; then
-    if ! sudo yum install -y "${missing[@]}"; then
-      install_failed=1
-    fi
-  elif command -v pacman >/dev/null; then
-    if ! sudo pacman -Sy --noconfirm "${missing[@]}"; then
-      install_failed=1
-    fi
-  elif command -v zypper >/dev/null; then
-    if ! sudo zypper install -y "${missing[@]}"; then
-      install_failed=1
-    fi
-  else
-    install_failed=1
-    echo "No supported package manager found. Please install tmux and multitail manually."
-  fi
-
-  if [ "$install_failed" -eq 1 ]; then
-    echo "Dependency installation did not complete cleanly."
-  fi
+  echo "Dependency installation skipped; install missing commands separately for full functionality."
 
   if have_command tmux; then
     echo "tmux is available."
