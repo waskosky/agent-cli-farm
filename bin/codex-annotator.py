@@ -38,6 +38,7 @@ SESSION_REGISTRY = os.environ.get(
     os.path.join(STATE_DIR, "codexfarm", "managed_sessions"),
 )
 IGNORE_PREFIX = os.environ.get("CODEX_ANNOTATOR_IGNORE_PREFIX", "!")
+MEMORY_FLAG_PATTERN = r"\*[0-9]+(?:\.[0-9]+)?\+MB\*\*"
 
 ANSI_CODE_PATTERN = r"\x1b\[[0-9;]*m"
 CODEX_IDLE_PROMPT_PATTERN = r"(?:\u276f|\u203a|codex>)"
@@ -97,8 +98,18 @@ def log(msg: str, *, verbose: bool) -> None:
 
 
 def strip_status_prefix(name: str) -> str:
-    """Remove existing *RUN*/*READY*/*ERR* prefix to get stable base name."""
-    return re.sub(r"^\*(READY|RUN|ERR)\*\s*", "", name, flags=re.IGNORECASE).strip()
+    """Remove annotator prefixes to get stable base name."""
+    name = re.sub(MEMORY_FLAG_PATTERN, "", name).strip()
+    previous = None
+    while previous != name:
+        previous = name
+        name = re.sub(r"^\*(READY|RUN|ERR)\*\s*", "", name, flags=re.IGNORECASE).strip()
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def memory_flag_prefix(name: str) -> str:
+    match = re.search(MEMORY_FLAG_PATTERN, name)
+    return match.group(0) if match else ""
 
 
 def run_tmux(cmd: List[str], *, verbose: bool) -> Optional[str]:
@@ -326,8 +337,10 @@ def classify_window(
 
 
 def desired_name(item: SessionInfo | WindowInfo) -> str:
-    prefix = f"*{item.state}* "
-    return f"{prefix}{item.base_name}"
+    marker = memory_flag_prefix(item.current_name)
+    marker_prefix = f"{marker} " if marker else ""
+    state_prefix = f"*{item.state}* "
+    return f"{marker_prefix}{state_prefix}{item.base_name}"
 
 
 def rename_window(window: WindowInfo, *, verbose: bool) -> None:

@@ -34,6 +34,7 @@ Thumbs.db
 /.local/
 /.worktrees/
 /bin/*
+!/bin/add_high_memory_warning.sh
 !/bin/codex-*
 !/bin/claude-*
 !/bin/gemini-*

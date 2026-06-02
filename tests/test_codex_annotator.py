@@ -121,6 +121,32 @@ class AnnotatorWindowTests(unittest.TestCase):
             [["tmux", "rename-window", "-t", "@10", "*READY* alpha"]],
         )
 
+    def test_preserves_memory_flag_when_updating_status(self):
+        annotator = load_annotator_module()
+        item = annotator.WindowInfo(
+            sid="$1",
+            wid="@1",
+            current_name="*200+MB** *READY* alpha",
+            base_name=annotator.strip_status_prefix("*200+MB** *READY* alpha"),
+            state="RUN",
+        )
+
+        self.assertEqual(item.base_name, "alpha")
+        self.assertEqual(annotator.desired_name(item), "*200+MB** *RUN* alpha")
+
+    def test_normalizes_memory_flag_after_status_prefix(self):
+        annotator = load_annotator_module()
+        item = annotator.WindowInfo(
+            sid="$1",
+            wid="@1",
+            current_name="*RUN* *512+MB** alpha",
+            base_name=annotator.strip_status_prefix("*RUN* *512+MB** alpha"),
+            state="READY",
+        )
+
+        self.assertEqual(item.base_name, "alpha")
+        self.assertEqual(annotator.desired_name(item), "*512+MB** *READY* alpha")
+
 
 if __name__ == "__main__":
     unittest.main()

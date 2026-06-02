@@ -19,7 +19,7 @@ echo "✅ tmux found"
 # Test script syntax
 echo ""
 echo "Checking script syntax..."
-for script in bin/codex-*; do
+for script in bin/codex-* bin/add_high_memory_warning.sh; do
     shebang="$(head -n 1 "$script")"
     if echo "$shebang" | grep -qE '^#!.*(env[[:space:]]+)?(ba)?sh([[:space:]]|$)'; then
         if bash -n "$script"; then
@@ -46,17 +46,17 @@ done
 
 # Check claude wrapper template for over-escaped quotes
 echo ""
-echo "Testing claude wrapper template..."
-wrapper_line="$(grep -n 'CODEX_TOOL_NAME=claude exec' setup.sh || true)"
+echo "Testing tool wrapper template..."
+wrapper_line="$(grep -nF 'CODEX_TOOL_NAME=$tool exec' setup.sh || true)"
 if [ -z "$wrapper_line" ]; then
-    echo "❌ claude wrapper template not found in setup.sh"
+    echo "❌ tool wrapper template not found in setup.sh"
     exit 1
 fi
 if echo "$wrapper_line" | grep -q '\\\"'; then
     echo "❌ claude wrapper template contains escaped quotes"
     exit 1
 fi
-echo "✅ claude wrapper template uses plain quotes"
+echo "✅ tool wrapper template uses plain quotes"
 
 # Test help messages
 echo ""

@@ -10,6 +10,7 @@ A tmux session manager for running and restoring multiple Codex CLI instances, w
 - **Fast navigation**: Optional "board" session for quick switching between instances
 - **Snapshot/restore**: Save a manifest of windows and restore them later
 - **Status annotations**: *RUN*/*READY*/*ERR* prefixes in tmux window titles (Codex/Claude READY uses prompt parsing)
+- **Memory warnings**: Flag tmux windows whose pane process trees exceed a chosen RSS threshold
 - **Autosave/autorestore (optional)**: Systemd user services to persist sessions across logins
 - **Tool wrappers**: `claude-*` and `gemini-*` commands use the same tmux workflow
 
@@ -121,6 +122,19 @@ Set `CODEX_AUTOSERVICE_CHOICE=yes` to auto-accept the prompt, or `no` to suppres
 
 Important: the **READY status** is best-effort and based on prompt detection. Use it as a signal, not a guarantee.
 
+### Memory Flags
+
+Run `codex-memoryflag` to prefix high-memory tmux windows with a marker such as `*200+MB**`. It scans tmux sockets available to the current user, sums each window's pane process trees by RSS, and renames windows at or above the threshold. Existing memory markers are updated or cleared on each run.
+
+```bash
+codex-memoryflag        # flag windows at 200 MiB and up
+codex-memoryflag 500    # flag windows at 500 MiB and up
+codex-memoryflag 1G     # flag windows at 1024 MiB and up
+codex-memoryflag -n     # dry run
+```
+
+The status annotator preserves memory markers, so a title can read `*200+MB** *RUN* project-name`.
+
 Tuning and controls:
 - Disable autostart: `CODEX_ANNOTATOR_AUTOSTART=0`
 - Disable annotator (if started): `CODEX_ANNOTATOR_ENABLED=0`
@@ -135,6 +149,7 @@ Tuning and controls:
 
 - **`codex-add [session] [directory]`** - Add a new Codex instance, optionally selecting a named farm
 - **`codex-annotator`** - Annotate tmux window titles with RUN/READY/ERR status
+- **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-status [--session SESSION] [sessions|windows|logs]`** - Show status information
 - **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
