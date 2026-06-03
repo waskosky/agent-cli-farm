@@ -90,6 +90,28 @@ esac
         self.assertEqual(len(new_window), 1)
         self.assertIn("codex --some-flag", " ".join(new_window[0]))
 
+    def test_codex_add_allows_native_title_updates_by_default(self):
+        target_dir = self.tmpdir / "proj-native-title"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        env = self.env.copy()
+        env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "-d", str(target_dir)],
+            check=True,
+            env=env,
+        )
+
+        commands = self.read_tmux_commands()
+        title_lock_commands = [
+            cmd
+            for cmd in commands
+            if cmd
+            and cmd[0] in {"set-option", "set-window-option", "rename-window"}
+            and any(value in cmd for value in ["allow-rename", "automatic-rename"])
+        ]
+        self.assertEqual(title_lock_commands, [], f"Unexpected title locks: {commands}")
+
     def test_gemini_add_uses_named_session(self):
         target_dir = self.tmpdir / "proj-gemini"
         target_dir.mkdir(parents=True, exist_ok=True)

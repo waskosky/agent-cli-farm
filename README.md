@@ -9,7 +9,7 @@ A tmux session manager for running and restoring multiple Codex CLI instances, w
 - **Unified monitoring**: Watch all Codex instances from a single consolidated view
 - **Fast navigation**: Optional "board" session for quick switching between instances
 - **Snapshot/restore**: Save a manifest of windows and restore them later
-- **Status annotations**: *RUN*/*READY*/*ERR* prefixes in tmux window titles (Codex/Claude READY uses prompt parsing)
+- **Status updates**: Tracks RUN/READY/ERR in tmux metadata and notifies when a window becomes READY
 - **Memory warnings**: Flag tmux windows whose pane process trees exceed a chosen RSS threshold
 - **Autosave/autorestore (optional)**: Systemd user services to persist sessions across logins
 - **Tool wrappers**: `claude-*` and `gemini-*` commands use the same tmux workflow
@@ -116,11 +116,13 @@ Autosave/autorestore iterates the registry, so each registered farm is saved to 
 
 Set `CODEX_AUTOSERVICE_CHOICE=yes` to auto-accept the prompt, or `no` to suppress it.
 
-## Status Annotations (RUN/READY/ERR)
+## Status Updates (RUN/READY/ERR)
 
-`codex-add` auto-starts `codex-annotator`, which prefixes tmux window titles with *RUN*, *READY*, or *ERR*. For Codex/Claude panes it inspects recent output for prompts/approval selections; other panes fall back to the command-based heuristic.
+`codex-add` auto-starts `codex-annotator`, which tracks RUN, READY, or ERR state in tmux window options. For Codex/Claude panes it inspects recent output for prompts/approval selections; other panes fall back to the command-based heuristic.
 
-Important: the **READY status** is best-effort and based on prompt detection. Use it as a signal, not a guarantee.
+By default, the annotator does not rewrite tmux window titles. That lets Codex's native title animation remain visible while still making `codex-status windows` show state. When a window transitions from RUN to READY, the annotator emits a tmux `display-message` notification.
+
+Important: the **READY status** is best-effort and based on prompt detection. Use it as a signal, not a guarantee. Codex's native title animation is usually the primary visual signal.
 
 ### Memory Flags
 
@@ -133,11 +135,14 @@ codex-memoryflag 1G     # flag windows at 1024 MiB and up
 codex-memoryflag -n     # dry run
 ```
 
-The status annotator preserves memory markers, so a title can read `*200+MB** *RUN* project-name`.
+The status annotator preserves memory markers if legacy title updates are enabled, so a title can read `*200+MB** *RUN* project-name`.
 
 Tuning and controls:
 - Disable autostart: `CODEX_ANNOTATOR_AUTOSTART=0`
 - Disable annotator (if started): `CODEX_ANNOTATOR_ENABLED=0`
+- Re-enable legacy title prefixes: `CODEX_ANNOTATOR_UPDATE_TITLES=1`
+- Disable READY notifications: `CODEX_ANNOTATOR_NOTIFY_READY=0`
+- Customize READY notification text: `CODEX_ANNOTATOR_READY_MESSAGE` (default: `READY: {name}`)
 - Adjust RUN detection: `CODEX_ANNOTATOR_RUNNING_REGEX` (default: `(codex|node|ssh)`)
 - Scope sessions: `CODEX_ANNOTATOR_SESSION_REGEX` (default: `^codex`)
 - Ignore windows/sessions prefixed with `!` (configurable via `CODEX_ANNOTATOR_IGNORE_PREFIX`)
@@ -148,7 +153,7 @@ Tuning and controls:
 ### Core Commands
 
 - **`codex-add [session] [directory]`** - Add a new Codex instance, optionally selecting a named farm
-- **`codex-annotator`** - Annotate tmux window titles with RUN/READY/ERR status
+- **`codex-annotator`** - Track RUN/READY/ERR state and notify when windows become READY
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-status [--session SESSION] [sessions|windows|logs]`** - Show status information
@@ -171,13 +176,16 @@ Common:
 - **`CODEX_ARGS`** - additional arguments for codex
 - **`CODEX_STATE_BASENAME`** - state/log directory base name (default: `codexfarm`)
 - **`CODEX_TIPS_PROMPT`** - show tmux tips prompt: `0` to disable, `1` to force (default respects a persisted opt-out)
-- **`CODEX_LOCK_TITLES`** - set to `0` to let tmux or shell rename windows automatically (default keeps Codex windows named after their directory)
+- **`CODEX_LOCK_TITLES`** - set to `1` to keep Codex windows named after their directory (default `0` lets Codex's native title updates show)
 - **`CODEX_WATCH_MODE`** - `auto` (default), `tail`, or `multitail` to control codex-watch display
 - **`CODEX_AUTOSERVICE_CHOICE`** - `yes` or `no` to persist autoservice choice
 - **`CODEX_ANNOTATOR_AUTOSTART`** - set to `0` to skip starting the annotator
 
 Annotator-specific:
 - **`CODEX_ANNOTATOR_ENABLED`** - set to `0` to disable the annotator loop
+- **`CODEX_ANNOTATOR_UPDATE_TITLES`** - set to `1` to restore legacy `*RUN*`/`*READY*`/`*ERR*` title prefixes
+- **`CODEX_ANNOTATOR_NOTIFY_READY`** - set to `0` to disable tmux messages when a window transitions from RUN to READY
+- **`CODEX_ANNOTATOR_READY_MESSAGE`** - tmux message template for READY notifications; supports `{name}` and `{state}`
 - **`CODEX_ANNOTATOR_RUNNING_REGEX`** - regex for pane commands considered RUNNING
 - **`CODEX_ANNOTATOR_SESSION_REGEX`** - regex for sessions to annotate
 - **`CODEX_ANNOTATOR_SESSION_REGISTRY`** - file of additional tmux session names to annotate (default: `${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/managed_sessions`)
@@ -283,7 +291,7 @@ codex-cli-farm/
 ├── bin/               # Helper scripts
 │   ├── codex-add      # Add new Codex instances
 │   ├── codex-annotator  # Bash wrapper for annotator
-│   ├── codex-annotator.py # Annotate tmux window titles (python)
+│   ├── codex-annotator.py # Track tmux window status and READY notifications
 │   ├── codex-save     # Save manifest of windows
 │   ├── codex-restore  # Restore windows from manifest
 │   ├── codex-watch    # Monitor logs

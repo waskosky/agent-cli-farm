@@ -115,7 +115,15 @@ case "$ACTION" in
     windows)
         echo "=== Codex Windows ==="
         if tmux has-session -t "$SESSION" 2>/dev/null; then
-            tmux list-windows -t "$SESSION" -F "#{window_index}: #{window_name} (#{pane_current_path})"
+            tmux list-windows -t "$SESSION" -F "#{window_index}	#{window_name}	#{pane_current_path}	#{@codex_state}	#{@codex_last_ready}" |
+              while IFS=$'\t' read -r index name path state last_ready; do
+                state="${state:-UNKNOWN}"
+                if [ -n "${last_ready:-}" ]; then
+                    printf '%s: [%s] %s (%s) ready_at=%s\n' "$index" "$state" "$name" "$path" "$last_ready"
+                else
+                    printf '%s: [%s] %s (%s)\n' "$index" "$state" "$name" "$path"
+                fi
+              done
         else
             echo "Main session '$SESSION' is not running"
         fi

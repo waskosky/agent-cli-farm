@@ -47,6 +47,10 @@ class RunTmuxStub:
                 return "%3\tbash\t0\n"
         if cmd[:2] == ["tmux", "rename-window"]:
             return ""
+        if cmd[:2] == ["tmux", "set-window-option"]:
+            return ""
+        if cmd[:2] == ["tmux", "display-message"]:
+            return ""
         raise AssertionError(f"Unexpected tmux command: {cmd}")
 
 
@@ -70,12 +74,80 @@ class AnnotatorWindowTests(unittest.TestCase):
         rename_window_calls = [
             cmd for cmd in stub.commands if cmd[:2] == ["tmux", "rename-window"]
         ]
+        self.assertEqual(rename_window_calls, [], "Titles are not rewritten by default")
+
+        status_updates = [
+            cmd
+            for cmd in stub.commands
+            if cmd[:2] == ["tmux", "set-window-option"]
+            and len(cmd) >= 6
+            and cmd[-2] == annotator.TMUX_STATE_OPTION
+        ]
+        self.assertEqual(
+            status_updates,
+            [
+                ["tmux", "set-window-option", "-q", "-t", "@1", "@codex_state", "RUN"],
+                ["tmux", "set-window-option", "-q", "-t", "@2", "@codex_state", "READY"],
+            ],
+        )
+
+    def test_legacy_title_updates_can_be_enabled(self):
+        annotator = load_annotator_module()
+        stub = RunTmuxStub()
+        annotator.run_tmux = stub  # type: ignore[assignment]
+
+        annotator.annotate_once(
+            re.compile(r"^codex"),
+            re.compile(r"python"),
+            update_titles=True,
+            notify_on_ready=False,
+            verbose=False,
+        )
+
+        rename_window_calls = [
+            cmd for cmd in stub.commands if cmd[:2] == ["tmux", "rename-window"]
+        ]
         self.assertEqual(
             rename_window_calls,
             [
                 ["tmux", "rename-window", "-t", "@1", "*RUN* alpha"],
                 ["tmux", "rename-window", "-t", "@2", "*READY* beta"],
             ],
+        )
+
+    def test_notifies_when_window_transitions_to_ready(self):
+        annotator = load_annotator_module()
+        stub = RunTmuxStub()
+        annotator.run_tmux = stub  # type: ignore[assignment]
+        state_cache = {"@2": "RUN"}
+
+        annotator.annotate_once(
+            re.compile(r"^codex"),
+            re.compile(r"python"),
+            state_cache=state_cache,
+            update_titles=False,
+            notify_on_ready=True,
+            ready_message="{name} is ready",
+            now=1234,
+            verbose=False,
+        )
+
+        self.assertEqual(state_cache["@2"], "READY")
+        self.assertIn(
+            ["tmux", "display-message", "-t", "@2", "beta is ready"],
+            stub.commands,
+        )
+        self.assertIn(
+            [
+                "tmux",
+                "set-window-option",
+                "-q",
+                "-t",
+                "@2",
+                "@codex_last_ready",
+                "1234",
+            ],
+            stub.commands,
         )
 
     def test_annotates_named_farm_from_session_registry(self):
@@ -97,6 +169,10 @@ class AnnotatorWindowTests(unittest.TestCase):
                     return "%10\tbash\t0\n"
                 if cmd[:2] == ["tmux", "rename-window"]:
                     return ""
+                if cmd[:2] == ["tmux", "set-window-option"]:
+                    return ""
+                if cmd[:2] == ["tmux", "display-message"]:
+                    return ""
                 raise AssertionError(f"Unexpected tmux command: {cmd}")
 
         stub = RegistryRunTmuxStub()
@@ -110,6 +186,8 @@ class AnnotatorWindowTests(unittest.TestCase):
             annotator.annotate_once(
                 re.compile(r"^codex"),
                 re.compile(r"python"),
+                update_titles=True,
+                notify_on_ready=False,
                 verbose=False,
             )
 
