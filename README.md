@@ -59,19 +59,17 @@ gemini-add /path/to/project
 
 ### 3. Run Prompt Loopers
 
-Create starter files in the project where an agent should work:
+Create starter files in the project where an agent should work, then follow the printed next steps:
 ```bash
 codex-looper
 ```
 
-On first run, `codex-looper` creates `agent-looper.toml` and `prompts.md` if they are missing, then prints the next commands to try. It does not overwrite existing files. For a guided setup that asks for the default agent, timeout, sleep interval, and prompt text:
+For guided setup:
 ```bash
 codex-looper init --interactive --force
 ```
 
-Interactive setup writes those defaults into `agent-looper.toml`, including `[looper].default_agent`, so later `codex-looper` runs can use your preferred backend without repeating `--agent`.
-
-Edit `prompts.md`; prompts are split on lines containing only `---`. Then run once:
+Run once after editing `prompts.md`:
 ```bash
 codex-looper --once --label repo-smoke
 claude-looper --once --label repo-smoke
@@ -83,9 +81,7 @@ codex-looper --farm-session work --label cleanup-pass --cwd /path/to/project
 claude-looper --farm-session work --label cleanup-pass --cwd /path/to/project
 ```
 
-The looper writes per-prompt logs under `.agent-looper/runs/` in the target project and stops on local timeout, provider rate-limit/backoff wording, overload/timeout signals, or nonzero command exits. Codex and Claude use their noninteractive resume surfaces so prompts inside one sequence share a session; each completed loop starts a fresh session by default. Use `--reuse-session` only when you intentionally want one long-lived session across loops.
-
-`gemini-looper` is installed too, using `gemini -p` as a simple default command template. If your Gemini CLI uses different noninteractive flags or resume behavior, override `[agents.gemini]` in `agent-looper.toml`.
+See [Agent Looper Reference](docs/looper.md) for prompt format, CLI parameters, config defaults, stop conditions, farm integration, and current backend limits.
 
 ### 4. Watch All Instances
 
@@ -187,7 +183,7 @@ Tuning and controls:
 - **`codex-annotator`** - Track RUN/READY/ERR state and notify when windows become READY
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
-- **`codex-looper [init|doctor|run]`** - Run repeated prompt sequences with logs and stop detection
+- **`codex-looper [init|doctor|run]`** - Run repeated prompt sequences with logs and stop detection; see [looper reference](docs/looper.md)
 - **`codex-status [--session SESSION] [sessions|windows|logs]`** - Show status information
 - **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
 - **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
