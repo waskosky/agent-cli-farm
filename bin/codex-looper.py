@@ -365,6 +365,15 @@ async def _terminate_process_group(process: asyncio.subprocess.Process) -> None:
     await process.wait()
 
 
+async def _close_subprocess_transport(process: asyncio.subprocess.Process) -> None:
+    transport = getattr(process, "_transport", None)
+    close = getattr(transport, "close", None)
+    if not callable(close):
+        return
+    close()
+    await asyncio.sleep(0)
+
+
 async def run_command(
     *,
     command: list[str],
@@ -440,6 +449,7 @@ async def run_command(
         if not stop_task.done():
             stop_task.cancel()
             await asyncio.gather(stop_task, return_exceptions=True)
+        await _close_subprocess_transport(process)
 
     result.returncode = process.returncode
     with log_path.open("a", encoding="utf-8") as log_file:

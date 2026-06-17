@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import os
 import shlex
@@ -232,6 +233,72 @@ scan_stdout_for_stop_patterns = true
 
         self.assertEqual(thread.session_id, "thread-abc")
         self.assertIsNotNone(stopped.stop_reason)
+
+    def test_timeout_closes_subprocess_transport(self) -> None:
+        async def exercise() -> tuple[object, object]:
+            stdout = asyncio.StreamReader()
+            stderr = asyncio.StreamReader()
+            stdout.feed_eof()
+            stderr.feed_eof()
+
+            class FakeTransport:
+                def __init__(self) -> None:
+                    self.closed = False
+
+                def close(self) -> None:
+                    self.closed = True
+
+            class FakeProcess:
+                def __init__(self) -> None:
+                    self.pid = 12345
+                    self.returncode = None
+                    self.stdout = stdout
+                    self.stderr = stderr
+                    self._transport = FakeTransport()
+                    self._done = asyncio.Event()
+
+                async def wait(self) -> int:
+                    await self._done.wait()
+                    return int(self.returncode or 0)
+
+            process = FakeProcess()
+            original_create = self.looper.asyncio.create_subprocess_exec
+            original_terminate = self.looper._terminate_process_group
+
+            async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
+                return process
+
+            async def fake_terminate_process_group(fake_process: FakeProcess) -> None:
+                fake_process.returncode = -15
+                fake_process._done.set()
+                await fake_process.wait()
+
+            self.looper.asyncio.create_subprocess_exec = fake_create_subprocess_exec
+            self.looper._terminate_process_group = fake_terminate_process_group
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    result = await self.looper.run_command(
+                        command=["slow-agent"],
+                        cwd=Path(td),
+                        env={},
+                        timeout_seconds=0.01,
+                        log_path=Path(td) / "run.log",
+                        agent_kind="generic",
+                        patterns=[],
+                        scan_stdout=False,
+                        kill_on_stop_pattern=True,
+                    )
+            finally:
+                self.looper.asyncio.create_subprocess_exec = original_create
+                self.looper._terminate_process_group = original_terminate
+
+            return result, process._transport
+
+        result, transport = asyncio.run(exercise())
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.stop_reason, "local timeout after 0.01 seconds")
+        self.assertTrue(transport.closed)
 
 
 class LooperCliTests(unittest.TestCase):

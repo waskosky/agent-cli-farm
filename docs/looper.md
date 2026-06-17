@@ -52,6 +52,8 @@ codex-looper --dry-run --once --label preview
 
 Use `--once` or `--max-loops N` for bounded runs. Without either, the looper repeats until a stop condition occurs.
 
+`--timeout` is a per-prompt wall-clock limit for the local agent process. Short values such as `90` seconds can stop a long Claude/Codex tool call even when the provider is still working; raise it on the command line or in `[looper].timeout_seconds` for heavier prompts.
+
 ## CLI Options
 
 | Option | Default | Purpose |
