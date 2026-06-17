@@ -73,12 +73,18 @@ Run once after editing `prompts.md`:
 ```bash
 codex-looper --once --label repo-smoke
 claude-looper --once --label repo-smoke
+claude-looper --once --label repo-smoke -- --dangerously-skip-permissions
 ```
 
 Run inside a managed farm tmux window:
 ```bash
 codex-looper --farm-session work --label cleanup-pass --cwd /path/to/project
 claude-looper --farm-session work --label cleanup-pass --cwd /path/to/project
+```
+
+Inspect a running looper or agent without attaching:
+```bash
+codex-status --session work activity
 ```
 
 See [Agent Looper Reference](docs/looper.md) for prompt format, CLI parameters, config defaults, stop conditions, farm integration, and current backend limits.
@@ -184,7 +190,7 @@ Tuning and controls:
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-looper [init|doctor|run]`** - Run repeated prompt sequences with logs and stop detection; see [looper reference](docs/looper.md)
-- **`codex-status [--session SESSION] [sessions|windows|logs]`** - Show status information
+- **`codex-status [--session SESSION] [sessions|windows|activity|logs]`** - Show status information
 - **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
 - **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
 - **`codex-save [manifest]`** - Snapshot current windows to a manifest (TSV)
@@ -206,6 +212,7 @@ Common:
 - **`CODEX_TIPS_PROMPT`** - show tmux tips prompt: `0` to disable, `1` to force (default respects a persisted opt-out)
 - **`CODEX_LOCK_TITLES`** - set to `1` to keep Codex windows named after their directory (default `0` lets Codex's native title updates show)
 - **`CODEX_WATCH_MODE`** - `auto` (default), `tail`, or `multitail` to control codex-watch display
+- **`CODEX_STATUS_ACTIVITY_LINES`** - recent pane lines shown by `codex-status activity` (default `8`)
 - **`CODEX_AUTOSERVICE_CHOICE`** - `yes` or `no` to persist autoservice choice
 - **`CODEX_ANNOTATOR_AUTOSTART`** - set to `0` to skip starting the annotator
 - **`CODEX_LOOPER_PYTHON_BIN`** - Python 3.10+ interpreter for `codex-looper` (default `python3`)
@@ -224,6 +231,7 @@ Annotator-specific:
 
 Tool-specific:
 - `claude-add` and `gemini-add` honor `CLAUDE_*` or `GEMINI_*` versions of the common launch variables. For save/restore/resume/status/watch/board commands, select the farm with `CODEX_SESSION` or the command's positional/`--session` argument where supported.
+- `codex-looper` and `claude-looper` pass native agent flags after `--`, for example `claude-looper --once -- --dangerously-skip-permissions`. The Claude flag is spelled `--dangerously-skip-permissions` and should only be used in isolated workspaces where unattended edits are acceptable.
 
 Example:
 ```bash

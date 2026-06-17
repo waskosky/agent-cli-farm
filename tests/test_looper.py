@@ -213,6 +213,23 @@ scan_stdout_for_stop_patterns = true
 
         self.assertIsNone(parsed.stop_reason)
 
+    def test_stop_signal_parsing_ignores_claude_success_result_text(self) -> None:
+        patterns = self.looper.compile_stop_patterns([r"rate[\s_-]*limit"])
+
+        parsed = self.looper.parse_output_line(
+            line=(
+                '{"type":"result","subtype":"success","is_error":false,'
+                '"api_error_status":null,'
+                '"result":"The previous blocker mentioned rate_limit, but this run succeeded."}\n'
+            ),
+            stream="stdout",
+            agent_kind="claude",
+            patterns=patterns,
+            scan_stdout=False,
+        )
+
+        self.assertIsNone(parsed.stop_reason)
+
     def test_stop_signal_parsing_detects_stderr_and_codex_thread_id(self) -> None:
         patterns = self.looper.compile_stop_patterns([r"rate\s*limit"])
 
@@ -331,6 +348,43 @@ class LooperCliTests(unittest.TestCase):
         self.assertIn("agent: codex (codex)", result.stdout)
         self.assertIn("$ codex exec --json hello", result.stdout)
         self.assertIn("dry run complete", result.stdout)
+
+    def test_double_dash_arguments_are_passed_to_builtin_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workdir = Path(td)
+            prompt_file = workdir / "prompts.md"
+            prompt_file.write_text("hello\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "--agent",
+                    "claude",
+                    "--prompt-file",
+                    str(prompt_file),
+                    "--label",
+                    "smoke",
+                    "--once",
+                    "--dry-run",
+                    "--",
+                    "--dangerously-skip-permissions",
+                    "--max-turns",
+                    "20",
+                ],
+                cwd=workdir,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("agent: claude (claude)", result.stdout)
+        self.assertIn(
+            "$ claude -p --output-format stream-json --verbose "
+            "--dangerously-skip-permissions --max-turns 20 --name smoke-loop-0001 hello",
+            result.stdout,
+        )
 
     def test_init_writes_starter_files(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -472,6 +526,52 @@ set -euo pipefail
             self.assertTrue(cmd_line.endswith("codex-looper.py"), cmd_line)
             self.assertIn("--agent codex", args_line)
             self.assertIn("--label sweep", args_line)
+            self.assertNotIn("--farm-session", args_line)
+            self.assertNotIn("--farm-add-bin", args_line)
+
+    def test_farm_session_preserves_agent_passthrough_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmpdir = Path(td)
+            project = tmpdir / "project"
+            project.mkdir()
+            log = tmpdir / "codex-add.log"
+            codex_add = tmpdir / "codex-add"
+            make_executable(
+                codex_add,
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+echo "CODEX_ARGS=${{CODEX_ARGS:-}}" >> {shlex.quote(str(log))}
+""",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "--agent",
+                    "claude",
+                    "--farm-session",
+                    "work",
+                    "--farm-add-bin",
+                    str(codex_add),
+                    "--label",
+                    "sweep",
+                    "--cwd",
+                    str(project),
+                    "--once",
+                    "--",
+                    "--dangerously-skip-permissions",
+                ],
+                cwd=project,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args_line = log.read_text(encoding="utf-8").strip()
+            self.assertIn("--agent claude", args_line)
+            self.assertIn("-- --dangerously-skip-permissions", args_line)
             self.assertNotIn("--farm-session", args_line)
             self.assertNotIn("--farm-add-bin", args_line)
 

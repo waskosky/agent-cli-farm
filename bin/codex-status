@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # List and manage Codex CLI farm sessions
-# Usage: codex-status [--session SESSION] [sessions|windows|logs]
+# Usage: codex-status [--session SESSION] [sessions|windows|activity|logs]
 
 DEFAULT_SESSION="codexfarm"
 
@@ -31,7 +31,7 @@ while (( "$#" )); do
             session_set=1
             shift 2
             ;;
-        sessions|windows|logs)
+        sessions|windows|activity|logs)
             ACTION="$1"
             action_set=1
             shift
@@ -68,6 +68,10 @@ done
 BOARD_SESSION="$(board_session_name "$SESSION")"
 STATE_BASENAME="${CODEX_STATE_BASENAME:-codexfarm}"
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/$STATE_BASENAME/logs"
+ACTIVITY_LINES="${CODEX_STATUS_ACTIVITY_LINES:-8}"
+case "$ACTIVITY_LINES" in
+    ''|*[!0-9]*|0) ACTIVITY_LINES=8 ;;
+esac
 
 stat_epoch() {
     local path="$1"
@@ -128,6 +132,35 @@ case "$ACTION" in
             echo "Main session '$SESSION' is not running"
         fi
         ;;
+
+    activity)
+        echo "=== Agent Activity ==="
+        if tmux has-session -t "$SESSION" 2>/dev/null; then
+            tmux list-windows -t "$SESSION" -F "#{window_id}	#{window_index}	#{window_name}	#{@codex_state}	#{@codex_stop_reason}" |
+              while IFS=$'\t' read -r window_id index name state stop_reason; do
+                state="${state:-UNKNOWN}"
+                pane_line="$(tmux list-panes -t "$window_id" -F "#{pane_id}	#{pane_current_path}	#{pane_current_command}	#{pane_start_command}" 2>/dev/null | head -n 1 || true)"
+                IFS=$'\t' read -r pane_id path pane_command start_command <<< "$pane_line"
+                path="${path:-unknown}"
+                command="${start_command:-${pane_command:-unknown}}"
+
+                printf '%s: [%s] %s (%s)\n' "$index" "$state" "$name" "$path"
+                printf '    command: %s\n' "$command"
+                if [ -n "${stop_reason:-}" ]; then
+                    printf '    stop: %s\n' "$stop_reason"
+                fi
+                if [ -n "${pane_id:-}" ]; then
+                    recent="$(tmux capture-pane -t "$pane_id" -p -S "-$ACTIVITY_LINES" 2>/dev/null || true)"
+                    if [ -n "$recent" ]; then
+                        printf '    recent:\n'
+                        printf '%s\n' "$recent" | sed 's/^/      /'
+                    fi
+                fi
+              done
+        else
+            echo "Main session '$SESSION' is not running"
+        fi
+        ;;
     
     logs)
         echo "=== Log Files ==="
@@ -145,9 +178,10 @@ case "$ACTION" in
         ;;
     
     help|*)
-        echo "Usage: $(basename "$0") [--session SESSION] [sessions|windows|logs]"
+        echo "Usage: $(basename "$0") [--session SESSION] [sessions|windows|activity|logs]"
         echo "  sessions - Show tmux sessions status"
         echo "  windows  - Show Codex windows in main session"
+        echo "  activity - Show window status, command, and recent pane output"
         echo "  logs     - Show log files"
         if [ "$ACTION" = "help" ]; then
             exit 0

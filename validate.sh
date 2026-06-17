@@ -150,6 +150,13 @@ else
     exit 1
 fi
 
+if bin/codex-status activity >/dev/null 2>&1; then
+    echo "✅ codex-status activity works"
+else
+    echo "❌ codex-status activity failed"
+    exit 1
+fi
+
 echo ""
 echo "=== Validation Complete ==="
 echo ""

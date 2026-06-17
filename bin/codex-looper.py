@@ -94,6 +94,7 @@ class RunOptions:
     agent_name: str | None
     config_path: Path
     prompt_file: Path | None = None
+    agent_args: list[str] = field(default_factory=list)
     label: str | None = None
     timeout_seconds: float | None = None
     sleep_seconds: float | None = None
@@ -299,6 +300,14 @@ def parse_output_line(
             if status in {"allowed_warning", "rejected"} or status is None:
                 parsed.stop_reason = f"rate limit event: status={status or 'unknown'}"
                 return parsed
+
+        if (
+            event_type == "result"
+            and subtype == "success"
+            and data.get("is_error") is not True
+            and data.get("api_error_status") in {None, ""}
+        ):
+            return parsed
 
         error_like = (
             event_type == "error"
@@ -523,6 +532,9 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
     if not agent.cwd.exists():
         print(f"agent cwd does not exist: {agent.cwd}", file=sys.stderr)
         return 2
+
+    if options.agent_args:
+        agent = replace(agent, extra_args=[*agent.extra_args, *options.agent_args])
 
     rename_current_window(label)
     set_tmux_window_option(TMUX_STATE_OPTION, "RUN")
@@ -950,7 +962,9 @@ log_dir = ".agent-looper/runs"
 kind = "claude"
 # extra_args are inserted into the built-in Claude Code command templates.
 # Example:
-# extra_args = ["--permission-mode", "auto", "--max-turns", "20"]
+# extra_args = ["--permission-mode", "acceptEdits", "--max-turns", "20"]
+# For isolated unattended sandboxes, Claude also supports:
+# extra_args = ["--dangerously-skip-permissions"]
 extra_args = []
 
 [agents.codex]
@@ -1090,7 +1104,15 @@ def interactive_starter_content() -> tuple[str, str]:
 def clean_farm_args(argv: list[str]) -> list[str]:
     cleaned: list[str] = []
     skip_next = False
+    in_agent_args = False
     for item in argv:
+        if in_agent_args:
+            cleaned.append(item)
+            continue
+        if item == "--":
+            cleaned.append(item)
+            in_agent_args = True
+            continue
         if skip_next:
             skip_next = False
             continue
@@ -1122,6 +1144,13 @@ def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | No
         command.append("-d")
     command.extend([options.farm_session, str(cwd)])
     return subprocess.run(command, env=env, check=False).returncode
+
+
+def split_agent_args(argv: list[str]) -> tuple[list[str], list[str]]:
+    if "--" not in argv:
+        return list(argv), []
+    index = argv.index("--")
+    return argv[:index], argv[index + 1 :]
 
 
 def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | None = None) -> None:
@@ -1156,6 +1185,10 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
     parser.add_argument("--farm-attach", action="store_true", help="attach after launching with --farm-session")
     parser.add_argument("--farm-add-bin", default="codex-add", help="codex-add-compatible launcher")
     parser.add_argument("--version", action="version", version=f"codex-looper {VERSION}")
+    parser.epilog = (
+        "Pass built-in agent arguments after --, for example: "
+        "claude-looper -- --dangerously-skip-permissions"
+    )
 
 
 def resolve_agent_name(
@@ -1171,11 +1204,12 @@ def resolve_agent_name(
     return looper.default_agent or invocation_default or default_agent_from_invocation()
 
 
-def parse_run_options(args: argparse.Namespace) -> RunOptions:
+def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None = None) -> RunOptions:
     return RunOptions(
         agent_name=args.agent,
         config_path=Path(args.config),
         prompt_file=Path(args.prompt_file) if args.prompt_file else None,
+        agent_args=list(agent_args or []),
         label=args.label,
         timeout_seconds=args.timeout,
         sleep_seconds=args.sleep,
@@ -1203,13 +1237,14 @@ def maybe_hold_on_stop(options: RunOptions) -> None:
 
 def run_command_main(argv: list[str] | None = None, *, default_agent: str | None = None) -> int:
     real_argv = list(sys.argv[1:] if argv is None else argv)
+    looper_argv, agent_args = split_agent_args(real_argv)
     parser = argparse.ArgumentParser(
         prog=display_name(),
         description="Loop a coding-agent prompt sequence until timeout, rate-limit, or backoff signals appear.",
     )
     add_run_arguments(parser, default_agent=default_agent)
-    args = parser.parse_args(real_argv)
-    options = parse_run_options(args)
+    args = parser.parse_args(looper_argv)
+    options = parse_run_options(args, agent_args=agent_args)
 
     farm_result = maybe_launch_farm(options, real_argv)
     if farm_result is not None:

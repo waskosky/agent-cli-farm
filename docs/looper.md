@@ -46,6 +46,7 @@ Prompts in one sequence share the same agent session. After a full sequence comp
 ```bash
 codex-looper --once --label smoke
 claude-looper --once --label smoke
+claude-looper --once --label smoke -- --dangerously-skip-permissions
 codex-looper --farm-session work --label cleanup --cwd /path/to/project
 codex-looper --dry-run --once --label preview
 ```
@@ -76,6 +77,12 @@ Use `--once` or `--max-loops N` for bounded runs. Without either, the looper rep
 | `--farm-session NAME` | unset | Launch through `codex-add` into a farm tmux session. |
 | `--farm-attach` | off | Attach after `--farm-session` launch. |
 | `--farm-add-bin PATH` | `codex-add` | Launcher compatible with `codex-add`. |
+| `-- AGENT_ARGS...` | unset | Pass native flags to built-in Codex/Claude command templates. |
+
+Use `--` for one-off agent-native flags. For Claude, the correct spelling is
+`--dangerously-skip-permissions`; local Claude help recommends it only for
+isolated sandboxes. To make it permanent for a project, put the same values in
+`[agents.claude].extra_args`.
 
 ## Config Defaults
 
@@ -133,9 +140,16 @@ Example:
 codex-looper --farm-session work --label cleanup --cwd /path/to/project
 ```
 
+While a looper is running in the farm, inspect recent pane output without
+attaching:
+
+```bash
+codex-status --session work activity
+```
+
 ## Current Limits
 
 - It is a loop runner, not a scheduler, daemon, queue, or web UI.
-- It does not bypass authentication, permissions, sandboxing, or provider limits.
+- It does not bypass authentication, permissions, sandboxing, or provider limits unless you explicitly pass agent-native flags that do so.
 - The Gemini backend is intentionally generic until a stable noninteractive resume interface is confirmed.
 - Use write-enabled agent flags only in repositories, worktrees, containers, or runners where automated edits are acceptable.
