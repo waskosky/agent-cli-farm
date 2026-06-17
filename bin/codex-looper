@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PYTHON_BIN="${CODEX_LOOPER_PYTHON_BIN:-python3}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+CODEX_LOOPER_DISPLAY_NAME="${CODEX_LOOPER_DISPLAY_NAME:-$(basename "$0")}" \
+CODEX_LOOPER_COMMAND="${CODEX_LOOPER_COMMAND:-$SCRIPT_DIR/$(basename "$0")}" \
+exec "$PYTHON_BIN" "$SCRIPT_DIR/codex-looper.py" "$@"

@@ -102,6 +102,7 @@ class PaneInfo:
     pid: str
     current_command: str
     dead: bool
+    start_command: str = ""
 
 
 def log(msg: str, *, verbose: bool) -> None:
@@ -194,7 +195,7 @@ def window_pane_states(wid: str, *, verbose: bool) -> Optional[List[PaneInfo]]:
             "-t",
             wid,
             "-F",
-            "#{pane_id}\t#{pane_current_command}\t#{pane_dead}",
+            "#{pane_id}\t#{pane_current_command}\t#{pane_dead}\t#{pane_start_command}",
         ],
         verbose=verbose,
     )
@@ -204,12 +205,18 @@ def window_pane_states(wid: str, *, verbose: bool) -> Optional[List[PaneInfo]]:
     for line in output.splitlines():
         if line.count("\t") < 2:
             continue
-        pid, cmd, dead = line.split("\t", 2)
+        parts = line.split("\t", 3)
+        if len(parts) == 3:
+            pid, cmd, dead = parts
+            start_command = cmd
+        else:
+            pid, cmd, dead, start_command = parts
         panes.append(
             PaneInfo(
                 pid=pid.strip(),
                 current_command=cmd.strip(),
                 dead=dead.strip() in {"1", "true", "True"},
+                start_command=start_command.strip(),
             )
         )
     return panes
@@ -241,6 +248,16 @@ def is_codex_command(cmd: str) -> bool:
 
 def is_claude_command(cmd: str) -> bool:
     return bool(re.search(r"\bclaude\b", cmd, re.IGNORECASE))
+
+
+def is_looper_command(cmd: str) -> bool:
+    return bool(
+        re.search(
+            r"(^|[/\s])(?:codex|claude|gemini)-looper(?:\.py)?(\s|$)",
+            cmd,
+            re.IGNORECASE,
+        )
+    )
 
 
 def classify_codex_output(output: Optional[str]) -> str:
@@ -322,6 +339,8 @@ def classify_pane(
 ) -> Optional[str]:
     if pane.dead:
         return None
+    if is_looper_command(pane.current_command) or is_looper_command(pane.start_command):
+        return "RUN"
     if is_codex_command(pane.current_command):
         output = capture_pane_output(pane.pid, verbose=verbose)
         return classify_codex_output(output)

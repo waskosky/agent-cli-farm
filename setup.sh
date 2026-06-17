@@ -68,7 +68,7 @@ if [ -e "$SCRIPT_DIR/bin/codex-annotator.py" ]; then
   scripts_to_copy+=( "$SCRIPT_DIR/bin/codex-annotator.py" )
 fi
 wrapper_tools=(claude gemini)
-wrapper_suffixes=(add annotator board restore resume save status watch)
+wrapper_suffixes=(add annotator board restore resume save status watch looper)
 for tool in "${wrapper_tools[@]}"; do
   for suffix in "${wrapper_suffixes[@]}"; do
     wrapper="$tool-$suffix"
@@ -235,5 +235,7 @@ echo "  codex-resume work --board    # Jump to the board for the 'work' farm"
 echo "  codex-memoryflag             # Flag tmux windows using 200 MiB RSS or more"
 echo "  codex-memoryflag 500         # Flag tmux windows using 500 MiB RSS or more"
 echo "  codex-watch                  # Watch all Codex logs"
+echo "  codex-looper init            # Create starter prompt loop files"
+echo "  codex-looper --farm-session work --label sweep --cwd /path/project"
 echo "  claude-add                   # Start Claude in the shared Codex tmux session"
 echo "  gemini-add                   # Start Gemini in the shared Codex tmux session"

@@ -2,6 +2,7 @@
 
 # Temporary files
 /tmp/
+/temp/
 *.tmp
 *.temp
 __pycache__/
@@ -32,6 +33,7 @@ Thumbs.db
 
 # Runtime directories that may be created during testing
 /.local/
+/.agent-looper/runs/
 /.worktrees/
 /bin/*
 !/bin/add_high_memory_warning.sh
@@ -44,3 +46,4 @@ Thumbs.db
 !/tests/test_add_scripts.py
 !/tests/test_claude_wrappers.py
 !/tests/test_codex_annotator.py
+!/tests/test_looper.py

@@ -55,6 +55,19 @@ class AnnotatorStatusTests(unittest.TestCase):
         states = ["READY", "RUN", "READY"]
         self.assertEqual(self.mod.aggregate_window_state(states), "RUN")
 
+    def test_looper_start_command_is_running(self):
+        pane = self.mod.PaneInfo(
+            pid="%1",
+            current_command="python3",
+            start_command="/home/me/bin/codex-looper.py --agent codex",
+            dead=False,
+        )
+
+        self.assertEqual(
+            self.mod.classify_pane(pane, self.mod.re.compile(r"node"), verbose=False),
+            "RUN",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

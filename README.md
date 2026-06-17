@@ -12,6 +12,7 @@ A tmux session manager for running and restoring multiple Codex CLI instances, w
 - **Status updates**: Tracks RUN/READY/ERR in tmux metadata and notifies when a window becomes READY
 - **Memory warnings**: Flag tmux windows whose pane process trees exceed a chosen RSS threshold
 - **Autosave/autorestore (optional)**: Systemd user services to persist sessions across logins
+- **Prompt loopers**: Run repeated file-backed prompt sequences with timeout and rate-limit stop detection
 - **Tool wrappers**: `claude-*` and `gemini-*` commands use the same tmux workflow
 
 ## Quick Start
@@ -56,7 +57,30 @@ claude-add /path/to/project
 gemini-add /path/to/project
 ```
 
-### 3. Watch All Instances
+### 3. Run Prompt Loopers
+
+Create starter files in the project where an agent should work:
+```bash
+codex-looper init
+```
+
+Edit `prompts.md`; prompts are split on lines containing only `---`. Then run once:
+```bash
+codex-looper --once --label repo-smoke
+claude-looper --once --label repo-smoke
+```
+
+Run inside a managed farm tmux window:
+```bash
+codex-looper --farm-session work --label cleanup-pass --cwd /path/to/project
+claude-looper --farm-session work --label cleanup-pass --cwd /path/to/project
+```
+
+The looper writes per-prompt logs under `.agent-looper/runs/` in the target project and stops on local timeout, provider rate-limit/backoff wording, overload/timeout signals, or nonzero command exits. Codex and Claude use their noninteractive resume surfaces so prompts inside one sequence share a session; each completed loop starts a fresh session by default. Use `--reuse-session` only when you intentionally want one long-lived session across loops.
+
+`gemini-looper` is installed too, using `gemini -p` as a simple default command template. If your Gemini CLI uses different noninteractive flags or resume behavior, override `[agents.gemini]` in `agent-looper.toml`.
+
+### 4. Watch All Instances
 
 Monitor all Codex logs in real-time:
 ```bash
@@ -69,7 +93,7 @@ Notes:
 - Force full mode: `codex-watch --mode multitail`.
 - First run shows an optional tmux tips prompt; choose Yes to see basics. Answer "Don't show again" to persist your preference. Re-enable temporarily with `CODEX_TIPS_PROMPT=1` or permanently by removing `~/.local/state/codexfarm/no_tips`.
 
-### 4. Save/Restore or Resume
+### 5. Save/Restore or Resume
 
 Snapshot your current Codex windows:
 ```bash
@@ -96,7 +120,7 @@ Flags:
 - `--board` to prefer the board session first.
 - `--session NAME` to force a specific farm when a positional argument would be ambiguous.
 
-### 5. (Optional) Enable Autosave/Autorestore
+### 6. (Optional) Enable Autosave/Autorestore
 
 `codex-add` can install systemd user services to autosave hourly and restore on login.
 You can trigger it directly:
@@ -156,6 +180,7 @@ Tuning and controls:
 - **`codex-annotator`** - Track RUN/READY/ERR state and notify when windows become READY
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
+- **`codex-looper [init|doctor|run]`** - Run repeated prompt sequences with logs and stop detection
 - **`codex-status [--session SESSION] [sessions|windows|logs]`** - Show status information
 - **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
 - **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
@@ -165,7 +190,7 @@ Tuning and controls:
 ### Claude and Gemini Wrappers
 
 Claude and Gemini equivalents use the same tmux workflow and accept the same flags:
-`claude-add`, `claude-annotator`, `claude-board`, `claude-restore`, `claude-resume`, `claude-save`, `claude-status`, `claude-watch`, `gemini-add`, `gemini-annotator`, `gemini-board`, `gemini-restore`, `gemini-resume`, `gemini-save`, `gemini-status`, `gemini-watch`.
+`claude-add`, `claude-annotator`, `claude-board`, `claude-looper`, `claude-restore`, `claude-resume`, `claude-save`, `claude-status`, `claude-watch`, `gemini-add`, `gemini-annotator`, `gemini-board`, `gemini-looper`, `gemini-restore`, `gemini-resume`, `gemini-save`, `gemini-status`, `gemini-watch`.
 
 ## Environment Variables
 
@@ -180,6 +205,7 @@ Common:
 - **`CODEX_WATCH_MODE`** - `auto` (default), `tail`, or `multitail` to control codex-watch display
 - **`CODEX_AUTOSERVICE_CHOICE`** - `yes` or `no` to persist autoservice choice
 - **`CODEX_ANNOTATOR_AUTOSTART`** - set to `0` to skip starting the annotator
+- **`CODEX_LOOPER_PYTHON_BIN`** - Python interpreter for `codex-looper` (default `python3`)
 
 Annotator-specific:
 - **`CODEX_ANNOTATOR_ENABLED`** - set to `0` to disable the annotator loop

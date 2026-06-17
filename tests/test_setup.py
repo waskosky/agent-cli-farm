@@ -73,6 +73,7 @@ exit 98
         )
         self.assertFalse(self.pkg_log.exists(), "package manager should not be called")
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-add").exists())
+        self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-looper").exists())
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-memoryflag").exists())
         self.assertTrue(
             (Path(self.env["HOME"]) / "bin" / "add_high_memory_warning.sh").exists()
@@ -87,7 +88,9 @@ exit 98
         self.assertEqual(result.returncode, 0, result.stderr)
         home_bin = Path(self.env["HOME"]) / "bin"
         self.assertTrue((home_bin / "claude-add").exists())
+        self.assertTrue((home_bin / "claude-looper").exists())
         self.assertTrue((home_bin / "gemini-add").exists())
+        self.assertTrue((home_bin / "gemini-looper").exists())
 
     def test_skips_package_manager_when_dependencies_missing(self) -> None:
         make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
