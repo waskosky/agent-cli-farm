@@ -208,7 +208,7 @@ Common:
 - **`CODEX_WATCH_MODE`** - `auto` (default), `tail`, or `multitail` to control codex-watch display
 - **`CODEX_AUTOSERVICE_CHOICE`** - `yes` or `no` to persist autoservice choice
 - **`CODEX_ANNOTATOR_AUTOSTART`** - set to `0` to skip starting the annotator
-- **`CODEX_LOOPER_PYTHON_BIN`** - Python interpreter for `codex-looper` (default `python3`)
+- **`CODEX_LOOPER_PYTHON_BIN`** - Python 3.10+ interpreter for `codex-looper` (default `python3`)
 
 Annotator-specific:
 - **`CODEX_ANNOTATOR_ENABLED`** - set to `0` to disable the annotator loop

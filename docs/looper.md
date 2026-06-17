@@ -2,6 +2,8 @@
 
 `codex-looper`, `claude-looper`, and `gemini-looper` run a file-backed sequence of prompts against local agent CLIs. They are meant for bounded, inspectable automation inside a project or a Codex CLI Farm tmux window.
 
+Runtime requirement: Python 3.10 or newer. On Python 3.11+, the standard library TOML parser is used; on Python 3.10, the looper uses its built-in parser for the supported `agent-looper.toml` schema documented below.
+
 ## First Run
 
 From the repository where the agent should work:

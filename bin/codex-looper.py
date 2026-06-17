@@ -615,6 +615,183 @@ def run_loop_sync(*, agent: AgentConfig, looper: LooperConfig, options: RunOptio
     return asyncio.run(run_loop(agent=agent, looper=looper, options=options))
 
 
+def _strip_toml_comment(line: str) -> str:
+    quote = ""
+    escaped = False
+    for index, char in enumerate(line):
+        if quote:
+            if quote == '"' and escaped:
+                escaped = False
+            elif quote == '"' and char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {'"', "'"}:
+            quote = char
+        elif char == "#":
+            return line[:index].strip()
+    return line.strip()
+
+
+def _split_toml_assignment(text: str, *, line_no: int) -> tuple[str, str]:
+    quote = ""
+    escaped = False
+    depth = 0
+    for index, char in enumerate(text):
+        if quote:
+            if quote == '"' and escaped:
+                escaped = False
+            elif quote == '"' and char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {'"', "'"}:
+            quote = char
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+        elif char == "=" and depth == 0:
+            return text[:index].strip(), text[index + 1 :].strip()
+    raise ConfigError(f"expected key = value on TOML line {line_no}")
+
+
+def _split_toml_items(text: str, *, line_no: int) -> list[str]:
+    items: list[str] = []
+    quote = ""
+    escaped = False
+    depth = 0
+    start = 0
+    for index, char in enumerate(text):
+        if quote:
+            if quote == '"' and escaped:
+                escaped = False
+            elif quote == '"' and char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {'"', "'"}:
+            quote = char
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+            if depth < 0:
+                raise ConfigError(f"unbalanced TOML value on line {line_no}")
+        elif char == "," and depth == 0:
+            items.append(text[start:index].strip())
+            start = index + 1
+    if quote or depth != 0:
+        raise ConfigError(f"unbalanced TOML value on line {line_no}")
+    tail = text[start:].strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def _parse_basic_toml_key(text: str, *, line_no: int) -> str:
+    key = text.strip()
+    if not key:
+        raise ConfigError(f"empty TOML key on line {line_no}")
+    if key.startswith('"') or key.startswith("'"):
+        value = _parse_basic_toml_value(key, line_no=line_no)
+        if not isinstance(value, str):
+            raise ConfigError(f"TOML key must be a string on line {line_no}")
+        return value
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", key):
+        raise ConfigError(f"unsupported TOML key {key!r} on line {line_no}")
+    return key
+
+
+def _parse_basic_toml_value(text: str, *, line_no: int) -> Any:
+    value = text.strip()
+    if not value:
+        raise ConfigError(f"empty TOML value on line {line_no}")
+    if value.startswith('"'):
+        decoder = json.JSONDecoder()
+        try:
+            decoded, end = decoder.raw_decode(value)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"invalid TOML string on line {line_no}: {exc.msg}") from exc
+        if value[end:].strip():
+            raise ConfigError(f"unexpected TOML text after string on line {line_no}")
+        if not isinstance(decoded, str):
+            raise ConfigError(f"TOML string expected on line {line_no}")
+        return decoded
+    if value.startswith("'"):
+        if len(value) < 2 or not value.endswith("'"):
+            raise ConfigError(f"invalid TOML literal string on line {line_no}")
+        return value[1:-1]
+    if value.startswith("["):
+        if not value.endswith("]"):
+            raise ConfigError(f"invalid TOML array on line {line_no}")
+        body = value[1:-1].strip()
+        if not body:
+            return []
+        return [
+            _parse_basic_toml_value(item, line_no=line_no)
+            for item in _split_toml_items(body, line_no=line_no)
+        ]
+    if value.startswith("{"):
+        if not value.endswith("}"):
+            raise ConfigError(f"invalid TOML inline table on line {line_no}")
+        body = value[1:-1].strip()
+        table: dict[str, Any] = {}
+        if not body:
+            return table
+        for item in _split_toml_items(body, line_no=line_no):
+            key_text, value_text = _split_toml_assignment(item, line_no=line_no)
+            key = _parse_basic_toml_key(key_text, line_no=line_no)
+            if key in table:
+                raise ConfigError(f"duplicate TOML key {key!r} on line {line_no}")
+            table[key] = _parse_basic_toml_value(value_text, line_no=line_no)
+        return table
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    numeric = value.replace("_", "")
+    if re.fullmatch(r"[+-]?\d+", numeric):
+        return int(numeric)
+    if re.fullmatch(r"[+-]?(?:\d+\.\d*|\d*\.\d+|\d+)(?:[eE][+-]?\d+)?", numeric):
+        return float(numeric)
+    raise ConfigError(f"unsupported TOML value {value!r} on line {line_no}")
+
+
+def parse_basic_toml(text: str) -> dict[str, Any]:
+    raw: dict[str, Any] = {}
+    current = raw
+    for line_no, original_line in enumerate(text.splitlines(), start=1):
+        line = _strip_toml_comment(original_line)
+        if not line:
+            continue
+        if line.startswith("["):
+            if not line.endswith("]") or line.startswith("[["):
+                raise ConfigError(f"unsupported TOML table header on line {line_no}")
+            section = line[1:-1].strip()
+            if not section:
+                raise ConfigError(f"empty TOML table header on line {line_no}")
+            current = raw
+            for part in section.split("."):
+                key = _parse_basic_toml_key(part, line_no=line_no)
+                value = current.setdefault(key, {})
+                if not isinstance(value, dict):
+                    raise ConfigError(
+                        f"TOML table {section!r} conflicts with existing key on line {line_no}"
+                    )
+                current = value
+            continue
+        key_text, value_text = _split_toml_assignment(line, line_no=line_no)
+        key = _parse_basic_toml_key(key_text, line_no=line_no)
+        if key in current:
+            raise ConfigError(f"duplicate TOML key {key!r} on line {line_no}")
+        current[key] = _parse_basic_toml_value(value_text, line_no=line_no)
+    return raw
+
+
 def _as_str_list(value: Any, key: str) -> list[str]:
     if value is None:
         return []
@@ -661,9 +838,10 @@ def default_agents() -> dict[str, AgentConfig]:
 def load_config(path: Path) -> LoadedConfig:
     if path.exists():
         if tomllib is None:
-            raise ConfigError("Python 3.11+ is required to read TOML config files")
-        with path.open("rb") as fh:
-            raw = tomllib.load(fh)
+            raw = parse_basic_toml(path.read_text(encoding="utf-8"))
+        else:
+            with path.open("rb") as fh:
+                raw = tomllib.load(fh)
     else:
         raw = {}
 

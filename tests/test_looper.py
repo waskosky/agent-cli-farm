@@ -147,6 +147,58 @@ class LooperCoreTests(unittest.TestCase):
             ],
         )
 
+    def test_load_config_falls_back_when_tomllib_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "agent-looper.toml"
+            path.write_text(
+                r'''
+[looper]
+default_agent = "claude"
+prompt_file = "custom-prompts.md"
+separator = "^---\\s*$"
+timeout_seconds = 600
+sleep_seconds = 5
+fresh_session_per_loop = false
+max_loops = 15
+log_dir = ".agent-looper/runs"
+stop_patterns = ["rate limit", "overloaded"]
+kill_on_stop_pattern = false
+ignore_nonzero = true
+scan_stdout_for_stop_patterns = true
+
+[agents.codex]
+kind = "codex"
+extra_args = ["--sandbox", "workspace-write"]
+env = { CODEX_HOME = ".codex" }
+
+[agents.gemini]
+kind = "generic"
+first_command = ["gemini", "-p", "{prompt}"]
+resume_command = ["gemini", "-p", "{prompt}"]
+scan_stdout_for_stop_patterns = true
+''',
+                encoding="utf-8",
+            )
+
+            self.looper.tomllib = None
+            loaded = self.looper.load_config(path)
+
+        self.assertEqual(loaded.looper.default_agent, "claude")
+        self.assertEqual(loaded.looper.prompt_file, Path("custom-prompts.md"))
+        self.assertEqual(loaded.looper.separator, r"^---\s*$")
+        self.assertEqual(loaded.looper.timeout_seconds, 600.0)
+        self.assertEqual(loaded.looper.sleep_seconds, 5.0)
+        self.assertFalse(loaded.looper.fresh_session_per_loop)
+        self.assertEqual(loaded.looper.max_loops, 15)
+        self.assertEqual(loaded.looper.stop_patterns, ["rate limit", "overloaded"])
+        self.assertFalse(loaded.looper.kill_on_stop_pattern)
+        self.assertTrue(loaded.looper.ignore_nonzero)
+        self.assertTrue(loaded.looper.scan_stdout_for_stop_patterns)
+        self.assertEqual(loaded.agents["codex"].extra_args, ["--sandbox", "workspace-write"])
+        self.assertEqual(loaded.agents["codex"].env["CODEX_HOME"], ".codex")
+        self.assertEqual(loaded.agents["gemini"].first_command, ["gemini", "-p", "{prompt}"])
+        self.assertTrue(loaded.agents["gemini"].scan_stdout_for_stop_patterns)
+
     def test_stop_signal_parsing_ignores_normal_stdout(self) -> None:
         patterns = self.looper.compile_stop_patterns([r"rate\s*limit"])
 
