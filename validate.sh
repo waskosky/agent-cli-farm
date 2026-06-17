@@ -69,6 +69,15 @@ else
     exit 1
 fi
 
+looper_tmp="$(mktemp -d)"
+repo_dir="$PWD"
+if (cd "$looper_tmp" && "$repo_dir/bin/codex-looper" 2>&1 | grep -q "Initialized Agent Looper"); then
+    echo "✅ codex-looper first-run initializes starter files"
+else
+    echo "❌ codex-looper first-run setup failed"
+    exit 1
+fi
+
 # Test codex-board with invalid action
 if bin/codex-board invalid 2>&1 | grep -q "Usage:" || true; then
     echo "✅ codex-board shows usage for invalid action"
@@ -149,4 +158,4 @@ echo "To use the Codex CLI Farm:"
 echo "1. Run ./setup.sh to install dependencies"
 echo "2. Add $HOME/bin to your PATH"
 echo "3. Use codex-add to start managing Codex instances"
-echo "4. Use codex-looper init to create starter prompt loops"
+echo "4. Use codex-looper to create starter prompt loops"

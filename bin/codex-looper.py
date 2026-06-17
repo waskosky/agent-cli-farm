@@ -69,6 +69,7 @@ class AgentConfig:
 
 @dataclass(frozen=True)
 class LooperConfig:
+    default_agent: str = "codex"
     prompt_file: Path = Path("prompts.md")
     separator: str = r"^---\s*$"
     timeout_seconds: float = 900.0
@@ -90,7 +91,7 @@ class LoadedConfig:
 
 @dataclass(frozen=True)
 class RunOptions:
-    agent_name: str
+    agent_name: str | None
     config_path: Path
     prompt_file: Path | None = None
     label: str | None = None
@@ -674,6 +675,7 @@ def load_config(path: Path) -> LoadedConfig:
 
     default_looper = LooperConfig()
     looper = LooperConfig(
+        default_agent=str(raw_looper.get("default_agent", default_looper.default_agent)),
         prompt_file=_path(raw_looper.get("prompt_file"), default_looper.prompt_file),
         separator=str(raw_looper.get("separator", default_looper.separator)),
         timeout_seconds=float(raw_looper.get("timeout_seconds", default_looper.timeout_seconds)),
@@ -737,13 +739,20 @@ def load_config(path: Path) -> LoadedConfig:
     return LoadedConfig(looper=looper, agents=agents)
 
 
-EXAMPLE_CONFIG = """# agent-looper.toml
+def build_example_config(
+    *,
+    default_agent: str = "codex",
+    timeout_seconds: str = "900",
+    sleep_seconds: str = "2",
+) -> str:
+    return f"""# agent-looper.toml
 # Prompt files split sequences with a line containing only ---.
 
 [looper]
+default_agent = {json.dumps(default_agent)}
 prompt_file = "prompts.md"
-timeout_seconds = 900
-sleep_seconds = 2
+timeout_seconds = {timeout_seconds}
+sleep_seconds = {sleep_seconds}
 fresh_session_per_loop = true
 # max_loops = 0 means forever. Use --once or --max-loops for a bounded run.
 max_loops = 0
@@ -766,19 +775,22 @@ extra_args = []
 kind = "generic"
 # Gemini CLI prompt/resume flags may vary by version; override these templates
 # if your installed Gemini CLI uses a different non-interactive interface.
-first_command = ["gemini", "-p", "{prompt}"]
-resume_command = ["gemini", "-p", "{prompt}"]
+first_command = ["gemini", "-p", "{{prompt}}"]
+resume_command = ["gemini", "-p", "{{prompt}}"]
 scan_stdout_for_stop_patterns = true
 
 # For other coding agents, define command templates. Placeholders are:
-# {prompt}, {session}, {session_id}, {loop}, {prompt_index}, {label}, {run_dir}
+# {{prompt}}, {{session}}, {{session_id}}, {{loop}}, {{prompt_index}}, {{label}}, {{run_dir}}
 #
 # [agents.my_agent]
 # kind = "generic"
-# first_command = ["my-agent", "run", "--session", "{session}", "{prompt}"]
-# resume_command = ["my-agent", "run", "--resume", "{session}", "{prompt}"]
+# first_command = ["my-agent", "run", "--session", "{{session}}", "{{prompt}}"]
+# resume_command = ["my-agent", "run", "--resume", "{{session}}", "{{prompt}}"]
 # scan_stdout_for_stop_patterns = true
 """
+
+
+EXAMPLE_CONFIG = build_example_config()
 
 
 EXAMPLE_PROMPTS = """Summarize the repository layout. Do not modify files.
@@ -787,6 +799,104 @@ Identify the smallest useful task to improve the project. Do not modify files.
 ---
 If the previous task is safe and obvious, implement it. Then run the most relevant fast check.
 """
+
+
+def write_starter_files(
+    *,
+    force: bool,
+    config_text: str = EXAMPLE_CONFIG,
+    prompts_text: str = EXAMPLE_PROMPTS,
+) -> list[Path]:
+    files = [
+        (Path("agent-looper.toml"), config_text),
+        (Path("prompts.md"), prompts_text),
+    ]
+    written: list[Path] = []
+    for path, content in files:
+        if path.exists() and not force:
+            print(f"exists, leaving unchanged: {path}")
+            continue
+        path.write_text(content, encoding="utf-8")
+        written.append(path)
+        print(f"wrote {path}")
+    return written
+
+
+def guidance_lines(*, initialized: bool) -> list[str]:
+    heading = (
+        "Initialized Agent Looper starter files."
+        if initialized
+        else "Agent Looper is already initialized."
+    )
+    return [
+        heading,
+        "",
+        "Next steps:",
+        "  1. Edit prompts.md; split prompts with a line containing only ---",
+        "  2. Try a bounded run: codex-looper --once --label smoke",
+        "  3. Run in tmux farm: codex-looper --farm-session work --label sweep",
+        "",
+        "Customize defaults with: codex-looper init --interactive --force",
+    ]
+
+
+def print_guidance(*, initialized: bool) -> None:
+    print("\n".join(guidance_lines(initialized=initialized)))
+
+
+def first_run_main() -> int:
+    config = Path("agent-looper.toml")
+    prompts = Path("prompts.md")
+    already_initialized = config.exists() and prompts.exists()
+    written = write_starter_files(force=False)
+    print("")
+    print_guidance(initialized=bool(written) and not already_initialized)
+    return 0
+
+
+def _ask(prompt: str, default: str) -> str:
+    reply = input(f"{prompt} [{default}]: ").strip()
+    return reply or default
+
+
+def _ask_number(prompt: str, default: str) -> str:
+    value = _ask(prompt, default)
+    try:
+        parsed = float(value)
+    except ValueError:
+        print(f"Invalid number {value!r}; using {default}.")
+        return default
+    if parsed <= 0:
+        print(f"Number must be greater than zero; using {default}.")
+        return default
+    return value
+
+
+def interactive_starter_content() -> tuple[str, str]:
+    print("Agent Looper interactive setup")
+    default_agent = _ask("Default agent (codex, claude, gemini)", "codex")
+    if default_agent not in default_agents():
+        print(f"Unknown default agent {default_agent!r}; using codex.")
+        default_agent = "codex"
+    timeout_seconds = _ask_number("Timeout seconds per prompt", "900")
+    sleep_seconds = _ask_number("Sleep seconds between loops", "2")
+
+    print("Enter prompts one at a time. Submit a blank prompt when finished.")
+    prompts: list[str] = []
+    while True:
+        prompt = input(f"Prompt {len(prompts) + 1}: ").strip()
+        if not prompt:
+            break
+        prompts.append(prompt)
+    prompt_text = "\n---\n".join(prompts).strip() + "\n" if prompts else EXAMPLE_PROMPTS
+    return (
+        build_example_config(
+            default_agent=default_agent,
+            timeout_seconds=timeout_seconds,
+            sleep_seconds=sleep_seconds,
+        ),
+        prompt_text,
+    )
 
 
 def clean_farm_args(argv: list[str]) -> list[str]:
@@ -827,7 +937,7 @@ def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | No
 
 
 def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | None = None) -> None:
-    parser.add_argument("-a", "--agent", default=default_agent or default_agent_from_invocation(), help="agent config name")
+    parser.add_argument("-a", "--agent", default=None, help="agent config name")
     parser.add_argument("-c", "--config", default="agent-looper.toml", help="config file path")
     parser.add_argument("-p", "--prompt-file", help="prompt sequence file")
     parser.add_argument("-l", "--label", help="human-readable run label; also used for resumable sessions")
@@ -858,6 +968,19 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
     parser.add_argument("--farm-attach", action="store_true", help="attach after launching with --farm-session")
     parser.add_argument("--farm-add-bin", default="codex-add", help="codex-add-compatible launcher")
     parser.add_argument("--version", action="version", version=f"codex-looper {VERSION}")
+
+
+def resolve_agent_name(
+    *,
+    explicit_agent: str | None,
+    looper: LooperConfig,
+    invocation_default: str | None,
+) -> str:
+    if explicit_agent:
+        return explicit_agent
+    if invocation_default and invocation_default != "codex":
+        return invocation_default
+    return looper.default_agent or invocation_default or default_agent_from_invocation()
 
 
 def parse_run_options(args: argparse.Namespace) -> RunOptions:
@@ -906,11 +1029,17 @@ def run_command_main(argv: list[str] | None = None, *, default_agent: str | None
 
     try:
         loaded = load_config(options.config_path)
-        if options.agent_name not in loaded.agents:
+        agent_name = resolve_agent_name(
+            explicit_agent=options.agent_name,
+            looper=loaded.looper,
+            invocation_default=default_agent,
+        )
+        options = replace(options, agent_name=agent_name)
+        if agent_name not in loaded.agents:
             available = ", ".join(sorted(loaded.agents))
-            raise ConfigError(f"unknown agent {options.agent_name!r}; available: {available}")
+            raise ConfigError(f"unknown agent {agent_name!r}; available: {available}")
         looper = apply_run_options(loaded.looper, options)
-        agent = loaded.agents[options.agent_name]
+        agent = loaded.agents[agent_name]
         result = run_loop_sync(agent=agent, looper=looper, options=options)
     except (ConfigError, PromptError, CommandTemplateError) as exc:
         print(f"looper error: {exc}", file=sys.stderr)
@@ -926,18 +1055,18 @@ def run_command_main(argv: list[str] | None = None, *, default_agent: str | None
 def init_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=f"{display_name()} init", description="Create starter config and prompt files.")
     parser.add_argument("--force", action="store_true", help="overwrite existing files")
+    parser.add_argument("-i", "--interactive", action="store_true", help="ask for defaults and prompt text")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
-    files = [
-        (Path("agent-looper.toml"), EXAMPLE_CONFIG),
-        (Path("prompts.md"), EXAMPLE_PROMPTS),
-    ]
-    for path, content in files:
-        if path.exists() and not args.force:
-            print(f"exists, leaving unchanged: {path}")
-            continue
-        path.write_text(content, encoding="utf-8")
-        print(f"wrote {path}")
+    config_text = EXAMPLE_CONFIG
+    prompts_text = EXAMPLE_PROMPTS
+    if args.interactive:
+        config_text, prompts_text = interactive_starter_content()
+
+    write_starter_files(force=args.force, config_text=config_text, prompts_text=prompts_text)
+    print("")
+    print("Starter files are ready.")
+    print_guidance(initialized=True)
     return 0
 
 
@@ -967,7 +1096,9 @@ def doctor_main(argv: list[str] | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     real_argv = list(sys.argv[1:] if argv is None else argv)
     default_agent = default_agent_from_invocation()
-    if not real_argv or real_argv[0] in {"-h", "--help"}:
+    if not real_argv:
+        return first_run_main()
+    if real_argv[0] in {"-h", "--help"}:
         parser = argparse.ArgumentParser(prog=display_name(), description="Tiny coding-agent looper utility.")
         subparsers = parser.add_subparsers(dest="command")
         run_parser = subparsers.add_parser("run", help="run a prompt sequence loop")

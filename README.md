@@ -61,8 +61,15 @@ gemini-add /path/to/project
 
 Create starter files in the project where an agent should work:
 ```bash
-codex-looper init
+codex-looper
 ```
+
+On first run, `codex-looper` creates `agent-looper.toml` and `prompts.md` if they are missing, then prints the next commands to try. It does not overwrite existing files. For a guided setup that asks for the default agent, timeout, sleep interval, and prompt text:
+```bash
+codex-looper init --interactive --force
+```
+
+Interactive setup writes those defaults into `agent-looper.toml`, including `[looper].default_agent`, so later `codex-looper` runs can use your preferred backend without repeating `--agent`.
 
 Edit `prompts.md`; prompts are split on lines containing only `---`. Then run once:
 ```bash

@@ -230,6 +230,77 @@ class LooperCliTests(unittest.TestCase):
             self.assertTrue(prompts.exists())
             self.assertIn("[looper]", config.read_text(encoding="utf-8"))
 
+    def test_no_args_first_run_initializes_and_prints_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            result = subprocess.run(
+                [sys.executable, str(LOOPER_PATH)],
+                cwd=td,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((Path(td) / "agent-looper.toml").exists())
+            self.assertTrue((Path(td) / "prompts.md").exists())
+            self.assertIn("Initialized Agent Looper", result.stdout)
+            self.assertIn("Edit prompts.md", result.stdout)
+            self.assertIn("codex-looper --once --label", result.stdout)
+
+    def test_no_args_in_initialized_directory_prints_guidance_without_overwriting(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            config = Path(td) / "agent-looper.toml"
+            prompts = Path(td) / "prompts.md"
+            config.write_text("custom config\n", encoding="utf-8")
+            prompts.write_text("custom prompt\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [sys.executable, str(LOOPER_PATH)],
+                cwd=td,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(config.read_text(encoding="utf-8"), "custom config\n")
+            self.assertEqual(prompts.read_text(encoding="utf-8"), "custom prompt\n")
+            self.assertIn("Agent Looper is already initialized", result.stdout)
+            self.assertIn("codex-looper --once --label", result.stdout)
+
+    def test_interactive_init_writes_custom_prompts_and_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            answers = "\n".join(
+                [
+                    "claude",
+                    "600",
+                    "5",
+                    "Summarize this repository.",
+                    "Propose one safe cleanup.",
+                    "",
+                    "",
+                ]
+            )
+            result = subprocess.run(
+                [sys.executable, str(LOOPER_PATH), "init", "--interactive", "--force"],
+                cwd=td,
+                input=answers,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            config = (Path(td) / "agent-looper.toml").read_text(encoding="utf-8")
+            prompts = (Path(td) / "prompts.md").read_text(encoding="utf-8")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('default_agent = "claude"', config)
+            self.assertIn("timeout_seconds = 600", config)
+            self.assertIn("sleep_seconds = 5", config)
+            self.assertIn("Summarize this repository.", prompts)
+            self.assertIn("---", prompts)
+            self.assertIn("Propose one safe cleanup.", prompts)
+            self.assertIn("Starter files are ready", result.stdout)
+
     def test_farm_session_launches_through_codex_add(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmpdir = Path(td)
