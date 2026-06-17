@@ -78,13 +78,15 @@ claude-looper --once --label repo-smoke -- --dangerously-skip-permissions
 
 Run inside a managed farm tmux window:
 ```bash
-codex-looper --farm-session work --label cleanup-pass --cwd /path/to/project
+codex-looper --farm-session --label cleanup-pass --cwd /path/to/project
+claude-looper --farm-session --label cleanup-pass --cwd /path/to/project
+# Named farm sessions still work:
 claude-looper --farm-session work --label cleanup-pass --cwd /path/to/project
 ```
 
 Inspect a running looper or agent without attaching:
 ```bash
-codex-status --session work activity
+codex-status activity
 ```
 
 See [Agent Looper Reference](docs/looper.md) for prompt format, CLI parameters, config defaults, stop conditions, farm integration, and current backend limits.

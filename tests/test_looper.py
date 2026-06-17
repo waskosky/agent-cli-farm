@@ -529,6 +529,55 @@ set -euo pipefail
             self.assertNotIn("--farm-session", args_line)
             self.assertNotIn("--farm-add-bin", args_line)
 
+    def test_farm_session_without_value_uses_default_session(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmpdir = Path(td)
+            project = tmpdir / "project"
+            project.mkdir()
+            log = tmpdir / "codex-add.log"
+            codex_add = tmpdir / "codex-add"
+            make_executable(
+                codex_add,
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+{{
+  echo "args=$*"
+  echo "CODEX_ARGS=${{CODEX_ARGS:-}}"
+}} >> {shlex.quote(str(log))}
+""",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "--agent",
+                    "claude",
+                    "--farm-session",
+                    "--farm-add-bin",
+                    str(codex_add),
+                    "--label",
+                    "sweep",
+                    "--cwd",
+                    str(project),
+                    "--once",
+                    "--dry-run",
+                ],
+                cwd=project,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lines = log.read_text(encoding="utf-8").splitlines()
+            self.assertIn(f"args=-d {project}", lines)
+            args_line = next(line for line in lines if line.startswith("CODEX_ARGS="))
+            self.assertIn("--agent claude", args_line)
+            self.assertIn("--label sweep", args_line)
+            self.assertNotIn("--farm-session", args_line)
+            self.assertNotIn("--farm-add-bin", args_line)
+
     def test_farm_session_preserves_agent_passthrough_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmpdir = Path(td)

@@ -47,7 +47,7 @@ Prompts in one sequence share the same agent session. After a full sequence comp
 codex-looper --once --label smoke
 claude-looper --once --label smoke
 claude-looper --once --label smoke -- --dangerously-skip-permissions
-codex-looper --farm-session work --label cleanup --cwd /path/to/project
+codex-looper --farm-session --label cleanup --cwd /path/to/project
 codex-looper --dry-run --once --label preview
 ```
 
@@ -74,7 +74,7 @@ Use `--once` or `--max-loops N` for bounded runs. Without either, the looper rep
 | `--ignore-nonzero` | off | Continue after nonzero agent exits. |
 | `--stop-on-nonzero` | on | Stop after nonzero agent exits. |
 | `--hold-on-stop` | off | Wait for Enter before closing after stop. |
-| `--farm-session NAME` | unset | Launch through `codex-add` into a farm tmux session. |
+| `--farm-session [NAME]` | unset | Launch through `codex-add` into a farm tmux session. Omitting `NAME` uses the default farm session. |
 | `--farm-attach` | off | Attach after `--farm-session` launch. |
 | `--farm-add-bin PATH` | `codex-add` | Launcher compatible with `codex-add`. |
 | `-- AGENT_ARGS...` | unset | Pass native flags to built-in Codex/Claude command templates. |
@@ -132,11 +132,12 @@ Logs are written under `.agent-looper/runs/<timestamp>__<label>/`.
 
 ## Farm Integration
 
-`--farm-session` does not create tmux sessions directly. It calls `codex-add` so existing farm behavior still owns session creation, board linking, pipe-pane logging, and annotator startup.
+`--farm-session` does not create tmux sessions directly. It calls `codex-add` so existing farm behavior still owns session creation, board linking, pipe-pane logging, and annotator startup. Use `--farm-session` without a value for the default farm session (`${CODEX_SESSION:-codexfarm}`), or pass a name for a separate farm.
 
 Example:
 
 ```bash
+codex-looper --farm-session --label cleanup --cwd /path/to/project
 codex-looper --farm-session work --label cleanup --cwd /path/to/project
 ```
 
@@ -144,7 +145,7 @@ While a looper is running in the farm, inspect recent pane output without
 attaching:
 
 ```bash
-codex-status --session work activity
+codex-status activity
 ```
 
 ## Current Limits

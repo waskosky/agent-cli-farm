@@ -1036,7 +1036,7 @@ def guidance_lines(*, initialized: bool) -> list[str]:
         "Next steps:",
         "  1. Edit prompts.md; split prompts with a line containing only ---",
         "  2. Try a bounded run: codex-looper --once --label smoke",
-        "  3. Run in tmux farm: codex-looper --farm-session work --label sweep",
+        "  3. Run in the default tmux farm: codex-looper --farm-session --label sweep",
         "",
         "Customize defaults with: codex-looper init --interactive --force",
     ]
@@ -1103,32 +1103,42 @@ def interactive_starter_content() -> tuple[str, str]:
 
 def clean_farm_args(argv: list[str]) -> list[str]:
     cleaned: list[str] = []
-    skip_next = False
     in_agent_args = False
-    for item in argv:
+    index = 0
+    while index < len(argv):
+        item = argv[index]
         if in_agent_args:
             cleaned.append(item)
+            index += 1
             continue
         if item == "--":
             cleaned.append(item)
             in_agent_args = True
+            index += 1
             continue
-        if skip_next:
-            skip_next = False
+        if item == "--farm-session":
+            next_index = index + 1
+            if next_index < len(argv) and not argv[next_index].startswith("-"):
+                index = next_index + 1
+            else:
+                index += 1
             continue
-        if item in {"--farm-session", "--farm-add-bin"}:
-            skip_next = True
+        if item == "--farm-add-bin":
+            index += 2
             continue
         if item.startswith("--farm-session=") or item.startswith("--farm-add-bin="):
+            index += 1
             continue
         if item == "--farm-attach":
+            index += 1
             continue
         cleaned.append(item)
+        index += 1
     return cleaned
 
 
 def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | None:
-    if not options.farm_session:
+    if options.farm_session is None:
         return None
 
     executable = os.environ.get("CODEX_LOOPER_COMMAND") or shutil.which(Path(sys.argv[0]).name) or sys.argv[0]
@@ -1142,7 +1152,9 @@ def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | No
     command = [options.farm_add_bin]
     if not options.farm_attach:
         command.append("-d")
-    command.extend([options.farm_session, str(cwd)])
+    if options.farm_session:
+        command.append(options.farm_session)
+    command.append(str(cwd))
     return subprocess.run(command, env=env, check=False).returncode
 
 
@@ -1181,7 +1193,12 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
     parser.add_argument("--ignore-nonzero", action="store_true", default=None, help="do not stop on nonzero exit")
     parser.add_argument("--stop-on-nonzero", dest="ignore_nonzero", action="store_false", help="stop on nonzero exit")
     parser.add_argument("--hold-on-stop", action="store_true", help="wait for Enter before exiting after a stop")
-    parser.add_argument("--farm-session", help="launch this looper in a Codex CLI Farm tmux session")
+    parser.add_argument(
+        "--farm-session",
+        nargs="?",
+        const="",
+        help="launch this looper in a Codex CLI Farm tmux session; omit NAME to use the default",
+    )
     parser.add_argument("--farm-attach", action="store_true", help="attach after launching with --farm-session")
     parser.add_argument("--farm-add-bin", default="codex-add", help="codex-add-compatible launcher")
     parser.add_argument("--version", action="version", version=f"codex-looper {VERSION}")
