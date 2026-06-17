@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -27,6 +28,8 @@ VERSION = "0.1.0"
 AgentKind = Literal["claude", "codex", "generic"]
 TMUX_STATE_OPTION = "@codex_state"
 TMUX_STOP_REASON_OPTION = "@codex_stop_reason"
+DEFAULT_TIMEOUT_SECONDS = 7200.0
+DEFAULT_MAX_LOOPS = 0
 
 DEFAULT_STOP_PATTERNS = [
     r"rate[\s_-]*limit(?:ed|ing)?",
@@ -72,10 +75,10 @@ class LooperConfig:
     default_agent: str = "codex"
     prompt_file: Path = Path("prompts.md")
     separator: str = r"^---\s*$"
-    timeout_seconds: float = 900.0
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     sleep_seconds: float = 2.0
     fresh_session_per_loop: bool = True
-    max_loops: int = 0
+    max_loops: int = DEFAULT_MAX_LOOPS
     log_dir: Path = Path(".agent-looper/runs")
     stop_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_STOP_PATTERNS))
     kill_on_stop_pattern: bool = True
@@ -108,6 +111,7 @@ class RunOptions:
     farm_session: str | None = None
     farm_attach: bool = False
     farm_add_bin: str = "codex-add"
+    local: bool = False
 
 
 @dataclass(frozen=True)
@@ -489,8 +493,7 @@ def rename_current_window(label: str) -> None:
 def make_label(label: str | None, agent_name: str) -> str:
     if label:
         return label
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{agent_name}-{stamp}"
+    return f"Looper_{secrets.token_hex(3)}"
 
 
 def make_run_dir(log_dir: Path, label: str) -> Path:
@@ -942,8 +945,9 @@ def load_config(path: Path) -> LoadedConfig:
 def build_example_config(
     *,
     default_agent: str = "codex",
-    timeout_seconds: str = "900",
+    timeout_seconds: str = "7200",
     sleep_seconds: str = "2",
+    max_loops: str = "0",
 ) -> str:
     return f"""# agent-looper.toml
 # Prompt files split sequences with a line containing only ---.
@@ -955,7 +959,7 @@ timeout_seconds = {timeout_seconds}
 sleep_seconds = {sleep_seconds}
 fresh_session_per_loop = true
 # max_loops = 0 means forever. Use --once or --max-loops for a bounded run.
-max_loops = 0
+max_loops = {max_loops}
 log_dir = ".agent-looper/runs"
 
 [agents.claude]
@@ -1035,8 +1039,8 @@ def guidance_lines(*, initialized: bool) -> list[str]:
         "",
         "Next steps:",
         "  1. Edit prompts.md; split prompts with a line containing only ---",
-        "  2. Try a bounded run: codex-looper --once --label smoke",
-        "  3. Run in the default tmux farm: codex-looper --farm-session --label sweep",
+        "  2. Run in the default tmux farm: codex-looper",
+        "  3. Inspect activity: codex-status activity",
         "",
         "Customize defaults with: codex-looper init --interactive --force",
     ]
@@ -1074,14 +1078,28 @@ def _ask_number(prompt: str, default: str) -> str:
     return value
 
 
+def _ask_nonnegative_int(prompt: str, default: str) -> str:
+    value = _ask(prompt, default)
+    try:
+        parsed = int(value)
+    except ValueError:
+        print(f"Invalid integer {value!r}; using {default}.")
+        return default
+    if parsed < 0:
+        print(f"Number must be zero or greater; using {default}.")
+        return default
+    return str(parsed)
+
+
 def interactive_starter_content() -> tuple[str, str]:
     print("Agent Looper interactive setup")
     default_agent = _ask("Default agent (codex, claude, gemini)", "codex")
     if default_agent not in default_agents():
         print(f"Unknown default agent {default_agent!r}; using codex.")
         default_agent = "codex"
-    timeout_seconds = _ask_number("Timeout seconds per prompt", "900")
+    timeout_seconds = _ask_number("Timeout seconds per prompt", "7200")
     sleep_seconds = _ask_number("Sleep seconds between loops", "2")
+    max_loops = _ask_nonnegative_int("Max loops (0 means forever)", "0")
 
     print("Enter prompts one at a time. Submit a blank prompt when finished.")
     prompts: list[str] = []
@@ -1096,6 +1114,7 @@ def interactive_starter_content() -> tuple[str, str]:
             default_agent=default_agent,
             timeout_seconds=timeout_seconds,
             sleep_seconds=sleep_seconds,
+            max_loops=max_loops,
         ),
         prompt_text,
     )
@@ -1137,8 +1156,16 @@ def clean_farm_args(argv: list[str]) -> list[str]:
     return cleaned
 
 
+def _argv_has_option(argv: list[str], *names: str) -> bool:
+    for item in argv:
+        for name in names:
+            if item == name or item.startswith(f"{name}="):
+                return True
+    return False
+
+
 def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | None:
-    if options.farm_session is None:
+    if options.local or options.farm_session is None:
         return None
 
     executable = os.environ.get("CODEX_LOOPER_COMMAND") or shutil.which(Path(sys.argv[0]).name) or sys.argv[0]
@@ -1147,7 +1174,12 @@ def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | No
     env = os.environ.copy()
     env["CODEX_NAME"] = options.label or cwd.name
     env["CODEX_CMD"] = executable
-    env["CODEX_ARGS"] = shlex.join(clean_farm_args(original_argv))
+    inner_args = clean_farm_args(original_argv)
+    if not _argv_has_option(inner_args, "--local"):
+        inner_args.append("--local")
+    if options.label and not _argv_has_option(inner_args, "--label", "-l"):
+        inner_args.extend(["--label", options.label])
+    env["CODEX_ARGS"] = shlex.join(inner_args)
 
     command = [options.farm_add_bin]
     if not options.farm_attach:
@@ -1193,6 +1225,7 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
     parser.add_argument("--ignore-nonzero", action="store_true", default=None, help="do not stop on nonzero exit")
     parser.add_argument("--stop-on-nonzero", dest="ignore_nonzero", action="store_false", help="stop on nonzero exit")
     parser.add_argument("--hold-on-stop", action="store_true", help="wait for Enter before exiting after a stop")
+    parser.add_argument("--local", action="store_true", help="run in this terminal instead of the default farm")
     parser.add_argument(
         "--farm-session",
         nargs="?",
@@ -1240,6 +1273,7 @@ def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None 
         farm_session=args.farm_session,
         farm_attach=args.farm_attach,
         farm_add_bin=args.farm_add_bin,
+        local=args.local,
     )
 
 
@@ -1262,6 +1296,10 @@ def run_command_main(argv: list[str] | None = None, *, default_agent: str | None
     add_run_arguments(parser, default_agent=default_agent)
     args = parser.parse_args(looper_argv)
     options = parse_run_options(args, agent_args=agent_args)
+    if options.label is None:
+        options = replace(options, label=make_label(None, default_agent or "agent"))
+    if options.farm_session is None and not options.local and not options.dry_run:
+        options = replace(options, farm_session="")
 
     farm_result = maybe_launch_farm(options, real_argv)
     if farm_result is not None:
@@ -1337,6 +1375,8 @@ def main(argv: list[str] | None = None) -> int:
     real_argv = list(sys.argv[1:] if argv is None else argv)
     default_agent = default_agent_from_invocation()
     if not real_argv:
+        if Path("agent-looper.toml").exists() and Path("prompts.md").exists():
+            return run_command_main([], default_agent=default_agent)
         return first_run_main()
     if real_argv[0] in {"-h", "--help"}:
         parser = argparse.ArgumentParser(prog=display_name(), description="Tiny coding-agent looper utility.")

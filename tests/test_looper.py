@@ -349,6 +349,34 @@ class LooperCliTests(unittest.TestCase):
         self.assertIn("$ codex exec --json hello", result.stdout)
         self.assertIn("dry run complete", result.stdout)
 
+    def test_default_label_uses_looper_short_id(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workdir = Path(td)
+            prompt_file = workdir / "prompts.md"
+            prompt_file.write_text("hello\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "--local",
+                    "--agent",
+                    "claude",
+                    "--prompt-file",
+                    str(prompt_file),
+                    "--once",
+                    "--dry-run",
+                ],
+                cwd=workdir,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r"label: Looper_[0-9a-f]{6}\n")
+        self.assertRegex(result.stdout, r"--name Looper_[0-9a-f]{6}-loop-0001 hello")
+
     def test_double_dash_arguments_are_passed_to_builtin_agent(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workdir = Path(td)
@@ -401,7 +429,9 @@ class LooperCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(config.exists())
             self.assertTrue(prompts.exists())
-            self.assertIn("[looper]", config.read_text(encoding="utf-8"))
+            config_text = config.read_text(encoding="utf-8")
+            self.assertIn("[looper]", config_text)
+            self.assertIn("timeout_seconds = 7200", config_text)
 
     def test_no_args_first_run_initializes_and_prints_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -418,18 +448,35 @@ class LooperCliTests(unittest.TestCase):
             self.assertTrue((Path(td) / "prompts.md").exists())
             self.assertIn("Initialized Agent Looper", result.stdout)
             self.assertIn("Edit prompts.md", result.stdout)
-            self.assertIn("codex-looper --once --label", result.stdout)
+            self.assertIn("Run in the default tmux farm: codex-looper", result.stdout)
 
-    def test_no_args_in_initialized_directory_prints_guidance_without_overwriting(self) -> None:
+    def test_no_args_in_initialized_directory_launches_default_farm(self) -> None:
         with tempfile.TemporaryDirectory() as td:
+            tmpdir = Path(td)
+            codex_add = tmpdir / "codex-add"
+            log = tmpdir / "codex-add.log"
+            make_executable(
+                codex_add,
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+{{
+  echo "args=$*"
+  echo "CODEX_NAME=${{CODEX_NAME:-}}"
+  echo "CODEX_ARGS=${{CODEX_ARGS:-}}"
+}} >> {shlex.quote(str(log))}
+""",
+            )
             config = Path(td) / "agent-looper.toml"
             prompts = Path(td) / "prompts.md"
             config.write_text("custom config\n", encoding="utf-8")
             prompts.write_text("custom prompt\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["PATH"] = f"{tmpdir}:{env.get('PATH', '')}"
 
             result = subprocess.run(
                 [sys.executable, str(LOOPER_PATH)],
                 cwd=td,
+                env=env,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -438,8 +485,14 @@ class LooperCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(config.read_text(encoding="utf-8"), "custom config\n")
             self.assertEqual(prompts.read_text(encoding="utf-8"), "custom prompt\n")
-            self.assertIn("Agent Looper is already initialized", result.stdout)
-            self.assertIn("codex-looper --once --label", result.stdout)
+            lines = log.read_text(encoding="utf-8").splitlines()
+            self.assertIn(f"args=-d {tmpdir}", lines)
+            name_line = next(line for line in lines if line.startswith("CODEX_NAME="))
+            args_line = next(line for line in lines if line.startswith("CODEX_ARGS="))
+            self.assertRegex(name_line, r"^CODEX_NAME=Looper_[0-9a-f]{6}$")
+            self.assertRegex(args_line, r"--label Looper_[0-9a-f]{6}(?: |$)")
+            self.assertIn("--local", args_line)
+            self.assertNotIn("--farm-session", args_line)
 
     def test_interactive_init_writes_custom_prompts_and_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -448,6 +501,7 @@ class LooperCliTests(unittest.TestCase):
                     "claude",
                     "600",
                     "5",
+                    "12",
                     "Summarize this repository.",
                     "Propose one safe cleanup.",
                     "",
@@ -469,6 +523,7 @@ class LooperCliTests(unittest.TestCase):
             self.assertIn('default_agent = "claude"', config)
             self.assertIn("timeout_seconds = 600", config)
             self.assertIn("sleep_seconds = 5", config)
+            self.assertIn("max_loops = 12", config)
             self.assertIn("Summarize this repository.", prompts)
             self.assertIn("---", prompts)
             self.assertIn("Propose one safe cleanup.", prompts)

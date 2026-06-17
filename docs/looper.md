@@ -1,6 +1,6 @@
 # Agent Looper Reference
 
-`codex-looper`, `claude-looper`, and `gemini-looper` run a file-backed sequence of prompts against local agent CLIs. They are meant for bounded, inspectable automation inside a project or a Codex CLI Farm tmux window.
+`codex-looper`, `claude-looper`, and `gemini-looper` run a file-backed sequence of prompts against local agent CLIs. Initialized loopers launch in the default Codex CLI Farm tmux session by default, so runs are inspectable without extra arguments.
 
 Runtime requirement: Python 3.10 or newer. On Python 3.11+, the standard library TOML parser is used; on Python 3.10, the looper uses its built-in parser for the supported `agent-looper.toml` schema documented below.
 
@@ -25,6 +25,7 @@ Interactive setup asks for:
 - default agent
 - per-prompt timeout
 - sleep interval between loops
+- maximum loop count
 - one or more prompts
 
 ## Prompt File
@@ -44,16 +45,19 @@ Prompts in one sequence share the same agent session. After a full sequence comp
 ## Common Commands
 
 ```bash
+codex-looper
+claude-looper
 codex-looper --once --label smoke
 claude-looper --once --label smoke
 claude-looper --once --label smoke -- --dangerously-skip-permissions
-codex-looper --farm-session --label cleanup --cwd /path/to/project
+codex-looper --farm-session work --label cleanup --cwd /path/to/project
+codex-looper --local --once --label local-preview
 codex-looper --dry-run --once --label preview
 ```
 
-Use `--once` or `--max-loops N` for bounded runs. Without either, the looper repeats until a stop condition occurs.
+Use `--once` or `--max-loops N` for bounded runs. Without either, the looper repeats until a stop condition occurs. Non-dry-run commands launch through the default farm unless `--local` is set.
 
-`--timeout` is a per-prompt wall-clock limit for the local agent process. Short values such as `90` seconds can stop a long Claude/Codex tool call even when the provider is still working; raise it on the command line or in `[looper].timeout_seconds` for heavier prompts.
+`--timeout` is a per-prompt wall-clock limit for the local agent process. The default is 7200 seconds. Short values such as `90` seconds can stop a long Claude/Codex tool call even when the provider is still working; raise it on the command line or in `[looper].timeout_seconds` for heavier prompts.
 
 ## CLI Options
 
@@ -62,8 +66,8 @@ Use `--once` or `--max-loops N` for bounded runs. Without either, the looper rep
 | `--agent NAME` | `[looper].default_agent` or wrapper default | Selects an agent config from `agent-looper.toml`. |
 | `--config PATH` | `agent-looper.toml` | Config file path. |
 | `--prompt-file PATH` | `prompts.md` | Prompt sequence file. |
-| `--label LABEL` | `<agent>-<UTC timestamp>` | Human-readable run/session label. |
-| `--timeout SECONDS` | `900` | Per-prompt subprocess timeout. |
+| `--label LABEL` | `Looper_<short-id>` | Human-readable run/session label. |
+| `--timeout SECONDS` | `7200` | Per-prompt subprocess timeout. |
 | `--sleep SECONDS` | `2` | Sleep between completed loops. |
 | `--max-loops N` | `0` | Maximum loops; `0` means unlimited. |
 | `--once` | off | Equivalent to `--max-loops 1`. |
@@ -74,7 +78,8 @@ Use `--once` or `--max-loops N` for bounded runs. Without either, the looper rep
 | `--ignore-nonzero` | off | Continue after nonzero agent exits. |
 | `--stop-on-nonzero` | on | Stop after nonzero agent exits. |
 | `--hold-on-stop` | off | Wait for Enter before closing after stop. |
-| `--farm-session [NAME]` | unset | Launch through `codex-add` into a farm tmux session. Omitting `NAME` uses the default farm session. |
+| `--local` | off | Run in the current terminal instead of launching through the default farm. |
+| `--farm-session [NAME]` | default farm | Select the farm tmux session for `codex-add`. Omitting `NAME` uses the default farm session. |
 | `--farm-attach` | off | Attach after `--farm-session` launch. |
 | `--farm-add-bin PATH` | `codex-add` | Launcher compatible with `codex-add`. |
 | `-- AGENT_ARGS...` | unset | Pass native flags to built-in Codex/Claude command templates. |
@@ -92,7 +97,7 @@ Starter `agent-looper.toml` defaults:
 [looper]
 default_agent = "codex"
 prompt_file = "prompts.md"
-timeout_seconds = 900
+timeout_seconds = 7200
 sleep_seconds = 2
 fresh_session_per_loop = true
 max_loops = 0
@@ -132,13 +137,14 @@ Logs are written under `.agent-looper/runs/<timestamp>__<label>/`.
 
 ## Farm Integration
 
-`--farm-session` does not create tmux sessions directly. It calls `codex-add` so existing farm behavior still owns session creation, board linking, pipe-pane logging, and annotator startup. Use `--farm-session` without a value for the default farm session (`${CODEX_SESSION:-codexfarm}`), or pass a name for a separate farm.
+Normal non-dry-run looper commands call `codex-add` so existing farm behavior still owns session creation, board linking, pipe-pane logging, and annotator startup. Use `--local` to run in the current terminal. Use `--farm-session NAME` for a separate farm.
 
 Example:
 
 ```bash
-codex-looper --farm-session --label cleanup --cwd /path/to/project
+codex-looper
 codex-looper --farm-session work --label cleanup --cwd /path/to/project
+codex-looper --local --once --label local-smoke
 ```
 
 While a looper is running in the farm, inspect recent pane output without

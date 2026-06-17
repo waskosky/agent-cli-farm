@@ -69,19 +69,18 @@ For guided setup:
 codex-looper init --interactive --force
 ```
 
-Run once after editing `prompts.md`:
+After editing `prompts.md`, start a looper in the default farm:
 ```bash
-codex-looper --once --label repo-smoke
-claude-looper --once --label repo-smoke
-claude-looper --once --label repo-smoke -- --dangerously-skip-permissions
+codex-looper
+claude-looper
+claude-looper -- --dangerously-skip-permissions
 ```
 
-Run inside a managed farm tmux window:
+For bounded smoke runs or named farms:
 ```bash
-codex-looper --farm-session --label cleanup-pass --cwd /path/to/project
-claude-looper --farm-session --label cleanup-pass --cwd /path/to/project
-# Named farm sessions still work:
+codex-looper --once --label repo-smoke
 claude-looper --farm-session work --label cleanup-pass --cwd /path/to/project
+codex-looper --local --once --label local-smoke
 ```
 
 Inspect a running looper or agent without attaching:
