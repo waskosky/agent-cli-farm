@@ -24,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 only.
     tomllib = None  # type: ignore[assignment]
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 AgentKind = Literal["claude", "codex", "generic"]
 TMUX_STATE_OPTION = "@codex_state"
 TMUX_STOP_REASON_OPTION = "@codex_stop_reason"

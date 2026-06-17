@@ -92,6 +92,20 @@ exit 98
         self.assertTrue((home_bin / "gemini-add").exists())
         self.assertTrue((home_bin / "gemini-looper").exists())
 
+    def test_setup_examples_show_default_farm_looper_usage(self) -> None:
+        make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(self.bin_dir / "multitail", "#!/usr/bin/env bash\nexit 0\n")
+
+        result = self.run_setup()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "codex-looper                 # Run initialized prompt loops in the default farm",
+            result.stdout,
+        )
+        self.assertIn("codex-looper --local --once --label local-smoke", result.stdout)
+        self.assertNotIn("codex-looper --farm-session work --label sweep", result.stdout)
+
     def test_skips_package_manager_when_dependencies_missing(self) -> None:
         make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
         make_executable(

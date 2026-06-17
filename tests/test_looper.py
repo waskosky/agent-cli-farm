@@ -349,6 +349,17 @@ class LooperCliTests(unittest.TestCase):
         self.assertIn("$ codex exec --json hello", result.stdout)
         self.assertIn("dry run complete", result.stdout)
 
+    def test_version_marks_farm_default_looper_release(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(LOOPER_PATH), "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "codex-looper 0.2.0")
+
     def test_default_label_uses_looper_short_id(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workdir = Path(td)
