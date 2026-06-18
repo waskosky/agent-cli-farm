@@ -32,6 +32,7 @@ TMUX_STOP_REASON_OPTION = "@codex_stop_reason"
 DEFAULT_TIMEOUT_SECONDS = 7200.0
 DEFAULT_MAX_LOOPS = 0
 DEFAULT_MAX_TRANSIENT_RETRIES = 12
+DEFAULT_RETRY_NOTIFY_AFTER_SECONDS = 300.0
 
 DEFAULT_STOP_PATTERNS = [
     r"rate[\s_-]*limit(?:ed|ing)?",
@@ -111,6 +112,7 @@ class LooperConfig:
     fresh_session_per_loop: bool = True
     max_loops: int = DEFAULT_MAX_LOOPS
     max_transient_retries: int = DEFAULT_MAX_TRANSIENT_RETRIES
+    retry_notify_after_seconds: float = DEFAULT_RETRY_NOTIFY_AFTER_SECONDS
     log_dir: Path = Path(".agent-looper/runs")
     stop_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_STOP_PATTERNS))
     kill_on_stop_pattern: bool = True
@@ -135,6 +137,7 @@ class RunOptions:
     sleep_seconds: float | None = None
     max_loops: int | None = None
     max_transient_retries: int | None = None
+    retry_notify_after_seconds: float | None = None
     once: bool = False
     fresh_session_per_loop: bool | None = None
     cwd: Path | None = None
@@ -211,6 +214,13 @@ def positive_float(value: str) -> float:
     out = float(value)
     if out <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
+    return out
+
+
+def nonnegative_float(value: str) -> float:
+    out = float(value)
+    if out < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
     return out
 
 
@@ -372,6 +382,14 @@ def retry_status_message(*, result: ProcessResult, attempt: int, delay_seconds: 
     kind = result.retry_kind or classify_retry_kind(result.stop_reason or "") or "retryable"
     reason = result.stop_reason or "retryable provider signal"
     return f"retrying {kind} attempt {attempt}; next in {format_duration(delay_seconds)}: {reason}"
+
+
+def should_notify_retry_wait(*, delay_seconds: float, looper: LooperConfig) -> bool:
+    return looper.retry_notify_after_seconds > 0 and delay_seconds >= looper.retry_notify_after_seconds
+
+
+def retry_notification_message(retry_status: str) -> str:
+    return f"Looper retry wait: {retry_status}"
 
 
 def transient_retry_limit_message(*, result: ProcessResult, max_retries: int) -> str:
@@ -612,6 +630,15 @@ def set_tmux_window_option(name: str, value: str) -> None:
     subprocess.run([tmux, "set-window-option", "-q", name, value], check=False)
 
 
+def display_tmux_message(message: str) -> None:
+    if not os.environ.get("TMUX"):
+        return
+    tmux = shutil.which("tmux")
+    if not tmux:
+        return
+    subprocess.run([tmux, "display-message", message], check=False)
+
+
 def rename_current_window(label: str) -> None:
     if not os.environ.get("TMUX"):
         return
@@ -645,6 +672,8 @@ def apply_run_options(config: LooperConfig, options: RunOptions) -> LooperConfig
         updates["max_loops"] = options.max_loops
     if options.max_transient_retries is not None:
         updates["max_transient_retries"] = options.max_transient_retries
+    if options.retry_notify_after_seconds is not None:
+        updates["retry_notify_after_seconds"] = options.retry_notify_after_seconds
     if options.once:
         updates["max_loops"] = 1
     if options.fresh_session_per_loop is not None:
@@ -775,6 +804,8 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
                         )
                         set_tmux_window_option(TMUX_STATE_OPTION, "RUN")
                         set_tmux_window_option(TMUX_STOP_REASON_OPTION, retry_status[:250])
+                        if should_notify_retry_wait(delay_seconds=delay_seconds, looper=looper):
+                            display_tmux_message(retry_notification_message(retry_status))
                         print(f"\nRETRY: {result.stop_reason}")
                         print(f"last log: {log_path}")
                         print(f"sleeping {format_duration(delay_seconds)} before retry")
@@ -1066,6 +1097,9 @@ def load_config(path: Path) -> LoadedConfig:
         max_transient_retries=int(
             raw_looper.get("max_transient_retries", default_looper.max_transient_retries)
         ),
+        retry_notify_after_seconds=float(
+            raw_looper.get("retry_notify_after_seconds", default_looper.retry_notify_after_seconds)
+        ),
         log_dir=_path(raw_looper.get("log_dir"), default_looper.log_dir),
         stop_patterns=_as_str_list(raw_looper.get("stop_patterns"), "looper.stop_patterns")
         or list(default_looper.stop_patterns),
@@ -1128,6 +1162,7 @@ def build_example_config(
     sleep_seconds: str = "2",
     max_loops: str = "0",
     max_transient_retries: str = "12",
+    retry_notify_after_seconds: str = "300",
 ) -> str:
     return f"""# agent-looper.toml
 # Prompt files split sequences with a line containing only ---.
@@ -1143,6 +1178,8 @@ max_loops = {max_loops}
 # Rate-limit retries are uncapped; this caps repeated non-rate-limit transient retries.
 # max_transient_retries = 0 means unlimited.
 max_transient_retries = {max_transient_retries}
+# Notify the tmux pane for retry waits at or above this many seconds. 0 disables.
+retry_notify_after_seconds = {retry_notify_after_seconds}
 log_dir = ".agent-looper/runs"
 
 [agents.claude]
@@ -1261,6 +1298,19 @@ def _ask_number(prompt: str, default: str) -> str:
     return value
 
 
+def _ask_nonnegative_number(prompt: str, default: str) -> str:
+    value = _ask(prompt, default)
+    try:
+        parsed = float(value)
+    except ValueError:
+        print(f"Invalid number {value!r}; using {default}.")
+        return default
+    if parsed < 0:
+        print(f"Number must be zero or greater; using {default}.")
+        return default
+    return value
+
+
 def _ask_nonnegative_int(prompt: str, default: str) -> str:
     value = _ask(prompt, default)
     try:
@@ -1287,6 +1337,10 @@ def interactive_starter_content() -> tuple[str, str]:
         "Max transient retries before stopping (0 means unlimited)",
         "12",
     )
+    retry_notify_after_seconds = _ask_nonnegative_number(
+        "Notify for retry waits at or above seconds (0 disables)",
+        "300",
+    )
 
     print("Enter prompts one at a time. Submit a blank prompt when finished.")
     prompts: list[str] = []
@@ -1303,6 +1357,7 @@ def interactive_starter_content() -> tuple[str, str]:
             sleep_seconds=sleep_seconds,
             max_loops=max_loops,
             max_transient_retries=max_transient_retries,
+            retry_notify_after_seconds=retry_notify_after_seconds,
         ),
         prompt_text,
     )
@@ -1398,6 +1453,12 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
         type=nonnegative_int,
         help="cap non-rate-limit transient retries; 0 means unlimited",
     )
+    parser.add_argument(
+        "--retry-notify-after",
+        dest="retry_notify_after_seconds",
+        type=nonnegative_float,
+        help="show tmux notification for retry waits at or above this many seconds; 0 disables",
+    )
     parser.add_argument("--once", action="store_true", help="run the sequence once, then stop")
     session_group = parser.add_mutually_exclusive_group()
     session_group.add_argument(
@@ -1458,6 +1519,7 @@ def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None 
         sleep_seconds=args.sleep,
         max_loops=args.max_loops,
         max_transient_retries=args.max_transient_retries,
+        retry_notify_after_seconds=args.retry_notify_after_seconds,
         once=args.once,
         fresh_session_per_loop=args.fresh_session_per_loop,
         cwd=Path(args.cwd) if args.cwd else None,

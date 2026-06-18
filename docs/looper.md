@@ -70,6 +70,8 @@ Use `--once` or `--max-loops N` for bounded runs. Without either, the looper rep
 | `--timeout SECONDS` | `7200` | Per-prompt subprocess timeout. |
 | `--sleep SECONDS` | `2` | Sleep between completed loops. |
 | `--max-loops N` | `0` | Maximum loops; `0` means unlimited. |
+| `--max-transient-retries N` | `12` | Cap non-rate-limit transient retries; `0` means unlimited. |
+| `--retry-notify-after SECONDS` | `300` | Show a tmux notification for retry waits at or above this threshold; `0` disables. |
 | `--once` | off | Equivalent to `--max-loops 1`. |
 | `--fresh-session-per-loop` | on | Start a new agent session each loop. |
 | `--reuse-session` | off | Reuse one session across all loops. |
@@ -102,6 +104,7 @@ sleep_seconds = 2
 fresh_session_per_loop = true
 max_loops = 0
 max_transient_retries = 12
+retry_notify_after_seconds = 300
 log_dir = ".agent-looper/runs"
 ```
 
@@ -129,7 +132,7 @@ Available placeholders: `{prompt}`, `{session}`, `{session_id}`, `{loop}`, `{pro
 
 The looper retries the current prompt when it sees provider rate-limit, backoff, quota, temporary-unavailability, or overload signals. If structured provider output includes a relative retry delay or reset timestamp, the looper waits for that delay; otherwise it falls back to the configured `sleep_seconds` delay. Informational rate-limit telemetry such as Claude `rate_limit_event` records with `status = "allowed"` or `status = "allowed_warning"` is ignored.
 
-Rate-limit retries are uncapped so long-running loops can wait for quota reset and keep going. Non-rate-limit transient retries are capped by `max_transient_retries`; set it to `0` to allow unlimited transient retries. While waiting, the looper keeps the tmux window state as `RUN` and writes the retry attempt, retry kind, next wait duration, and reason into `@codex_stop_reason` for status tooling.
+Rate-limit retries are uncapped so long-running loops can wait for quota reset and keep going. Non-rate-limit transient retries are capped by `max_transient_retries`; set it to `0` to allow unlimited transient retries. While waiting, the looper keeps the tmux window state as `RUN` and writes the retry attempt, retry kind, next wait duration, and reason into `@codex_stop_reason` for status tooling. Retry waits at or above `retry_notify_after_seconds` also emit a tmux display message; set it to `0` to disable long-wait notifications.
 
 The looper stops when it sees:
 
@@ -144,9 +147,8 @@ Logs are written under `.agent-looper/runs/<timestamp>__<label>/`.
 
 Keep these out of the core loop until a concrete failure mode needs them:
 
-1. Long-wait notifications for reset-aware sleeps longer than a configured threshold.
-2. Provider-specific retry metadata extractors for future Codex/Gemini structured fields that differ from Claude's `rate_limit_event`.
-3. Optional semantic completion gates for autonomous backlog loops; ordinary prompt sequences should remain simple file-backed command loops.
+1. Provider-specific retry metadata extractors for future Codex/Gemini structured fields that differ from Claude's `rate_limit_event`.
+2. Optional semantic completion gates for autonomous backlog loops; ordinary prompt sequences should remain simple file-backed command loops.
 
 ## Farm Integration
 

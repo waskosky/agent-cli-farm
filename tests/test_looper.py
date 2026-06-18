@@ -162,6 +162,7 @@ sleep_seconds = 5
 fresh_session_per_loop = false
 max_loops = 15
 max_transient_retries = 4
+retry_notify_after_seconds = 120
 log_dir = ".agent-looper/runs"
 stop_patterns = ["rate limit", "overloaded"]
 kill_on_stop_pattern = false
@@ -193,6 +194,7 @@ scan_stdout_for_stop_patterns = true
         self.assertFalse(loaded.looper.fresh_session_per_loop)
         self.assertEqual(loaded.looper.max_loops, 15)
         self.assertEqual(loaded.looper.max_transient_retries, 4)
+        self.assertEqual(loaded.looper.retry_notify_after_seconds, 120.0)
         self.assertEqual(loaded.looper.stop_patterns, ["rate limit", "overloaded"])
         self.assertFalse(loaded.looper.kill_on_stop_pattern)
         self.assertTrue(loaded.looper.ignore_nonzero)
@@ -427,6 +429,142 @@ scan_stdout_for_stop_patterns = true
             ),
             tmux_options,
         )
+
+    def test_run_loop_notifies_for_long_retry_delay(self) -> None:
+        async def exercise() -> list[str]:
+            notifications: list[str] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+            original_display_tmux_message = self.looper.display_tmux_message
+
+            calls = 0
+
+            async def fake_run_command(**kwargs: object) -> object:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return self.looper.ProcessResult(
+                        returncode=1,
+                        stop_reason="rate limit event: status=rejected",
+                        retry_after_seconds=600.0,
+                        retry_kind="rate_limit",
+                    )
+                return self.looper.ProcessResult(returncode=0)
+
+            async def fake_sleep(seconds: float) -> None:
+                return None
+
+            def fake_display_tmux_message(message: str) -> None:
+                notifications.append(message)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            self.looper.display_tmux_message = fake_display_tmux_message
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "prompts.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        prompt_file=prompt_file,
+                        log_dir=root / "runs",
+                        sleep_seconds=0.25,
+                        max_loops=1,
+                        retry_notify_after_seconds=300.0,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="notify-smoke",
+                    )
+
+                    await self.looper.run_loop(agent=agent, looper=looper, options=options)
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+                self.looper.display_tmux_message = original_display_tmux_message
+
+            return notifications
+
+        notifications = asyncio.run(exercise())
+
+        self.assertEqual(
+            notifications,
+            [
+                "Looper retry wait: retrying rate_limit attempt 1; next in 10m: "
+                "rate limit event: status=rejected"
+            ],
+        )
+
+    def test_run_loop_does_not_notify_for_short_retry_delay(self) -> None:
+        async def exercise() -> list[str]:
+            notifications: list[str] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+            original_display_tmux_message = self.looper.display_tmux_message
+
+            calls = 0
+
+            async def fake_run_command(**kwargs: object) -> object:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return self.looper.ProcessResult(
+                        returncode=1,
+                        stop_reason="rate limit event: status=rejected",
+                        retry_after_seconds=30.0,
+                        retry_kind="rate_limit",
+                    )
+                return self.looper.ProcessResult(returncode=0)
+
+            async def fake_sleep(seconds: float) -> None:
+                return None
+
+            def fake_display_tmux_message(message: str) -> None:
+                notifications.append(message)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            self.looper.display_tmux_message = fake_display_tmux_message
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "prompts.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        prompt_file=prompt_file,
+                        log_dir=root / "runs",
+                        sleep_seconds=0.25,
+                        max_loops=1,
+                        retry_notify_after_seconds=300.0,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="quiet-smoke",
+                    )
+
+                    await self.looper.run_loop(agent=agent, looper=looper, options=options)
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+                self.looper.display_tmux_message = original_display_tmux_message
+
+            return notifications
+
+        self.assertEqual(asyncio.run(exercise()), [])
 
     def test_run_loop_caps_transient_retries(self) -> None:
         async def exercise() -> tuple[int, int, list[float], list[tuple[str, str]]]:
@@ -687,6 +825,7 @@ class LooperCliTests(unittest.TestCase):
             self.assertIn("[looper]", config_text)
             self.assertIn("timeout_seconds = 7200", config_text)
             self.assertIn("max_transient_retries = 12", config_text)
+            self.assertIn("retry_notify_after_seconds = 300", config_text)
 
     def test_no_args_first_run_initializes_and_prints_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -758,6 +897,7 @@ set -euo pipefail
                     "5",
                     "12",
                     "4",
+                    "180",
                     "Summarize this repository.",
                     "Propose one safe cleanup.",
                     "",
@@ -781,6 +921,7 @@ set -euo pipefail
             self.assertIn("sleep_seconds = 5", config)
             self.assertIn("max_loops = 12", config)
             self.assertIn("max_transient_retries = 4", config)
+            self.assertIn("retry_notify_after_seconds = 180", config)
             self.assertIn("Summarize this repository.", prompts)
             self.assertIn("---", prompts)
             self.assertIn("Propose one safe cleanup.", prompts)
