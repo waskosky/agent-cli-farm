@@ -12,7 +12,7 @@ A tmux session manager for running and restoring multiple Codex CLI instances, w
 - **Status updates**: Tracks RUN/READY/ERR in tmux metadata and notifies when a window becomes READY
 - **Memory warnings**: Flag tmux windows whose pane process trees exceed a chosen RSS threshold
 - **Autosave/autorestore (optional)**: Systemd user services to persist sessions across logins
-- **Prompt loopers**: Run repeated file-backed prompt sequences with timeout handling and rate-limit retries
+- **Prompt loopers**: Run repeated file-backed prompt sequences with timeout handling, reset-aware rate-limit retries, and transient retry caps
 - **Tool wrappers**: `claude-*` and `gemini-*` commands use the same tmux workflow
 
 ## Quick Start

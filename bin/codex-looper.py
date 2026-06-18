@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,7 @@ TMUX_STATE_OPTION = "@codex_state"
 TMUX_STOP_REASON_OPTION = "@codex_stop_reason"
 DEFAULT_TIMEOUT_SECONDS = 7200.0
 DEFAULT_MAX_LOOPS = 0
+DEFAULT_MAX_TRANSIENT_RETRIES = 12
 
 DEFAULT_STOP_PATTERNS = [
     r"rate[\s_-]*limit(?:ed|ing)?",
@@ -55,6 +57,24 @@ RETRYABLE_STOP_REASON_PATTERN = re.compile(
     r"overloaded",
     re.IGNORECASE,
 )
+RATE_LIMIT_STOP_REASON_PATTERN = re.compile(
+    r"rate[\s_-]*limit|"
+    r"\b429\b|"
+    r"too many requests|"
+    r"quota exceeded",
+    re.IGNORECASE,
+)
+RELATIVE_RETRY_DELAY_KEYS = (
+    "retry_after_seconds",
+    "retryAfterSeconds",
+    "retry_after",
+    "retryAfter",
+    "reset_after_seconds",
+    "resetAfterSeconds",
+    "reset_after",
+    "resetAfter",
+)
+ABSOLUTE_RETRY_RESET_KEYS = ("resetsAt", "reset_at", "resetAt")
 
 
 class ConfigError(ValueError):
@@ -90,6 +110,7 @@ class LooperConfig:
     sleep_seconds: float = 2.0
     fresh_session_per_loop: bool = True
     max_loops: int = DEFAULT_MAX_LOOPS
+    max_transient_retries: int = DEFAULT_MAX_TRANSIENT_RETRIES
     log_dir: Path = Path(".agent-looper/runs")
     stop_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_STOP_PATTERNS))
     kill_on_stop_pattern: bool = True
@@ -113,6 +134,7 @@ class RunOptions:
     timeout_seconds: float | None = None
     sleep_seconds: float | None = None
     max_loops: int | None = None
+    max_transient_retries: int | None = None
     once: bool = False
     fresh_session_per_loop: bool | None = None
     cwd: Path | None = None
@@ -151,6 +173,8 @@ class CommandContext:
 class ParsedLine:
     session_id: str | None = None
     stop_reason: str | None = None
+    retry_after_seconds: float | None = None
+    retry_kind: str | None = None
 
 
 @dataclass
@@ -158,6 +182,8 @@ class ProcessResult:
     returncode: int | None
     session_id: str | None = None
     stop_reason: str | None = None
+    retry_after_seconds: float | None = None
+    retry_kind: str | None = None
     timed_out: bool = False
 
 
@@ -281,6 +307,85 @@ def is_retryable_stop_reason(reason: str) -> bool:
     return bool(RETRYABLE_STOP_REASON_PATTERN.search(reason))
 
 
+def classify_retry_kind(reason: str) -> str | None:
+    if not is_retryable_stop_reason(reason):
+        return None
+    if RATE_LIMIT_STOP_REASON_PATTERN.search(reason):
+        return "rate_limit"
+    return "transient"
+
+
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_retry_after_seconds(data: dict[str, Any], *, now_epoch: float) -> float | None:
+    sources: list[dict[str, Any]] = [data]
+    info = data.get("rate_limit_info")
+    if isinstance(info, dict):
+        sources.insert(0, info)
+
+    for source in sources:
+        for key in RELATIVE_RETRY_DELAY_KEYS:
+            delay = _coerce_float(source.get(key))
+            if delay is not None:
+                return max(0.0, delay)
+
+    for source in sources:
+        for key in ABSOLUTE_RETRY_RESET_KEYS:
+            reset_epoch = _coerce_float(source.get(key))
+            if reset_epoch is not None:
+                return max(0.0, reset_epoch - now_epoch)
+
+    return None
+
+
+def retry_delay_seconds(result: ProcessResult, looper: LooperConfig) -> float:
+    if result.retry_after_seconds is not None:
+        return max(0.0, result.retry_after_seconds)
+    return looper.sleep_seconds
+
+
+def format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:g}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:g}m"
+    hours = minutes / 60
+    return f"{hours:g}h"
+
+
+def retry_status_message(*, result: ProcessResult, attempt: int, delay_seconds: float) -> str:
+    kind = result.retry_kind or classify_retry_kind(result.stop_reason or "") or "retryable"
+    reason = result.stop_reason or "retryable provider signal"
+    return f"retrying {kind} attempt {attempt}; next in {format_duration(delay_seconds)}: {reason}"
+
+
+def transient_retry_limit_message(*, result: ProcessResult, max_retries: int) -> str:
+    reason = result.stop_reason or "retryable provider signal"
+    return f"transient retry limit reached after {max_retries} attempts: {reason}"
+
+
+def transient_retry_limit_reached(*, result: ProcessResult, retry_count: int, looper: LooperConfig) -> bool:
+    if looper.max_transient_retries <= 0:
+        return False
+    retry_kind = result.retry_kind or classify_retry_kind(result.stop_reason or "")
+    return retry_kind != "rate_limit" and retry_count > looper.max_transient_retries
+
+
 def parse_output_line(
     *,
     line: str,
@@ -288,9 +393,11 @@ def parse_output_line(
     agent_kind: str,
     patterns: list[re.Pattern[str]],
     scan_stdout: bool,
+    now_epoch: float | None = None,
 ) -> ParsedLine:
     stripped = line.strip()
     parsed = ParsedLine()
+    now_epoch = time.time() if now_epoch is None else now_epoch
 
     data: Any | None = None
     if stripped.startswith("{") and stripped.endswith("}"):
@@ -320,6 +427,8 @@ def parse_output_line(
                 return parsed
             if status == "rejected" or status is None:
                 parsed.stop_reason = f"rate limit event: status={status or 'unknown'}"
+                parsed.retry_after_seconds = _extract_retry_after_seconds(data, now_epoch=now_epoch)
+                parsed.retry_kind = "rate_limit"
                 return parsed
 
         if (
@@ -344,6 +453,8 @@ def parse_output_line(
             match = _match_text(_json_blob(data), patterns)
             if match:
                 parsed.stop_reason = f"stop pattern detected in structured {stream}: {match!r}"
+                parsed.retry_after_seconds = _extract_retry_after_seconds(data, now_epoch=now_epoch)
+                parsed.retry_kind = classify_retry_kind(match)
                 return parsed
 
         return parsed
@@ -352,6 +463,7 @@ def parse_output_line(
         match = _match_text(line, patterns)
         if match:
             parsed.stop_reason = f"stop pattern detected in {stream}: {match!r}"
+            parsed.retry_kind = classify_retry_kind(match)
 
     return parsed
 
@@ -457,6 +569,8 @@ async def run_command(
                     result.session_id = parsed.session_id
                 if parsed.stop_reason and not result.stop_reason:
                     result.stop_reason = parsed.stop_reason
+                    result.retry_after_seconds = parsed.retry_after_seconds
+                    result.retry_kind = parsed.retry_kind
                     stop_event.set()
 
     async def wait_for_stop() -> None:
@@ -529,6 +643,8 @@ def apply_run_options(config: LooperConfig, options: RunOptions) -> LooperConfig
         updates["sleep_seconds"] = options.sleep_seconds
     if options.max_loops is not None:
         updates["max_loops"] = options.max_loops
+    if options.max_transient_retries is not None:
+        updates["max_transient_retries"] = options.max_transient_retries
     if options.once:
         updates["max_loops"] = 1
     if options.fresh_session_per_loop is not None:
@@ -635,12 +751,34 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
                 if result.stop_reason:
                     if is_retryable_stop_reason(result.stop_reason):
                         retry_count += 1
+                        if transient_retry_limit_reached(
+                            result=result,
+                            retry_count=retry_count,
+                            looper=looper,
+                        ):
+                            limit_reason = transient_retry_limit_message(
+                                result=result,
+                                max_retries=looper.max_transient_retries,
+                            )
+                            print(f"\nSTOP: {limit_reason}")
+                            print(f"last log: {log_path}")
+                            set_tmux_window_option(TMUX_STATE_OPTION, "READY")
+                            set_tmux_window_option(TMUX_STOP_REASON_OPTION, limit_reason[:250])
+                            return 0
                         if result.session_id or agent.kind == "claude":
                             attempt_first_prompt_in_session = False
+                        delay_seconds = retry_delay_seconds(result, looper)
+                        retry_status = retry_status_message(
+                            result=result,
+                            attempt=retry_count,
+                            delay_seconds=delay_seconds,
+                        )
+                        set_tmux_window_option(TMUX_STATE_OPTION, "RUN")
+                        set_tmux_window_option(TMUX_STOP_REASON_OPTION, retry_status[:250])
                         print(f"\nRETRY: {result.stop_reason}")
                         print(f"last log: {log_path}")
-                        print(f"sleeping {looper.sleep_seconds:g} seconds before retry")
-                        await asyncio.sleep(looper.sleep_seconds)
+                        print(f"sleeping {format_duration(delay_seconds)} before retry")
+                        await asyncio.sleep(delay_seconds)
                         continue
 
                     print(f"\nSTOP: {result.stop_reason}")
@@ -656,6 +794,7 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
                     set_tmux_window_option(TMUX_STOP_REASON_OPTION, f"exit {result.returncode}")
                     return int(result.returncode or 1)
 
+                set_tmux_window_option(TMUX_STOP_REASON_OPTION, "")
                 break
 
         print(f"\ncompleted loop {loop_number}")
@@ -924,6 +1063,9 @@ def load_config(path: Path) -> LoadedConfig:
             raw_looper.get("fresh_session_per_loop", default_looper.fresh_session_per_loop)
         ),
         max_loops=int(raw_looper.get("max_loops", default_looper.max_loops)),
+        max_transient_retries=int(
+            raw_looper.get("max_transient_retries", default_looper.max_transient_retries)
+        ),
         log_dir=_path(raw_looper.get("log_dir"), default_looper.log_dir),
         stop_patterns=_as_str_list(raw_looper.get("stop_patterns"), "looper.stop_patterns")
         or list(default_looper.stop_patterns),
@@ -985,6 +1127,7 @@ def build_example_config(
     timeout_seconds: str = "7200",
     sleep_seconds: str = "2",
     max_loops: str = "0",
+    max_transient_retries: str = "12",
 ) -> str:
     return f"""# agent-looper.toml
 # Prompt files split sequences with a line containing only ---.
@@ -997,6 +1140,9 @@ sleep_seconds = {sleep_seconds}
 fresh_session_per_loop = true
 # max_loops = 0 means forever. Use --once or --max-loops for a bounded run.
 max_loops = {max_loops}
+# Rate-limit retries are uncapped; this caps repeated non-rate-limit transient retries.
+# max_transient_retries = 0 means unlimited.
+max_transient_retries = {max_transient_retries}
 log_dir = ".agent-looper/runs"
 
 [agents.claude]
@@ -1137,6 +1283,10 @@ def interactive_starter_content() -> tuple[str, str]:
     timeout_seconds = _ask_number("Timeout seconds per prompt", "7200")
     sleep_seconds = _ask_number("Sleep seconds between loops", "2")
     max_loops = _ask_nonnegative_int("Max loops (0 means forever)", "0")
+    max_transient_retries = _ask_nonnegative_int(
+        "Max transient retries before stopping (0 means unlimited)",
+        "12",
+    )
 
     print("Enter prompts one at a time. Submit a blank prompt when finished.")
     prompts: list[str] = []
@@ -1152,6 +1302,7 @@ def interactive_starter_content() -> tuple[str, str]:
             timeout_seconds=timeout_seconds,
             sleep_seconds=sleep_seconds,
             max_loops=max_loops,
+            max_transient_retries=max_transient_retries,
         ),
         prompt_text,
     )
@@ -1242,6 +1393,11 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
     parser.add_argument("--timeout", type=positive_float, help="timeout seconds per prompt")
     parser.add_argument("--sleep", type=positive_float, help="sleep seconds between loops")
     parser.add_argument("--max-loops", type=nonnegative_int, help="0 means forever")
+    parser.add_argument(
+        "--max-transient-retries",
+        type=nonnegative_int,
+        help="cap non-rate-limit transient retries; 0 means unlimited",
+    )
     parser.add_argument("--once", action="store_true", help="run the sequence once, then stop")
     session_group = parser.add_mutually_exclusive_group()
     session_group.add_argument(
@@ -1301,6 +1457,7 @@ def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None 
         timeout_seconds=args.timeout,
         sleep_seconds=args.sleep,
         max_loops=args.max_loops,
+        max_transient_retries=args.max_transient_retries,
         once=args.once,
         fresh_session_per_loop=args.fresh_session_per_loop,
         cwd=Path(args.cwd) if args.cwd else None,
