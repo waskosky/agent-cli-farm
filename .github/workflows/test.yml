@@ -29,15 +29,22 @@ jobs:
       run: |
         for script in bin/codex-*; do
           echo "Checking $script..."
-          bash -n "$script"
+          shebang="$(head -n 1 "$script")"
+          if echo "$shebang" | grep -qE '^#!.*(env[[:space:]]+)?(ba)?sh([[:space:]]|$)'; then
+            bash -n "$script"
+          elif echo "$shebang" | grep -qE '^#!.*python'; then
+            PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile "$script"
+          else
+            echo "Skipping $script (unknown shebang)"
+          fi
         done
         
     - name: Test help messages
       run: |
         export PATH="$HOME/bin:$PATH"
-        codex-adopt 2>&1 | grep -q "Usage:"
-        codex-board invalid 2>&1 | grep -q "Usage:"
-        codex-status invalid 2>&1 | grep -q "Usage:"
+        codex-looper --help 2>&1 | grep -q "Tiny coding-agent looper"
+        codex-board --help 2>&1 | grep -q "Usage:"
+        codex-status --help 2>&1 | grep -q "Usage:"
         
     - name: Test status commands
       run: |

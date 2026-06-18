@@ -190,7 +190,8 @@ restore_all_registered() {
     if [ "$force_requested" -eq 1 ]; then
       restore_args+=("--force")
     fi
-    if CODEX_SESSION="$session" "$0" "${restore_args[@]}" "$manifest"; then
+    restore_args+=("$manifest")
+    if CODEX_SESSION="$session" "$0" "${restore_args[@]}"; then
       count=$((count + 1))
     else
       status=1

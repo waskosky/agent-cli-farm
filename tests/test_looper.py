@@ -230,6 +230,22 @@ scan_stdout_for_stop_patterns = true
 
         self.assertIsNone(parsed.stop_reason)
 
+    def test_stop_signal_parsing_ignores_allowed_rate_limit_event(self) -> None:
+        patterns = self.looper.compile_stop_patterns([r"rate[\s_-]*limit"])
+
+        parsed = self.looper.parse_output_line(
+            line=(
+                '{"type":"rate_limit_event",'
+                '"rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}\n'
+            ),
+            stream="stdout",
+            agent_kind="claude",
+            patterns=patterns,
+            scan_stdout=False,
+        )
+
+        self.assertIsNone(parsed.stop_reason)
+
     def test_stop_signal_parsing_detects_stderr_and_codex_thread_id(self) -> None:
         patterns = self.looper.compile_stop_patterns([r"rate\s*limit"])
 
@@ -316,6 +332,63 @@ scan_stdout_for_stop_patterns = true
         self.assertTrue(result.timed_out)
         self.assertEqual(result.stop_reason, "local timeout after 0.01 seconds")
         self.assertTrue(transport.closed)
+
+    def test_run_loop_retries_current_prompt_after_rate_limit_stop(self) -> None:
+        async def exercise() -> tuple[int, list[list[str]], list[float]]:
+            calls: list[list[str]] = []
+            sleeps: list[float] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+
+            async def fake_run_command(**kwargs: object) -> object:
+                calls.append(list(kwargs["command"]))  # type: ignore[index]
+                if len(calls) == 1:
+                    return self.looper.ProcessResult(
+                        returncode=1,
+                        stop_reason="rate limit event: status=rejected",
+                    )
+                return self.looper.ProcessResult(returncode=0)
+
+            async def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "prompts.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        prompt_file=prompt_file,
+                        log_dir=root / "runs",
+                        sleep_seconds=0.25,
+                        max_loops=1,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="retry-smoke",
+                    )
+
+                    result = await self.looper.run_loop(agent=agent, looper=looper, options=options)
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+
+            return result, calls, sleeps
+
+        result, calls, sleeps = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [["agent", "hello"], ["agent", "hello"]])
+        self.assertEqual(sleeps, [0.25])
 
 
 class LooperCliTests(unittest.TestCase):
@@ -497,7 +570,7 @@ set -euo pipefail
             self.assertEqual(config.read_text(encoding="utf-8"), "custom config\n")
             self.assertEqual(prompts.read_text(encoding="utf-8"), "custom prompt\n")
             lines = log.read_text(encoding="utf-8").splitlines()
-            self.assertIn(f"args=-d {tmpdir}", lines)
+            self.assertIn(f"args=-d {tmpdir.resolve()}", lines)
             name_line = next(line for line in lines if line.startswith("CODEX_NAME="))
             args_line = next(line for line in lines if line.startswith("CODEX_ARGS="))
             self.assertRegex(name_line, r"^CODEX_NAME=Looper_[0-9a-f]{6}$")

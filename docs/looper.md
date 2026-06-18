@@ -124,13 +124,14 @@ scan_stdout_for_stop_patterns = true
 
 Available placeholders: `{prompt}`, `{session}`, `{session_id}`, `{loop}`, `{prompt_index}`, `{label}`, `{run_dir}`.
 
-## Stop Conditions
+## Retry And Stop Conditions
+
+The looper retries the current prompt after the configured `sleep_seconds` delay when it sees provider rate-limit, backoff, quota, temporary-unavailability, or overload signals. Informational rate-limit telemetry such as Claude `rate_limit_event` records with `status = "allowed"` or `status = "allowed_warning"` is ignored.
 
 The looper stops when it sees:
 
 - local per-prompt timeout
-- provider rate-limit or backoff signal
-- common timeout, overload, or quota wording
+- common timeout, deadline, or request-abort wording
 - nonzero command exit, unless `--ignore-nonzero` is set
 
 Logs are written under `.agent-looper/runs/<timestamp>__<label>/`.
