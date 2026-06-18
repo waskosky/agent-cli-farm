@@ -42,9 +42,9 @@ jobs:
     - name: Test help messages
       run: |
         export PATH="$HOME/bin:$PATH"
-        codex-adopt 2>&1 | grep -q "Usage:"
-        codex-board invalid 2>&1 | grep -q "Usage:"
-        codex-status invalid 2>&1 | grep -q "Usage:"
+        codex-looper --help 2>&1 | grep -q "Tiny coding-agent looper"
+        codex-board --help 2>&1 | grep -q "Usage:"
+        codex-status --help 2>&1 | grep -q "Usage:"
         
     - name: Test status commands
       run: |
