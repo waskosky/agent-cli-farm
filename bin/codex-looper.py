@@ -44,6 +44,17 @@ DEFAULT_STOP_PATTERNS = [
     r"deadline exceeded",
     r"request aborted",
 ]
+RETRYABLE_STOP_REASON_PATTERN = re.compile(
+    r"rate[\s_-]*limit|"
+    r"\b429\b|"
+    r"too many requests|"
+    r"retry[\s_-]*after|"
+    r"back[\s_-]*off|"
+    r"quota exceeded|"
+    r"temporarily unavailable|"
+    r"overloaded",
+    re.IGNORECASE,
+)
 
 
 class ConfigError(ValueError):
@@ -266,6 +277,10 @@ def _match_text(text: str, patterns: list[re.Pattern[str]]) -> str | None:
     return None
 
 
+def is_retryable_stop_reason(reason: str) -> bool:
+    return bool(RETRYABLE_STOP_REASON_PATTERN.search(reason))
+
+
 def parse_output_line(
     *,
     line: str,
@@ -301,7 +316,9 @@ def parse_output_line(
         if event_type == "rate_limit_event":
             info = data.get("rate_limit_info", {})
             status = info.get("status") if isinstance(info, dict) else None
-            if status in {"allowed_warning", "rejected"} or status is None:
+            if status in {"allowed", "allowed_warning"}:
+                return parsed
+            if status == "rejected" or status is None:
                 parsed.stop_reason = f"rate limit event: status={status or 'unknown'}"
                 return parsed
 
@@ -567,59 +584,79 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
         print(f"\n===== loop {loop_number} / session {session_name} =====")
 
         for prompt_index, prompt in enumerate(prompts, start=1):
-            context = CommandContext(
-                prompt=prompt,
-                session=session_name,
-                session_id=session_id,
-                loop=loop_number,
-                prompt_index=prompt_index,
-                label=label,
-                run_dir=run_dir,
-            )
-            command = build_command(
-                agent=agent,
-                context=context,
-                is_first_prompt_in_session=first_prompt_in_session,
-            )
+            attempt_first_prompt_in_session = first_prompt_in_session
             first_prompt_in_session = False
+            retry_count = 0
             log_path = run_dir / f"loop-{loop_number:04d}__prompt-{prompt_index:03d}.log"
 
-            print(f"\n--- prompt {prompt_index}/{len(prompts)} ---")
-            print(f"$ {shlex.join(command)}")
+            while True:
+                context = CommandContext(
+                    prompt=prompt,
+                    session=session_name,
+                    session_id=session_id,
+                    loop=loop_number,
+                    prompt_index=prompt_index,
+                    label=label,
+                    run_dir=run_dir,
+                )
+                command = build_command(
+                    agent=agent,
+                    context=context,
+                    is_first_prompt_in_session=attempt_first_prompt_in_session,
+                )
 
-            if options.dry_run:
-                continue
+                print(f"\n--- prompt {prompt_index}/{len(prompts)} ---")
+                if retry_count:
+                    print(f"retry attempt: {retry_count}")
+                print(f"$ {shlex.join(command)}")
 
-            result = await run_command(
-                command=command,
-                cwd=agent.cwd,
-                env=agent.env,
-                timeout_seconds=looper.timeout_seconds,
-                log_path=log_path,
-                agent_kind=agent.kind,
-                patterns=patterns,
-                scan_stdout=(looper.scan_stdout_for_stop_patterns or agent.scan_stdout_for_stop_patterns),
-                kill_on_stop_pattern=looper.kill_on_stop_pattern,
-            )
+                if options.dry_run:
+                    break
 
-            if result.session_id:
-                session_id = result.session_id
-                if not looper.fresh_session_per_loop:
-                    persistent_session_id = session_id
+                result = await run_command(
+                    command=command,
+                    cwd=agent.cwd,
+                    env=agent.env,
+                    timeout_seconds=looper.timeout_seconds,
+                    log_path=log_path,
+                    agent_kind=agent.kind,
+                    patterns=patterns,
+                    scan_stdout=(
+                        looper.scan_stdout_for_stop_patterns or agent.scan_stdout_for_stop_patterns
+                    ),
+                    kill_on_stop_pattern=looper.kill_on_stop_pattern,
+                )
 
-            if result.stop_reason:
-                print(f"\nSTOP: {result.stop_reason}")
-                print(f"last log: {log_path}")
-                set_tmux_window_option(TMUX_STATE_OPTION, "READY")
-                set_tmux_window_option(TMUX_STOP_REASON_OPTION, result.stop_reason[:250])
-                return 0
+                if result.session_id:
+                    session_id = result.session_id
+                    if not looper.fresh_session_per_loop:
+                        persistent_session_id = session_id
 
-            if result.returncode not in (0, None) and not looper.ignore_nonzero:
-                print(f"\nSTOP: command exited with code {result.returncode}")
-                print(f"last log: {log_path}")
-                set_tmux_window_option(TMUX_STATE_OPTION, "ERR")
-                set_tmux_window_option(TMUX_STOP_REASON_OPTION, f"exit {result.returncode}")
-                return int(result.returncode or 1)
+                if result.stop_reason:
+                    if is_retryable_stop_reason(result.stop_reason):
+                        retry_count += 1
+                        if result.session_id or agent.kind == "claude":
+                            attempt_first_prompt_in_session = False
+                        print(f"\nRETRY: {result.stop_reason}")
+                        print(f"last log: {log_path}")
+                        print(f"sleeping {looper.sleep_seconds:g} seconds before retry")
+                        await asyncio.sleep(looper.sleep_seconds)
+                        continue
+
+                    print(f"\nSTOP: {result.stop_reason}")
+                    print(f"last log: {log_path}")
+                    set_tmux_window_option(TMUX_STATE_OPTION, "READY")
+                    set_tmux_window_option(TMUX_STOP_REASON_OPTION, result.stop_reason[:250])
+                    return 0
+
+                if result.returncode not in (0, None) and not looper.ignore_nonzero:
+                    print(f"\nSTOP: command exited with code {result.returncode}")
+                    print(f"last log: {log_path}")
+                    set_tmux_window_option(TMUX_STATE_OPTION, "ERR")
+                    set_tmux_window_option(TMUX_STOP_REASON_OPTION, f"exit {result.returncode}")
+                    return int(result.returncode or 1)
+
+                break
 
         print(f"\ncompleted loop {loop_number}")
 

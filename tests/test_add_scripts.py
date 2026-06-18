@@ -150,7 +150,7 @@ esac
         self.assertEqual(len(new_window), 1, f"Unexpected tmux commands: {commands}")
         command = " ".join(new_window[0])
         self.assertIn("-t work", command)
-        self.assertIn(f"-c {target_dir}", command)
+        self.assertIn(f"-c {target_dir.resolve()}", command)
 
     def test_autoservice_choice_persist_no(self):
         target_dir = self.tmpdir / "proj3"
