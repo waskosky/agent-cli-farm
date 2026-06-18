@@ -29,7 +29,14 @@ jobs:
       run: |
         for script in bin/codex-*; do
           echo "Checking $script..."
-          bash -n "$script"
+          shebang="$(head -n 1 "$script")"
+          if echo "$shebang" | grep -qE '^#!.*(env[[:space:]]+)?(ba)?sh([[:space:]]|$)'; then
+            bash -n "$script"
+          elif echo "$shebang" | grep -qE '^#!.*python'; then
+            PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile "$script"
+          else
+            echo "Skipping $script (unknown shebang)"
+          fi
         done
         
     - name: Test help messages
