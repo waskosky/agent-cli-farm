@@ -31,6 +31,25 @@ def make_executable(path: Path, content: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
+def run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
+def init_git_repo(repo: Path) -> None:
+    run_git(repo, "init")
+    run_git(repo, "config", "user.email", "test@example.com")
+    run_git(repo, "config", "user.name", "Test User")
+    (repo / "tracked.txt").write_text("initial\n", encoding="utf-8")
+    run_git(repo, "add", "tracked.txt")
+    run_git(repo, "commit", "-m", "initial")
+
+
 class LooperCoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.looper = load_looper_module()
@@ -1043,6 +1062,125 @@ scan_stdout_for_stop_patterns = true
         self.assertEqual(result, 0)
         self.assertEqual(calls, 1)
         self.assertEqual(sleeps, [])
+
+    def test_create_backup_branch_uses_configured_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+
+            branch = self.looper.create_backup_branch(
+                repo,
+                prefix="looper-backup",
+                loop_number=3,
+                stamp="20260622T000000Z",
+            )
+
+            branches = run_git(repo, "branch", "--list", branch).stdout.strip()
+
+        self.assertEqual(branch, "looper-backup/20260622T000000Z-loop-0003")
+        self.assertEqual(branches, branch)
+
+    def test_prune_backup_branches_keeps_newest_names(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            names = [
+                "looper-backup/20260622T000001Z-loop-0001",
+                "looper-backup/20260622T000002Z-loop-0002",
+                "looper-backup/20260622T000003Z-loop-0003",
+            ]
+            for name in names:
+                run_git(repo, "branch", name)
+
+            removed = self.looper.prune_backup_branches(repo, prefix="looper-backup", keep=2)
+            remaining = run_git(
+                repo,
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/looper-backup",
+            ).stdout.splitlines()
+
+        self.assertEqual(removed, ["looper-backup/20260622T000001Z-loop-0001"])
+        self.assertEqual(
+            remaining,
+            [
+                "looper-backup/20260622T000002Z-loop-0002",
+                "looper-backup/20260622T000003Z-loop-0003",
+            ],
+        )
+
+    def test_git_workspace_fingerprint_changes_for_content_and_head(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+
+            clean = self.looper.git_workspace_fingerprint(repo)
+            (repo / "tracked.txt").write_text("changed\n", encoding="utf-8")
+            dirty = self.looper.git_workspace_fingerprint(repo)
+            run_git(repo, "add", "tracked.txt")
+            run_git(repo, "commit", "-m", "change")
+            committed = self.looper.git_workspace_fingerprint(repo)
+
+        self.assertNotEqual(clean, dirty)
+        self.assertNotEqual(dirty, committed)
+        self.assertNotEqual(clean, committed)
+
+    def test_run_loop_stops_after_configured_no_progress_loops(self) -> None:
+        async def exercise() -> tuple[int, int, list[float]]:
+            calls = 0
+            sleeps: list[float] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+
+            async def fake_run_command(**kwargs: object) -> object:
+                nonlocal calls
+                calls += 1
+                return self.looper.ProcessResult(returncode=0)
+
+            async def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    init_git_repo(root)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        mode="single",
+                        mode_explicit=True,
+                        prompt_file=prompt_file,
+                        prompt_file_explicit=True,
+                        log_dir=root / "runs",
+                        sleep_seconds=0.25,
+                        cb_no_progress=2,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="no-progress-smoke",
+                    )
+
+                    result = await self.looper.run_loop(agent=agent, looper=looper, options=options)
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+
+            return result, calls, sleeps
+
+        result, calls, sleeps = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, 2)
+        self.assertEqual(sleeps, [0.25])
 
 
 class LooperCliTests(unittest.TestCase):

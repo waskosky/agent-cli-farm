@@ -129,6 +129,10 @@ class LooperConfig:
     completion_marker: str = DEFAULT_COMPLETION_MARKER
     completion_streak: int = 1
     plan_file: Path | None = None
+    backup_enabled: bool = False
+    backup_prefix: str = "looper-backup"
+    backup_keep: int = 10
+    cb_no_progress: int = 0
 
 
 @dataclass(frozen=True)
@@ -153,6 +157,10 @@ class RunOptions:
     completion_marker: str | None = None
     completion_streak: int | None = None
     plan_file: Path | None = None
+    backup_enabled: bool = False
+    backup_prefix: str | None = None
+    backup_keep: int | None = None
+    cb_no_progress: int | None = None
     once: bool = False
     fresh_session_per_loop: bool | None = None
     cwd: Path | None = None
@@ -379,6 +387,88 @@ def plan_file_all_tasks_checked(path: Path) -> bool:
     if not path.exists():
         raise ConfigError(f"plan file not found: {path}")
     return not markdown_plan_has_unchecked_tasks(path.read_text(encoding="utf-8"))
+
+
+def _run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
+def create_backup_branch(
+    cwd: Path,
+    *,
+    prefix: str,
+    loop_number: int,
+    stamp: str | None = None,
+) -> str:
+    clean_prefix = prefix.rstrip("/")
+    if not clean_prefix:
+        raise ConfigError("backup_prefix must not be empty")
+    branch = f"{clean_prefix}/{stamp or utc_stamp()}-loop-{loop_number:04d}"
+    try:
+        _run_git(cwd, "branch", branch, "HEAD")
+    except subprocess.CalledProcessError as exc:
+        message = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise ConfigError(f"failed to create backup branch {branch}: {message}") from exc
+    return branch
+
+
+def prune_backup_branches(cwd: Path, *, prefix: str, keep: int) -> list[str]:
+    if keep <= 0:
+        return []
+    ref_prefix = f"refs/heads/{prefix.rstrip('/')}"
+    try:
+        result = _run_git(cwd, "for-each-ref", "--format=%(refname:short)", ref_prefix)
+    except subprocess.CalledProcessError as exc:
+        message = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise ConfigError(f"failed to list backup branches: {message}") from exc
+    branches = sorted(line for line in result.stdout.splitlines() if line)
+    to_delete = branches[:-keep]
+    for branch in to_delete:
+        try:
+            _run_git(cwd, "branch", "-D", branch)
+        except subprocess.CalledProcessError as exc:
+            message = (exc.stderr or exc.stdout or str(exc)).strip()
+            raise ConfigError(f"failed to prune backup branch {branch}: {message}") from exc
+    return to_delete
+
+
+def _status_path_from_porcelain_line(line: str) -> str:
+    path = line[3:]
+    if " -> " in path:
+        path = path.rsplit(" -> ", 1)[1]
+    return path.strip().strip('"')
+
+
+def git_workspace_fingerprint(cwd: Path, ignored_paths: list[Path] | None = None) -> str | None:
+    try:
+        head = _run_git(cwd, "rev-parse", "HEAD").stdout.strip()
+        status = _run_git(cwd, "status", "--porcelain=v1", "--untracked-files=all").stdout
+    except subprocess.CalledProcessError:
+        return None
+
+    ignored_prefixes: list[str] = []
+    for path in ignored_paths or []:
+        try:
+            relative = path if not path.is_absolute() else path.relative_to(cwd)
+        except ValueError:
+            continue
+        normalized = str(relative).strip("/")
+        if normalized:
+            ignored_prefixes.append(normalized)
+
+    lines = []
+    for line in status.splitlines():
+        status_path = _status_path_from_porcelain_line(line)
+        if any(status_path == prefix or status_path.startswith(f"{prefix}/") for prefix in ignored_prefixes):
+            continue
+        lines.append(line)
+    return head + "\n" + "\n".join(lines)
 
 
 def _json_blob(value: Any) -> str:
@@ -772,6 +862,14 @@ def apply_run_options(config: LooperConfig, options: RunOptions) -> LooperConfig
         updates["completion_streak"] = options.completion_streak
     if options.plan_file is not None:
         updates["plan_file"] = options.plan_file
+    if options.backup_enabled:
+        updates["backup_enabled"] = True
+    if options.backup_prefix is not None:
+        updates["backup_prefix"] = options.backup_prefix
+    if options.backup_keep is not None:
+        updates["backup_keep"] = options.backup_keep
+    if options.cb_no_progress is not None:
+        updates["cb_no_progress"] = options.cb_no_progress
     if options.once:
         updates["max_loops"] = 1
     if options.fresh_session_per_loop is not None:
@@ -817,12 +915,15 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
 
     loop_number = 0
     completion_streak_count = 0
+    no_progress_count = 0
     persistent_session_name = label
     persistent_session_id = ""
+    fingerprint_ignored_paths = [run_dir.resolve()]
 
     while True:
         loop_number += 1
         loop_completion_detected = False
+        progress_before = None
         session_name = (
             f"{label}-loop-{loop_number:04d}" if looper.fresh_session_per_loop else persistent_session_name
         )
@@ -830,6 +931,25 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
         first_prompt_in_session = looper.fresh_session_per_loop or loop_number == 1
 
         print(f"\n===== loop {loop_number} / session {session_name} =====")
+
+        if looper.cb_no_progress:
+            progress_before = git_workspace_fingerprint(agent.cwd, ignored_paths=fingerprint_ignored_paths)
+            if progress_before is None:
+                raise ConfigError("cb_no_progress requires an agent cwd inside a git work tree")
+
+        if looper.backup_enabled:
+            backup_branch = create_backup_branch(
+                agent.cwd,
+                prefix=looper.backup_prefix,
+                loop_number=loop_number,
+            )
+            print(f"backup branch: {backup_branch}")
+            for pruned_branch in prune_backup_branches(
+                agent.cwd,
+                prefix=looper.backup_prefix,
+                keep=looper.backup_keep,
+            ):
+                print(f"pruned backup branch: {pruned_branch}")
 
         for prompt_index, prompt in enumerate(prompts, start=1):
             attempt_first_prompt_in_session = first_prompt_in_session
@@ -960,6 +1080,22 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
                 if completion_streak_count:
                     print("completion marker missing; resetting completion streak")
                 completion_streak_count = 0
+
+        if looper.cb_no_progress:
+            progress_after = git_workspace_fingerprint(agent.cwd, ignored_paths=fingerprint_ignored_paths)
+            if progress_after is None:
+                raise ConfigError("cb_no_progress requires an agent cwd inside a git work tree")
+            if progress_after == progress_before:
+                no_progress_count += 1
+                print(f"no git progress detected ({no_progress_count}/{looper.cb_no_progress})")
+                if no_progress_count >= looper.cb_no_progress:
+                    reason = f"no git progress for {no_progress_count} loop(s)"
+                    print(f"STOP: {reason}")
+                    set_tmux_window_option(TMUX_STATE_OPTION, "READY")
+                    set_tmux_window_option(TMUX_STOP_REASON_OPTION, reason[:250])
+                    return 0
+            else:
+                no_progress_count = 0
 
         if options.dry_run:
             print("dry run complete")
@@ -1229,6 +1365,12 @@ def load_config(path: Path) -> LoadedConfig:
     completion_streak = int(raw_looper.get("completion_streak", default_looper.completion_streak))
     if completion_streak <= 0:
         raise ConfigError("looper.completion_streak must be greater than zero")
+    backup_keep = int(raw_looper.get("backup_keep", default_looper.backup_keep))
+    if backup_keep < 0:
+        raise ConfigError("looper.backup_keep must be zero or greater")
+    cb_no_progress = int(raw_looper.get("cb_no_progress", default_looper.cb_no_progress))
+    if cb_no_progress < 0:
+        raise ConfigError("looper.cb_no_progress must be zero or greater")
     looper = LooperConfig(
         default_agent=str(raw_looper.get("default_agent", default_looper.default_agent)),
         mode=raw_mode,  # type: ignore[arg-type]
@@ -1269,6 +1411,10 @@ def load_config(path: Path) -> LoadedConfig:
         ),
         completion_streak=completion_streak,
         plan_file=_optional_path(raw_looper.get("plan_file"), "looper.plan_file"),
+        backup_enabled=bool(raw_looper.get("backup_enabled", default_looper.backup_enabled)),
+        backup_prefix=str(raw_looper.get("backup_prefix", default_looper.backup_prefix)),
+        backup_keep=backup_keep,
+        cb_no_progress=cb_no_progress,
     )
 
     agents = default_agents()
@@ -1630,6 +1776,14 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
         "--plan-file",
         help="markdown checklist gate; completion requires no unchecked - [ ] tasks",
     )
+    parser.add_argument("--backup", dest="backup_enabled", action="store_true", help="create git backup branches")
+    parser.add_argument("--backup-prefix", help="git branch prefix for backup branches")
+    parser.add_argument("--backup-keep", type=nonnegative_int, help="number of newest backup branches to keep")
+    parser.add_argument(
+        "--cb-no-progress",
+        type=nonnegative_int,
+        help="stop after this many completed loops with no git workspace change; 0 disables",
+    )
     parser.add_argument("--once", action="store_true", help="run the sequence once, then stop")
     session_group = parser.add_mutually_exclusive_group()
     session_group.add_argument(
@@ -1695,6 +1849,10 @@ def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None 
         completion_marker=args.completion_marker,
         completion_streak=args.completion_streak,
         plan_file=Path(args.plan_file) if args.plan_file else None,
+        backup_enabled=args.backup_enabled,
+        backup_prefix=args.backup_prefix,
+        backup_keep=args.backup_keep,
+        cb_no_progress=args.cb_no_progress,
         once=args.once,
         fresh_session_per_loop=args.fresh_session_per_loop,
         cwd=Path(args.cwd) if args.cwd else None,
