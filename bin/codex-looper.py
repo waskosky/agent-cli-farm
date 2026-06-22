@@ -128,6 +128,7 @@ class LooperConfig:
     completion_enabled: bool = False
     completion_marker: str = DEFAULT_COMPLETION_MARKER
     completion_streak: int = 1
+    plan_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,7 @@ class RunOptions:
     retry_notify_after_seconds: float | None = None
     completion_marker: str | None = None
     completion_streak: int | None = None
+    plan_file: Path | None = None
     once: bool = False
     fresh_session_per_loop: bool | None = None
     cwd: Path | None = None
@@ -364,6 +366,19 @@ def compile_completion_marker(looper: LooperConfig) -> re.Pattern[str] | None:
     if not looper.completion_enabled:
         return None
     return re.compile(looper.completion_marker)
+
+
+UNCHECKED_MARKDOWN_TASK_PATTERN = re.compile(r"^\s*[-*]\s+\[\s\]", re.MULTILINE)
+
+
+def markdown_plan_has_unchecked_tasks(text: str) -> bool:
+    return bool(UNCHECKED_MARKDOWN_TASK_PATTERN.search(text))
+
+
+def plan_file_all_tasks_checked(path: Path) -> bool:
+    if not path.exists():
+        raise ConfigError(f"plan file not found: {path}")
+    return not markdown_plan_has_unchecked_tasks(path.read_text(encoding="utf-8"))
 
 
 def _json_blob(value: Any) -> str:
@@ -755,6 +770,8 @@ def apply_run_options(config: LooperConfig, options: RunOptions) -> LooperConfig
         updates["completion_marker"] = options.completion_marker
     if options.completion_streak is not None:
         updates["completion_streak"] = options.completion_streak
+    if options.plan_file is not None:
+        updates["plan_file"] = options.plan_file
     if options.once:
         updates["max_loops"] = 1
     if options.fresh_session_per_loop is not None:
@@ -922,16 +939,23 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
 
         if looper.completion_enabled:
             if loop_completion_detected:
-                completion_streak_count += 1
-                print(
-                    "completion marker detected "
-                    f"({completion_streak_count}/{looper.completion_streak})"
-                )
-                if completion_streak_count >= looper.completion_streak:
-                    print("completion streak reached; stopping")
-                    set_tmux_window_option(TMUX_STATE_OPTION, "READY")
-                    set_tmux_window_option(TMUX_STOP_REASON_OPTION, "completion marker")
-                    return 0
+                if looper.plan_file and not plan_file_all_tasks_checked(looper.plan_file):
+                    completion_streak_count = 0
+                    print(
+                        "completion marker detected, but plan file still has unchecked tasks: "
+                        f"{looper.plan_file}"
+                    )
+                else:
+                    completion_streak_count += 1
+                    print(
+                        "completion marker detected "
+                        f"({completion_streak_count}/{looper.completion_streak})"
+                    )
+                    if completion_streak_count >= looper.completion_streak:
+                        print("completion streak reached; stopping")
+                        set_tmux_window_option(TMUX_STATE_OPTION, "READY")
+                        set_tmux_window_option(TMUX_STOP_REASON_OPTION, "completion marker")
+                        return 0
             else:
                 if completion_streak_count:
                     print("completion marker missing; resetting completion streak")
@@ -1160,6 +1184,14 @@ def _path(value: Any, default: Path) -> Path:
     return Path(value)
 
 
+def _optional_path(value: Any, key: str) -> Path | None:
+    if value in {None, ""}:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(f"{key} must be a string path")
+    return Path(value)
+
+
 def default_agents() -> dict[str, AgentConfig]:
     return {
         "claude": AgentConfig(name="claude", kind="claude"),
@@ -1236,6 +1268,7 @@ def load_config(path: Path) -> LoadedConfig:
             raw_looper.get("completion_marker", default_looper.completion_marker)
         ),
         completion_streak=completion_streak,
+        plan_file=_optional_path(raw_looper.get("plan_file"), "looper.plan_file"),
     )
 
     agents = default_agents()
@@ -1593,6 +1626,10 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
         type=positive_int,
         help="completion marker matches required on consecutive loops before stopping",
     )
+    parser.add_argument(
+        "--plan-file",
+        help="markdown checklist gate; completion requires no unchecked - [ ] tasks",
+    )
     parser.add_argument("--once", action="store_true", help="run the sequence once, then stop")
     session_group = parser.add_mutually_exclusive_group()
     session_group.add_argument(
@@ -1657,6 +1694,7 @@ def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None 
         retry_notify_after_seconds=args.retry_notify_after_seconds,
         completion_marker=args.completion_marker,
         completion_streak=args.completion_streak,
+        plan_file=Path(args.plan_file) if args.plan_file else None,
         once=args.once,
         fresh_session_per_loop=args.fresh_session_per_loop,
         cwd=Path(args.cwd) if args.cwd else None,
