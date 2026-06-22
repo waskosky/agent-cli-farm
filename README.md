@@ -12,7 +12,7 @@ A tmux session manager for running and restoring multiple Codex CLI instances, w
 - **Status updates**: Tracks RUN/READY/ERR in tmux metadata and notifies when a window becomes READY
 - **Memory warnings**: Flag tmux windows whose pane process trees exceed a chosen RSS threshold
 - **Autosave/autorestore (optional)**: Systemd user services to persist sessions across logins
-- **Prompt loopers**: Run repeated single prompts or prompt sequences with timeout handling, reset-aware rate-limit retries, completion markers, plan-file gates, git backups, circuit breakers, presets, long-wait notifications, and transient retry caps
+- **Prompt loopers**: Run repeated single prompts or prompt sequences with timeout handling, reset-aware rate-limit retries, completion markers, plan-file gates, git backups, no-progress/output-decline circuit breakers, presets, model/effort config sugar, loop metrics, long-wait notifications, and transient retry caps
 - **Tool wrappers**: `claude-*` and `gemini-*` commands use the same tmux workflow
 
 ## Quick Start
@@ -81,6 +81,7 @@ For bounded smoke runs, legacy prompt sequences, completion-gated loops, or name
 codex-looper --once --label repo-smoke
 codex-looper --mode sequence --prompt-file prompts.md --once
 claude-looper --complete-on 'EXIT_SIGNAL:\s*true' --plan-file fix_plan.md --backup
+codex-looper --cb-no-progress 3 --cb-output-decline 2 --backup
 codex-looper --preset rai
 claude-looper --farm-session work --label cleanup-pass --cwd /path/to/project
 codex-looper --local --once --label local-smoke
@@ -235,7 +236,7 @@ Annotator-specific:
 
 Tool-specific:
 - `claude-add` and `gemini-add` honor `CLAUDE_*` or `GEMINI_*` versions of the common launch variables. For save/restore/resume/status/watch/board commands, select the farm with `CODEX_SESSION` or the command's positional/`--session` argument where supported.
-- `codex-looper` and `claude-looper` pass native agent flags after `--`, for example `claude-looper --once -- --dangerously-skip-permissions`. The Claude flag is spelled `--dangerously-skip-permissions` and should only be used in isolated workspaces where unattended edits are acceptable.
+- `codex-looper` and `claude-looper` pass native agent flags after `--`, for example `claude-looper --once -- --dangerously-skip-permissions`. Built-in Codex and Claude agents can also set `model` and `effort` in `[agents.*]` config. The Claude flag is spelled `--dangerously-skip-permissions` and should only be used in isolated workspaces where unattended edits are acceptable.
 
 Example:
 ```bash

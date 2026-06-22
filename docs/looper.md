@@ -59,8 +59,9 @@ claude-looper
 codex-looper --once --label smoke
 codex-looper --mode sequence --prompt-file prompts.md --once
 claude-looper --complete-on 'EXIT_SIGNAL:\s*true' --plan-file fix_plan.md --backup
-codex-looper --cb-no-progress 3 --backup --backup-keep 20
+codex-looper --cb-no-progress 3 --cb-output-decline 2 --backup --backup-keep 20
 codex-looper --preset rai
+codex-looper --once --label gpt5-high -- --model gpt-5.4 --effort high
 claude-looper --once --label smoke -- --dangerously-skip-permissions
 codex-looper --farm-session work --label cleanup --cwd /path/to/project
 codex-looper --local --once --label local-preview
@@ -93,6 +94,7 @@ Use `--once` or `--max-loops N` for bounded runs. Without either, the looper rep
 | `--backup-prefix PREFIX` | `looper-backup` | Branch prefix for backup branches. |
 | `--backup-keep N` | `10` | Prune older backup branches, keeping the newest N. `0` disables pruning. |
 | `--cb-no-progress N` | `0` | Stop after N completed loops with no git HEAD or worktree-status change. |
+| `--cb-output-decline N` | `0` | Stop after N consecutive completed loops whose captured output byte count is lower than the prior loop. |
 | `--once` | off | Equivalent to `--max-loops 1`. |
 | `--fresh-session-per-loop` | on | Start a new agent session for each completed loop. |
 | `--reuse-session` | off | Reuse one agent session across all loops. |
@@ -133,6 +135,7 @@ backup_enabled = false
 backup_prefix = "looper-backup"
 backup_keep = 10
 cb_no_progress = 0
+cb_output_decline = 0
 ```
 
 Agent defaults:
@@ -142,6 +145,23 @@ Agent defaults:
 | `codex` | First prompt: `codex exec --json <prompt>`; later prompts resume by Codex thread ID when available, otherwise `resume --last`. |
 | `claude` | First prompt: `claude -p --output-format stream-json --verbose --name <session> <prompt>`; later prompts use `--resume <session>`. |
 | `gemini` | Generic default: `gemini -p <prompt>` for every prompt. Override this if your Gemini CLI supports a better noninteractive/resume mode. |
+
+Built-in Codex and Claude agents accept `model` and `effort` config sugar. These fields are appended after `extra_args` as `--model <value>` and `--effort <value>`:
+
+```toml
+[agents.codex]
+kind = "codex"
+model = "gpt-5.4"
+effort = "high"
+extra_args = ["--sandbox", "workspace-write"]
+
+[agents.claude]
+kind = "claude"
+model = "claude-opus-4-8"
+effort = "max"
+```
+
+Custom `first_command` and `resume_command` templates fully control their argv, so include model or effort flags directly in those templates when using a custom command.
 
 Custom agents can use command templates:
 
@@ -183,6 +203,14 @@ Use `--backup-prefix` to name a separate backup family, and `--backup-keep` to p
 
 `--cb-no-progress N` stops after N completed loops where git `HEAD` and worktree status are unchanged. The looper ignores its own run log directory when computing this fingerprint.
 
+`--cb-output-decline N` stops after N consecutive completed loops where captured stdout/stderr bytes decline versus the prior completed loop. This is a lightweight signal for loops that are producing less useful work over time. It is off by default.
+
+Every completed loop prints a compact metrics line:
+
+```text
+loop metrics: loop=3 duration=1.25s output=1.5KiB
+```
+
 ## Presets
 
 Presets are ordinary TOML files layered over project config before CLI flags. A path works directly:
@@ -218,6 +246,7 @@ The looper stops when it sees:
 - repeated non-rate-limit transient retry signals after `max_transient_retries`
 - configured completion marker and satisfied plan gate
 - configured no-progress circuit breaker
+- configured output-decline circuit breaker
 - configured max loop count
 
 Logs are written under `.agent-looper/runs/<timestamp>__<label>/`.

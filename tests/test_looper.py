@@ -152,6 +152,87 @@ class LooperCoreTests(unittest.TestCase):
             ],
         )
 
+    def test_builds_codex_command_with_model_and_effort_sugar(self) -> None:
+        agent = self.looper.AgentConfig(
+            name="codex",
+            kind="codex",
+            model="gpt-5.4",
+            effort="high",
+            extra_args=["--sandbox", "workspace-write"],
+        )
+        context = self.looper.CommandContext(
+            prompt="do it",
+            session="label-loop-0001",
+            session_id="",
+            loop=1,
+            prompt_index=1,
+            label="label",
+            run_dir=Path("runs/x"),
+        )
+
+        command = self.looper.build_command(
+            agent=agent,
+            context=context,
+            is_first_prompt_in_session=True,
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "codex",
+                "exec",
+                "--json",
+                "--sandbox",
+                "workspace-write",
+                "--model",
+                "gpt-5.4",
+                "--effort",
+                "high",
+                "do it",
+            ],
+        )
+
+    def test_builds_claude_command_with_model_and_effort_sugar(self) -> None:
+        agent = self.looper.AgentConfig(
+            name="claude",
+            kind="claude",
+            model="claude-opus-4-8",
+            effort="max",
+        )
+        context = self.looper.CommandContext(
+            prompt="do it",
+            session="label-loop-0001",
+            session_id="",
+            loop=1,
+            prompt_index=1,
+            label="label",
+            run_dir=Path("runs/x"),
+        )
+
+        command = self.looper.build_command(
+            agent=agent,
+            context=context,
+            is_first_prompt_in_session=True,
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "claude",
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--model",
+                "claude-opus-4-8",
+                "--effort",
+                "max",
+                "--name",
+                "label-loop-0001",
+                "do it",
+            ],
+        )
+
     def test_builds_claude_first_and_resume_commands(self) -> None:
         agent = self.looper.AgentConfig(
             name="claude",
@@ -234,6 +315,8 @@ scan_stdout_for_stop_patterns = true
 [agents.codex]
 kind = "codex"
 extra_args = ["--sandbox", "workspace-write"]
+model = "gpt-5.4"
+effort = "high"
 env = { CODEX_HOME = ".codex" }
 
 [agents.gemini]
@@ -262,6 +345,8 @@ scan_stdout_for_stop_patterns = true
         self.assertTrue(loaded.looper.ignore_nonzero)
         self.assertTrue(loaded.looper.scan_stdout_for_stop_patterns)
         self.assertEqual(loaded.agents["codex"].extra_args, ["--sandbox", "workspace-write"])
+        self.assertEqual(loaded.agents["codex"].model, "gpt-5.4")
+        self.assertEqual(loaded.agents["codex"].effort, "high")
         self.assertEqual(loaded.agents["codex"].env["CODEX_HOME"], ".codex")
         self.assertEqual(loaded.agents["gemini"].first_command, ["gemini", "-p", "{prompt}"])
         self.assertTrue(loaded.agents["gemini"].scan_stdout_for_stop_patterns)
@@ -1182,6 +1267,126 @@ scan_stdout_for_stop_patterns = true
         self.assertEqual(calls, 2)
         self.assertEqual(sleeps, [0.25])
 
+    def test_format_loop_metrics_includes_loop_duration_and_output(self) -> None:
+        self.assertEqual(
+            self.looper.format_loop_metrics(loop_number=3, duration_seconds=1.25, output_bytes=1536),
+            "loop metrics: loop=3 duration=1.25s output=1.5KiB",
+        )
+
+    def test_run_loop_stops_after_configured_output_declines(self) -> None:
+        async def exercise() -> tuple[int, int, list[float]]:
+            outputs = [100, 80, 70]
+            calls = 0
+            sleeps: list[float] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+
+            async def fake_run_command(**kwargs: object) -> object:
+                nonlocal calls
+                calls += 1
+                return self.looper.ProcessResult(returncode=0, output_bytes=outputs[calls - 1])
+
+            async def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        mode="single",
+                        mode_explicit=True,
+                        prompt_file=prompt_file,
+                        prompt_file_explicit=True,
+                        log_dir=root / "runs",
+                        sleep_seconds=0.25,
+                        cb_output_decline=2,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="output-decline-smoke",
+                    )
+
+                    result = await self.looper.run_loop(agent=agent, looper=looper, options=options)
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+
+            return result, calls, sleeps
+
+        result, calls, sleeps = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, 3)
+        self.assertEqual(sleeps, [0.25, 0.25])
+
+    def test_output_decline_counter_resets_when_output_recovers(self) -> None:
+        async def exercise() -> tuple[int, int, list[float]]:
+            outputs = [100, 80, 90, 70, 60]
+            calls = 0
+            sleeps: list[float] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+
+            async def fake_run_command(**kwargs: object) -> object:
+                nonlocal calls
+                calls += 1
+                return self.looper.ProcessResult(returncode=0, output_bytes=outputs[calls - 1])
+
+            async def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        mode="single",
+                        mode_explicit=True,
+                        prompt_file=prompt_file,
+                        prompt_file_explicit=True,
+                        log_dir=root / "runs",
+                        sleep_seconds=0.25,
+                        cb_output_decline=2,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="output-recovery-smoke",
+                    )
+
+                    result = await self.looper.run_loop(agent=agent, looper=looper, options=options)
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+
+            return result, calls, sleeps
+
+        result, calls, sleeps = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, 5)
+        self.assertEqual(sleeps, [0.25, 0.25, 0.25, 0.25])
+
 
 class LooperCliTests(unittest.TestCase):
     def test_dry_run_prints_commands_without_running_agent(self) -> None:
@@ -1214,6 +1419,37 @@ class LooperCliTests(unittest.TestCase):
         self.assertIn("$ codex exec --json hello", result.stdout)
         self.assertIn("dry run complete", result.stdout)
 
+    def test_cb_output_decline_flag_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workdir = Path(td)
+            prompt_file = workdir / "PROMPT.md"
+            prompt_file.write_text("hello\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "--agent",
+                    "codex",
+                    "--prompt-file",
+                    str(prompt_file),
+                    "--label",
+                    "decline-smoke",
+                    "--cb-output-decline",
+                    "2",
+                    "--once",
+                    "--dry-run",
+                ],
+                cwd=workdir,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("agent: codex (codex)", result.stdout)
+        self.assertIn("dry run complete", result.stdout)
+
     def test_version_marks_farm_default_looper_release(self) -> None:
         result = subprocess.run(
             [sys.executable, str(LOOPER_PATH), "--version"],
@@ -1223,7 +1459,7 @@ class LooperCliTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "codex-looper 0.3.0")
+        self.assertEqual(result.stdout.strip(), "codex-looper 0.3.1")
 
     def test_default_label_uses_looper_short_id(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1316,6 +1552,7 @@ class LooperCliTests(unittest.TestCase):
             self.assertIn('plan_file = ""', config_text)
             self.assertIn("backup_enabled = false", config_text)
             self.assertIn("cb_no_progress = 0", config_text)
+            self.assertIn("cb_output_decline = 0", config_text)
 
     def test_no_args_first_run_initializes_and_prints_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as td:

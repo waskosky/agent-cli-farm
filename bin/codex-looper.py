@@ -25,7 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 only.
     tomllib = None  # type: ignore[assignment]
 
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 AgentKind = Literal["claude", "codex", "generic"]
 LooperMode = Literal["single", "sequence"]
 TMUX_STATE_OPTION = "@codex_state"
@@ -100,6 +100,8 @@ class AgentConfig:
     kind: AgentKind
     cwd: Path = Path(".")
     extra_args: list[str] = field(default_factory=list)
+    model: str | None = None
+    effort: str | None = None
     first_command: list[str] | None = None
     resume_command: list[str] | None = None
     env: dict[str, str] = field(default_factory=dict)
@@ -133,6 +135,7 @@ class LooperConfig:
     backup_prefix: str = "looper-backup"
     backup_keep: int = 10
     cb_no_progress: int = 0
+    cb_output_decline: int = 0
 
 
 @dataclass(frozen=True)
@@ -161,6 +164,7 @@ class RunOptions:
     backup_prefix: str | None = None
     backup_keep: int | None = None
     cb_no_progress: int | None = None
+    cb_output_decline: int | None = None
     preset: str | None = None
     once: bool = False
     fresh_session_per_loop: bool | None = None
@@ -213,6 +217,7 @@ class ProcessResult:
     retry_kind: str | None = None
     timed_out: bool = False
     completion_detected: bool = False
+    output_bytes: int = 0
 
 
 def utc_stamp() -> str:
@@ -330,6 +335,15 @@ def render_template(parts: list[str], context: CommandContext) -> list[str]:
     return rendered
 
 
+def agent_extra_args(agent: AgentConfig) -> list[str]:
+    args = list(agent.extra_args)
+    if agent.model:
+        args.extend(["--model", agent.model])
+    if agent.effort:
+        args.extend(["--effort", agent.effort])
+    return args
+
+
 def build_command(
     *,
     agent: AgentConfig,
@@ -342,14 +356,14 @@ def build_command(
 
     if agent.kind == "claude":
         base = ["claude", "-p", "--output-format", "stream-json", "--verbose"]
-        base.extend(agent.extra_args)
+        base.extend(agent_extra_args(agent))
         if is_first_prompt_in_session:
             return [*base, "--name", context.session, context.prompt]
         return [*base, "--resume", context.session, context.prompt]
 
     if agent.kind == "codex":
         base = ["codex", "exec", "--json"]
-        base.extend(agent.extra_args)
+        base.extend(agent_extra_args(agent))
         if is_first_prompt_in_session:
             return [*base, context.prompt]
         if context.session_id:
@@ -552,6 +566,24 @@ def format_duration(seconds: float) -> str:
     return f"{hours:g}h"
 
 
+def format_byte_count(size: int) -> str:
+    if size < 1024:
+        return f"{size}B"
+    kib = size / 1024
+    if kib < 1024:
+        return f"{kib:g}KiB"
+    mib = kib / 1024
+    return f"{mib:g}MiB"
+
+
+def format_loop_metrics(*, loop_number: int, duration_seconds: float, output_bytes: int) -> str:
+    return (
+        f"loop metrics: loop={loop_number} "
+        f"duration={format_duration(duration_seconds)} "
+        f"output={format_byte_count(output_bytes)}"
+    )
+
+
 def retry_status_message(*, result: ProcessResult, attempt: int, delay_seconds: float) -> str:
     kind = result.retry_kind or classify_retry_kind(result.stop_reason or "") or "retryable"
     reason = result.stop_reason or "retryable provider signal"
@@ -747,6 +779,7 @@ async def run_command(
                 if not chunk:
                     break
                 text = chunk.decode("utf-8", errors="replace")
+                result.output_bytes += len(chunk)
                 _safe_stream_write(output_stream, text)
                 log_file.write(f"[{utc_stamp()}] {stream_name}: {text}")
                 log_file.flush()
@@ -871,6 +904,8 @@ def apply_run_options(config: LooperConfig, options: RunOptions) -> LooperConfig
         updates["backup_keep"] = options.backup_keep
     if options.cb_no_progress is not None:
         updates["cb_no_progress"] = options.cb_no_progress
+    if options.cb_output_decline is not None:
+        updates["cb_output_decline"] = options.cb_output_decline
     if options.once:
         updates["max_loops"] = 1
     if options.fresh_session_per_loop is not None:
@@ -917,12 +952,16 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
     loop_number = 0
     completion_streak_count = 0
     no_progress_count = 0
+    output_decline_count = 0
+    previous_loop_output_bytes: int | None = None
     persistent_session_name = label
     persistent_session_id = ""
     fingerprint_ignored_paths = [run_dir.resolve()]
 
     while True:
         loop_number += 1
+        loop_started_at = time.monotonic()
+        loop_output_bytes = 0
         loop_completion_detected = False
         progress_before = None
         session_name = (
@@ -999,6 +1038,7 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
 
                 if result.completion_detected:
                     loop_completion_detected = True
+                loop_output_bytes += result.output_bytes
 
                 if result.session_id:
                     session_id = result.session_id
@@ -1057,6 +1097,14 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
                 break
 
         print(f"\ncompleted loop {loop_number}")
+        loop_duration_seconds = time.monotonic() - loop_started_at
+        print(
+            format_loop_metrics(
+                loop_number=loop_number,
+                duration_seconds=loop_duration_seconds,
+                output_bytes=loop_output_bytes,
+            )
+        )
 
         if looper.completion_enabled:
             if loop_completion_detected:
@@ -1097,6 +1145,25 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
                     return 0
             else:
                 no_progress_count = 0
+
+        if looper.cb_output_decline:
+            if previous_loop_output_bytes is not None and loop_output_bytes < previous_loop_output_bytes:
+                output_decline_count += 1
+                print(
+                    "output declined "
+                    f"({output_decline_count}/{looper.cb_output_decline}): "
+                    f"{format_byte_count(previous_loop_output_bytes)} -> "
+                    f"{format_byte_count(loop_output_bytes)}"
+                )
+                if output_decline_count >= looper.cb_output_decline:
+                    reason = f"output declined for {output_decline_count} consecutive loop(s)"
+                    print(f"STOP: {reason}")
+                    set_tmux_window_option(TMUX_STATE_OPTION, "READY")
+                    set_tmux_window_option(TMUX_STOP_REASON_OPTION, reason[:250])
+                    return 0
+            else:
+                output_decline_count = 0
+            previous_loop_output_bytes = loop_output_bytes
 
         if options.dry_run:
             print("dry run complete")
@@ -1329,6 +1396,14 @@ def _optional_path(value: Any, key: str) -> Path | None:
     return Path(value)
 
 
+def _optional_str(value: Any, key: str) -> str | None:
+    if value in {None, ""}:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(f"{key} must be a string")
+    return value
+
+
 def default_agents() -> dict[str, AgentConfig]:
     return {
         "claude": AgentConfig(name="claude", kind="claude"),
@@ -1411,6 +1486,11 @@ def load_config(path: Path, *, preset_paths: list[Path] | None = None) -> Loaded
     cb_no_progress = int(raw_looper.get("cb_no_progress", default_looper.cb_no_progress))
     if cb_no_progress < 0:
         raise ConfigError("looper.cb_no_progress must be zero or greater")
+    cb_output_decline = int(
+        raw_looper.get("cb_output_decline", default_looper.cb_output_decline)
+    )
+    if cb_output_decline < 0:
+        raise ConfigError("looper.cb_output_decline must be zero or greater")
     looper = LooperConfig(
         default_agent=str(raw_looper.get("default_agent", default_looper.default_agent)),
         mode=raw_mode,  # type: ignore[arg-type]
@@ -1455,6 +1535,7 @@ def load_config(path: Path, *, preset_paths: list[Path] | None = None) -> Loaded
         backup_prefix=str(raw_looper.get("backup_prefix", default_looper.backup_prefix)),
         backup_keep=backup_keep,
         cb_no_progress=cb_no_progress,
+        cb_output_decline=cb_output_decline,
     )
 
     agents = default_agents()
@@ -1477,6 +1558,10 @@ def load_config(path: Path, *, preset_paths: list[Path] | None = None) -> Loaded
             cwd=_path(value.get("cwd"), base.cwd if base else Path(".")),
             extra_args=_as_str_list(value.get("extra_args"), f"agents.{name}.extra_args")
             or (base.extra_args if base else []),
+            model=_optional_str(value.get("model"), f"agents.{name}.model")
+            or (base.model if base else None),
+            effort=_optional_str(value.get("effort"), f"agents.{name}.effort")
+            or (base.effort if base else None),
             first_command=(
                 _as_str_list(value.get("first_command"), f"agents.{name}.first_command")
                 or (base.first_command if base else None)
@@ -1538,10 +1623,14 @@ backup_enabled = false
 backup_prefix = "looper-backup"
 backup_keep = 10
 cb_no_progress = 0
+cb_output_decline = 0
 
 [agents.claude]
 kind = "claude"
 # extra_args are inserted into the built-in Claude Code command templates.
+# Optional sugar:
+# model = "claude-opus-4-8"
+# effort = "max"
 # Example:
 # extra_args = ["--permission-mode", "acceptEdits", "--max-turns", "20"]
 # For isolated unattended sandboxes, Claude also supports:
@@ -1550,6 +1639,9 @@ extra_args = []
 
 [agents.codex]
 kind = "codex"
+# Optional sugar:
+# model = "gpt-5.4"
+# effort = "high"
 # Example:
 # extra_args = ["--sandbox", "workspace-write"]
 extra_args = []
@@ -1848,6 +1940,11 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
         type=nonnegative_int,
         help="stop after this many completed loops with no git workspace change; 0 disables",
     )
+    parser.add_argument(
+        "--cb-output-decline",
+        type=nonnegative_int,
+        help="stop after this many consecutive completed loops with declining output bytes; 0 disables",
+    )
     parser.add_argument("--once", action="store_true", help="run the sequence once, then stop")
     session_group = parser.add_mutually_exclusive_group()
     session_group.add_argument(
@@ -1917,6 +2014,7 @@ def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None 
         backup_prefix=args.backup_prefix,
         backup_keep=args.backup_keep,
         cb_no_progress=args.cb_no_progress,
+        cb_output_decline=args.cb_output_decline,
         preset=args.preset,
         once=args.once,
         fresh_session_per_loop=args.fresh_session_per_loop,
