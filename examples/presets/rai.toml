@@ -1,0 +1,22 @@
+# RAI backlog loop preset.
+#
+# This is intentionally a thin configuration layer over codex-looper. Keep
+# project-specific prompt content in PROMPT.md and task state in fix_plan.md.
+
+[looper]
+default_agent = "claude"
+mode = "single"
+prompt_file = "PROMPT.md"
+fresh_session_per_loop = true
+max_loops = 0
+completion_enabled = true
+completion_marker = "EXIT_SIGNAL:\\s*true"
+completion_streak = 1
+plan_file = "fix_plan.md"
+backup_enabled = true
+backup_prefix = "rai-loop-backup"
+backup_keep = 10
+
+[agents.claude]
+kind = "claude"
+extra_args = ["--dangerously-skip-permissions", "--model", "claude-opus-4-8", "--effort", "max"]

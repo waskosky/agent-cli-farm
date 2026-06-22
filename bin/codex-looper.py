@@ -161,6 +161,7 @@ class RunOptions:
     backup_prefix: str | None = None
     backup_keep: int | None = None
     cb_no_progress: int | None = None
+    preset: str | None = None
     once: bool = False
     fresh_session_per_loop: bool | None = None
     cwd: Path | None = None
@@ -937,7 +938,7 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
             if progress_before is None:
                 raise ConfigError("cb_no_progress requires an agent cwd inside a git work tree")
 
-        if looper.backup_enabled:
+        if looper.backup_enabled and not options.dry_run:
             backup_branch = create_backup_branch(
                 agent.cwd,
                 prefix=looper.backup_prefix,
@@ -1342,15 +1343,54 @@ def default_agents() -> dict[str, AgentConfig]:
     }
 
 
-def load_config(path: Path) -> LoadedConfig:
+def read_config_raw(path: Path) -> dict[str, Any]:
     if path.exists():
         if tomllib is None:
-            raw = parse_basic_toml(path.read_text(encoding="utf-8"))
+            return parse_basic_toml(path.read_text(encoding="utf-8"))
         else:
             with path.open("rb") as fh:
-                raw = tomllib.load(fh)
-    else:
-        raw = {}
+                return tomllib.load(fh)
+    return {}
+
+
+def merge_raw_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = merge_raw_config(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def resolve_preset_path(spec: str) -> Path:
+    direct = Path(spec).expanduser()
+    if direct.exists():
+        return direct
+    if direct.is_absolute() or direct.parent != Path(".") or direct.suffix:
+        raise ConfigError(f"preset not found: {spec}")
+
+    name = f"{spec}.toml"
+    candidates = [
+        Path.home() / ".config" / "codexfarm" / "presets" / name,
+        repo_root() / "examples" / "presets" / name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise ConfigError(f"preset {spec!r} not found; searched: {searched}")
+
+
+def load_config(path: Path, *, preset_paths: list[Path] | None = None) -> LoadedConfig:
+    raw = read_config_raw(path)
+    for preset_path in preset_paths or []:
+        raw = merge_raw_config(raw, read_config_raw(preset_path))
 
     raw_looper = raw.get("looper", {})
     if raw_looper is None:
@@ -1745,6 +1785,7 @@ def split_agent_args(argv: list[str]) -> tuple[list[str], list[str]]:
 def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | None = None) -> None:
     parser.add_argument("-a", "--agent", default=None, help="agent config name")
     parser.add_argument("-c", "--config", default="agent-looper.toml", help="config file path")
+    parser.add_argument("--preset", help="preset name or TOML path to layer over project config")
     parser.add_argument("--mode", choices=("single", "sequence"), help="prompt loading mode")
     parser.add_argument("-p", "--prompt-file", help="prompt file")
     parser.add_argument("-l", "--label", help="human-readable run label; also used for resumable sessions")
@@ -1853,6 +1894,7 @@ def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None 
         backup_prefix=args.backup_prefix,
         backup_keep=args.backup_keep,
         cb_no_progress=args.cb_no_progress,
+        preset=args.preset,
         once=args.once,
         fresh_session_per_loop=args.fresh_session_per_loop,
         cwd=Path(args.cwd) if args.cwd else None,
@@ -1895,7 +1937,8 @@ def run_command_main(argv: list[str] | None = None, *, default_agent: str | None
         return farm_result
 
     try:
-        loaded = load_config(options.config_path)
+        preset_paths = [resolve_preset_path(options.preset)] if options.preset else []
+        loaded = load_config(options.config_path, preset_paths=preset_paths)
         agent_name = resolve_agent_name(
             explicit_agent=options.agent_name,
             looper=loaded.looper,

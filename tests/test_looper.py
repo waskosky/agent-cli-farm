@@ -1561,6 +1561,121 @@ echo "CODEX_ARGS=${{CODEX_ARGS:-}}" >> {shlex.quote(str(log))}
             self.assertNotIn("--farm-session", args_line)
             self.assertNotIn("--farm-add-bin", args_line)
 
+    def test_preset_path_loads_looper_and_agent_config(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workdir = Path(td)
+            preset = workdir / "custom-preset.toml"
+            preset.write_text(
+                """
+[looper]
+default_agent = "claude"
+mode = "single"
+prompt_file = "PROMPT.md"
+completion_enabled = true
+completion_marker = "DONE"
+
+[agents.claude]
+kind = "claude"
+extra_args = ["--max-turns", "3"]
+""",
+                encoding="utf-8",
+            )
+            (workdir / "PROMPT.md").write_text("hello\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "--local",
+                    "--preset",
+                    str(preset),
+                    "--once",
+                    "--dry-run",
+                ],
+                cwd=workdir,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("agent: claude (claude)", result.stdout)
+        self.assertIn("mode: single", result.stdout)
+        self.assertIn("--max-turns 3 --name", result.stdout)
+
+    def test_named_rai_preset_resolves_repo_example(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workdir = Path(td)
+            (workdir / "PROMPT.md").write_text("hello\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "--local",
+                    "--preset",
+                    "rai",
+                    "--once",
+                    "--dry-run",
+                ],
+                cwd=workdir,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("agent: claude (claude)", result.stdout)
+        self.assertIn("mode: single", result.stdout)
+        self.assertIn("--dangerously-skip-permissions", result.stdout)
+
+    def test_cli_flags_override_preset_values(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workdir = Path(td)
+            preset = workdir / "custom-preset.toml"
+            preset.write_text(
+                """
+[looper]
+default_agent = "claude"
+mode = "single"
+prompt_file = "PROMPT.md"
+
+[agents.claude]
+kind = "claude"
+extra_args = ["--max-turns", "3"]
+""",
+                encoding="utf-8",
+            )
+            (workdir / "PROMPT.md").write_text("single prompt\n", encoding="utf-8")
+            (workdir / "prompts.md").write_text("sequence prompt\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "--local",
+                    "--preset",
+                    str(preset),
+                    "--agent",
+                    "codex",
+                    "--mode",
+                    "sequence",
+                    "--prompt-file",
+                    "prompts.md",
+                    "--once",
+                    "--dry-run",
+                ],
+                cwd=workdir,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("agent: codex (codex)", result.stdout)
+        self.assertIn("mode: sequence", result.stdout)
+        self.assertIn("$ codex exec --json 'sequence prompt'", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
