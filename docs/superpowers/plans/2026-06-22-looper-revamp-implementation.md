@@ -1,6 +1,6 @@
 # Looper Revamp Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Implement the looper revamp described in `docs/plans/looper-revamp.md`: single-prompt endless mode by default, opt-in completion detection, plan gates, git backups, no-progress circuit breaker, and presets.
 
@@ -17,7 +17,7 @@
 - Modify: `bin/codex-looper.py`
 - Modify: `docs/looper.md`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests that prove:
 - `load_prompts_for_mode(path, separator, "single")` returns the entire file as one prompt and does not split `---`.
@@ -33,7 +33,7 @@ python3 -m unittest tests.test_looper.LooperCoreTests
 
 Expected: FAIL because these helpers and fields do not exist yet.
 
-- [ ] **Step 2: Implement prompt mode support**
+- [x] **Step 2: Implement prompt mode support**
 
 Add:
 - `LooperMode = Literal["single", "sequence"]`
@@ -46,7 +46,7 @@ Add:
 
 Update `run_loop()` to call the new prompt loader and print mode in its startup summary.
 
-- [ ] **Step 3: Verify prompt mode tests pass**
+- [x] **Step 3: Verify prompt mode tests pass**
 
 Run:
 
@@ -63,7 +63,7 @@ Expected: PASS.
 - Modify: `bin/codex-looper.py`
 - Modify: `docs/looper.md`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests that prove:
 - A stdout line containing `EXIT_SIGNAL: true` sets `ProcessResult.completion_detected`.
@@ -79,7 +79,7 @@ python3 -m unittest tests.test_looper.LooperCoreTests
 
 Expected: FAIL because completion detection does not exist.
 
-- [ ] **Step 2: Implement completion support**
+- [x] **Step 2: Implement completion support**
 
 Add config and CLI:
 - `completion_enabled=false`
@@ -90,7 +90,7 @@ Add config and CLI:
 
 Compile the completion marker only when enabled. Detect marker matches in stdout or stderr without treating them as stop-pattern failures. After a successful loop, increment/reset the completion streak and stop once it reaches the threshold.
 
-- [ ] **Step 3: Verify completion tests pass**
+- [x] **Step 3: Verify completion tests pass**
 
 Run:
 
@@ -107,10 +107,10 @@ Expected: PASS.
 - Modify: `bin/codex-looper.py`
 - Modify: `docs/looper.md`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests that prove:
-- `markdown_plan_has_unchecked_tasks()` returns true for `- [ ] task`.
+- `markdown_plan_has_unchecked_tasks()` returns true for `- [x] task`.
 - It returns false for checked tasks and ordinary text.
 - A completion marker does not stop the looper while the configured plan file has unchecked tasks.
 - The looper stops when the marker is present and the plan file has no unchecked tasks.
@@ -123,11 +123,11 @@ python3 -m unittest tests.test_looper.LooperCoreTests
 
 Expected: FAIL because plan gating does not exist.
 
-- [ ] **Step 2: Implement plan file gate**
+- [x] **Step 2: Implement plan file gate**
 
 Add `plan_file=""` and `--plan-file PATH`. If configured, require the plan file to have no unchecked markdown checkboxes before completion streak can advance. If the marker appears while the plan is incomplete, print a clear line and continue looping.
 
-- [ ] **Step 3: Verify plan gate tests pass**
+- [x] **Step 3: Verify plan gate tests pass**
 
 Run:
 
@@ -144,7 +144,7 @@ Expected: PASS.
 - Modify: `bin/codex-looper.py`
 - Modify: `docs/looper.md`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests that prove:
 - `create_backup_branch()` creates a backup branch named under the configured prefix.
@@ -160,7 +160,7 @@ python3 -m unittest tests.test_looper.LooperCoreTests
 
 Expected: FAIL because backup and circuit breaker helpers do not exist.
 
-- [ ] **Step 2: Implement safety helpers**
+- [x] **Step 2: Implement safety helpers**
 
 Add config and CLI:
 - `backup_enabled=false`
@@ -174,7 +174,7 @@ Add config and CLI:
 
 Create a backup branch before each loop when enabled. Prune old backup branches lexicographically by timestamped branch name. Compare a git fingerprint from before and after each loop to count no-progress loops, then stop when the configured threshold is reached.
 
-- [ ] **Step 3: Verify safety tests pass**
+- [x] **Step 3: Verify safety tests pass**
 
 Run:
 
@@ -192,7 +192,7 @@ Expected: PASS.
 - Create: `examples/presets/rai.toml`
 - Modify: `docs/looper.md`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests that prove:
 - `--preset PATH` loads a TOML file and applies its `[looper]` and `[agents.*]` values.
@@ -207,11 +207,11 @@ python3 -m unittest tests.test_looper.LooperCliTests
 
 Expected: FAIL because presets do not exist.
 
-- [ ] **Step 2: Implement preset loading**
+- [x] **Step 2: Implement preset loading**
 
 Add `--preset NAME_OR_PATH`. Load config in this order: built-in defaults, project `agent-looper.toml`, preset TOML, CLI options. Resolve named presets from `examples/presets/<name>.toml` and `~/.config/codexfarm/presets/<name>.toml`.
 
-- [ ] **Step 3: Verify preset tests pass**
+- [x] **Step 3: Verify preset tests pass**
 
 Run:
 
@@ -228,7 +228,7 @@ Expected: PASS.
 - Modify: `docs/looper.md`
 - Modify: `docs/plans/looper-revamp.md`
 
-- [ ] **Step 1: Update docs**
+- [x] **Step 1: Update docs**
 
 Document:
 - `PROMPT.md` single-mode default.
@@ -238,7 +238,7 @@ Document:
 - Backup and circuit breaker options.
 - Preset usage, including `--preset rai`.
 
-- [ ] **Step 2: Run full test suite**
+- [x] **Step 2: Run full test suite**
 
 Run:
 
@@ -248,7 +248,7 @@ python3 -m unittest discover -s tests
 
 Expected: PASS.
 
-- [ ] **Step 3: Run a dry-run smoke test**
+- [x] **Step 3: Run a dry-run smoke test**
 
 Run in a temp directory with `PROMPT.md`:
 
@@ -258,7 +258,7 @@ python3 /path/to/bin/codex-looper.py --local --once --dry-run
 
 Expected: Uses `PROMPT.md`, mode `single`, and prints one command.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Commit the implementation branch with:
 

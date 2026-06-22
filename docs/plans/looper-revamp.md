@@ -1,6 +1,7 @@
 # Looper revamp — single-prompt-endless default, fully-featured opt-in
 
-Status: **design / proposal** (2026-06-22). No code yet — review first.
+Status: **implemented in `looper-revamp` branch** (2026-06-22). Execution plan:
+[`../superpowers/plans/2026-06-22-looper-revamp-implementation.md`](../superpowers/plans/2026-06-22-looper-revamp-implementation.md).
 
 ## Why
 

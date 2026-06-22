@@ -12,7 +12,7 @@ A tmux session manager for running and restoring multiple Codex CLI instances, w
 - **Status updates**: Tracks RUN/READY/ERR in tmux metadata and notifies when a window becomes READY
 - **Memory warnings**: Flag tmux windows whose pane process trees exceed a chosen RSS threshold
 - **Autosave/autorestore (optional)**: Systemd user services to persist sessions across logins
-- **Prompt loopers**: Run repeated file-backed prompt sequences with timeout handling, reset-aware rate-limit retries, long-wait notifications, and transient retry caps
+- **Prompt loopers**: Run repeated single prompts or prompt sequences with timeout handling, reset-aware rate-limit retries, completion markers, plan-file gates, git backups, circuit breakers, presets, long-wait notifications, and transient retry caps
 - **Tool wrappers**: `claude-*` and `gemini-*` commands use the same tmux workflow
 
 ## Quick Start
@@ -69,16 +69,19 @@ For guided setup:
 codex-looper init --interactive --force
 ```
 
-After editing `prompts.md`, start a looper in the default farm:
+After editing `PROMPT.md`, start a looper in the default farm:
 ```bash
 codex-looper
 claude-looper
 claude-looper -- --dangerously-skip-permissions
 ```
 
-For bounded smoke runs or named farms:
+For bounded smoke runs, legacy prompt sequences, completion-gated loops, or named farms:
 ```bash
 codex-looper --once --label repo-smoke
+codex-looper --mode sequence --prompt-file prompts.md --once
+claude-looper --complete-on 'EXIT_SIGNAL:\s*true' --plan-file fix_plan.md --backup
+codex-looper --preset rai
 claude-looper --farm-session work --label cleanup-pass --cwd /path/to/project
 codex-looper --local --once --label local-smoke
 ```

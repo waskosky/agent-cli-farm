@@ -1223,7 +1223,7 @@ class LooperCliTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "codex-looper 0.2.0")
+        self.assertEqual(result.stdout.strip(), "codex-looper 0.3.0")
 
     def test_default_label_uses_looper_short_id(self) -> None:
         with tempfile.TemporaryDirectory() as td:
