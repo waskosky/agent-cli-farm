@@ -1312,6 +1312,10 @@ class LooperCliTests(unittest.TestCase):
             self.assertIn("timeout_seconds = 7200", config_text)
             self.assertIn("max_transient_retries = 12", config_text)
             self.assertIn("retry_notify_after_seconds = 300", config_text)
+            self.assertIn("completion_enabled = false", config_text)
+            self.assertIn('plan_file = ""', config_text)
+            self.assertIn("backup_enabled = false", config_text)
+            self.assertIn("cb_no_progress = 0", config_text)
 
     def test_no_args_first_run_initializes_and_prints_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as td:

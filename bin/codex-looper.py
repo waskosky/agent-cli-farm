@@ -1527,6 +1527,17 @@ max_transient_retries = {max_transient_retries}
 # Notify the tmux pane for retry waits at or above this many seconds. 0 disables.
 retry_notify_after_seconds = {retry_notify_after_seconds}
 log_dir = ".agent-looper/runs"
+# Completion detection is opt-in. Agents should emit the marker only when done.
+completion_enabled = false
+completion_marker = "EXIT_SIGNAL:\\\\s*true"
+completion_streak = 1
+# Optional markdown checklist gate for completion.
+plan_file = ""
+# Optional git safety controls.
+backup_enabled = false
+backup_prefix = "looper-backup"
+backup_keep = 10
+cb_no_progress = 0
 
 [agents.claude]
 kind = "claude"
