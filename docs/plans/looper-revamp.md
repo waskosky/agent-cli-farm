@@ -1,7 +1,17 @@
 # Looper revamp — single-prompt-endless default, fully-featured opt-in
 
-Status: **implemented in `looper-revamp` branch** (2026-06-22). Execution plan:
+Status: **implemented and merged to `main`** (2026-06-22). Execution plan:
 [`../superpowers/plans/2026-06-22-looper-revamp-implementation.md`](../superpowers/plans/2026-06-22-looper-revamp-implementation.md).
+
+Follow-up status:
+
+- `codex-cli-farm` implementation shipped on `main` through `50f7a6d`.
+- `waskosky/rai` migration shipped on `main` through `7f363e59`: `rai-loop`
+  now defaults to a repo-local `codex-looper` preset, with the previous Ralph
+  implementation preserved as an explicit fallback.
+- Remaining validation: run several real RAI backlog-clearing sessions before
+  deleting the Ralph fallback and renaming the compatibility `.ralph/` state
+  directory.
 
 ## Why
 
@@ -106,14 +116,13 @@ optional structured `---STATUS---` block ralph uses is just one such convention.
 - **Existing `prompts.md` users:** set `mode=sequence` (or auto-infer: if
   `prompts.md` exists and no `PROMPT.md`/explicit `mode`, default to `sequence`).
   Decide the inference rule (see Open Questions).
-- **rai-loop → preset:** the rai project's loop becomes a `codex-looper`
-  invocation: `agent=claude` (+ `--dangerously-skip-permissions` and
-  `--model claude-opus-4-8 --effort max` via `extra_args`), `mode=single`,
-  `prompt_file=<backlog-clearing prompt>`, `completion_enabled=true`,
-  `plan_file=<fix_plan>`, `backup_enabled=true`, optionally run via
-  `--farm-session`. `~/bin/rai-loop` shrinks to a wrapper that calls this preset;
-  the ralph install + `.ralphrc` retire. (Keep ralph as a fallback until the
-  preset is proven.)
+- **rai-loop → preset:** completed in `waskosky/rai`. The repo's `rai-loop`
+  wrapper now invokes a local `scripts/rai-loop/codex-looper.toml` preset using
+  Claude, `mode=single`, `.ralph/PROMPT.md`, `.ralph/fix_plan.md`,
+  `completion_enabled=true`, git backups, no-progress/output-decline breakers,
+  `--dangerously-skip-permissions`, `model=claude-opus-4-8`, and `effort=max`.
+  Ralph remains available through `rai-loop ralph ...` / `RAI_LOOP_ENGINE=ralph`
+  while the codex-backed loop is proven in real sessions.
 - Provide a named-preset mechanism (e.g. `codex-looper --preset rai`, presets in
   `~/.config/codexfarm/presets/` or a repo `examples/`).
 
@@ -126,9 +135,10 @@ optional structured `---STATUS---` block ralph uses is just one such convention.
 2. **Safety — backups + circuit breaker.** `backup_enabled`(+prune) and
    `cb_no_progress`.
 3. **Queue + presets + migration.** `plan_file` gate; preset mechanism; migrate
-   rai-loop onto `codex-looper` and retire the ralph wrapper; update the rai repo
-   docs/config.
+   rai-loop onto `codex-looper`; update the rai repo docs/config. Completed, with
+   Ralph kept as a fallback pending real-session proof.
 4. **Polish (optional).** Per-loop metrics, richer status, model/effort sugar.
+   Per-loop metrics, output-decline breaker, and model/effort sugar are complete.
 
 ## Open questions
 
@@ -138,11 +148,11 @@ optional structured `---STATUS---` block ralph uses is just one such convention.
   neither `PROMPT.md` nor an explicit `mode` is set.
 - **Completion strictness:** marker-only vs. require a structured status block.
   Proposed: marker regex by default; structured block optional.
-- **Where rai's preset/config lives:** a `codex-looper` preset (this repo) vs. an
-  `agent-looper.toml` committed in the rai repo. Proposed: preset here, thin
-  `~/bin/rai-loop` wrapper.
-- **Keep ralph as fallback** during/after migration? Proposed: yes, until the
-  preset has run a few real backlog-clearing sessions cleanly.
+- **Where rai's preset/config lives:** answered by implementation. The generic
+  example preset remains here; the operational RAI preset lives in the `rai`
+  repo at `scripts/rai-loop/codex-looper.toml`.
+- **Keep ralph as fallback** during/after migration? Yes, until the preset has
+  run a few real backlog-clearing sessions cleanly.
 
 ## Cross-references
 
