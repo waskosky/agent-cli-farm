@@ -27,12 +27,16 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 only.
 
 VERSION = "0.2.0"
 AgentKind = Literal["claude", "codex", "generic"]
+LooperMode = Literal["single", "sequence"]
 TMUX_STATE_OPTION = "@codex_state"
 TMUX_STOP_REASON_OPTION = "@codex_stop_reason"
 DEFAULT_TIMEOUT_SECONDS = 7200.0
 DEFAULT_MAX_LOOPS = 0
 DEFAULT_MAX_TRANSIENT_RETRIES = 12
 DEFAULT_RETRY_NOTIFY_AFTER_SECONDS = 300.0
+DEFAULT_SINGLE_PROMPT_FILE = Path("PROMPT.md")
+DEFAULT_SEQUENCE_PROMPT_FILE = Path("prompts.md")
+DEFAULT_COMPLETION_MARKER = r"EXIT_SIGNAL:\s*true"
 
 DEFAULT_STOP_PATTERNS = [
     r"rate[\s_-]*limit(?:ed|ing)?",
@@ -105,7 +109,10 @@ class AgentConfig:
 @dataclass(frozen=True)
 class LooperConfig:
     default_agent: str = "codex"
-    prompt_file: Path = Path("prompts.md")
+    mode: LooperMode = "single"
+    prompt_file: Path = DEFAULT_SINGLE_PROMPT_FILE
+    mode_explicit: bool = False
+    prompt_file_explicit: bool = False
     separator: str = r"^---\s*$"
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     sleep_seconds: float = 2.0
@@ -118,6 +125,9 @@ class LooperConfig:
     kill_on_stop_pattern: bool = True
     ignore_nonzero: bool = False
     scan_stdout_for_stop_patterns: bool = False
+    completion_enabled: bool = False
+    completion_marker: str = DEFAULT_COMPLETION_MARKER
+    completion_streak: int = 1
 
 
 @dataclass(frozen=True)
@@ -130,6 +140,7 @@ class LoadedConfig:
 class RunOptions:
     agent_name: str | None
     config_path: Path
+    mode: LooperMode | None = None
     prompt_file: Path | None = None
     agent_args: list[str] = field(default_factory=list)
     label: str | None = None
@@ -138,6 +149,8 @@ class RunOptions:
     max_loops: int | None = None
     max_transient_retries: int | None = None
     retry_notify_after_seconds: float | None = None
+    completion_marker: str | None = None
+    completion_streak: int | None = None
     once: bool = False
     fresh_session_per_loop: bool | None = None
     cwd: Path | None = None
@@ -188,6 +201,7 @@ class ProcessResult:
     retry_after_seconds: float | None = None
     retry_kind: str | None = None
     timed_out: bool = False
+    completion_detected: bool = False
 
 
 def utc_stamp() -> str:
@@ -231,6 +245,13 @@ def nonnegative_int(value: str) -> int:
     return out
 
 
+def positive_int(value: str) -> int:
+    out = int(value)
+    if out <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return out
+
+
 def load_prompts(path: Path, separator: str) -> list[str]:
     if not path.exists():
         raise PromptError(f"prompt file not found: {path}")
@@ -240,6 +261,47 @@ def load_prompts(path: Path, separator: str) -> list[str]:
     if not prompts:
         raise PromptError(f"no prompts found in {path}")
     return prompts
+
+
+def load_prompts_for_mode(path: Path, separator: str, mode: LooperMode) -> list[str]:
+    if mode == "sequence":
+        return load_prompts(path, separator)
+    if mode != "single":
+        raise ConfigError(f"unsupported looper mode: {mode}")
+    if not path.exists():
+        raise PromptError(f"prompt file not found: {path}")
+    prompt = path.read_text(encoding="utf-8").strip()
+    if not prompt:
+        raise PromptError(f"no prompts found in {path}")
+    return [prompt]
+
+
+def _path_exists_from(cwd: Path, path: Path) -> bool:
+    return path.exists() if path.is_absolute() else (cwd / path).exists()
+
+
+def resolve_prompt_defaults(looper: LooperConfig, *, cwd: Path) -> LooperConfig:
+    prompt_file_is_default = looper.prompt_file == DEFAULT_SINGLE_PROMPT_FILE
+    prompt_file_explicit = looper.prompt_file_explicit or not prompt_file_is_default
+    mode = looper.mode
+    prompt_file = looper.prompt_file
+
+    if not looper.mode_explicit:
+        if prompt_file_explicit:
+            mode = "single" if prompt_file == DEFAULT_SINGLE_PROMPT_FILE else "sequence"
+        elif (
+            not _path_exists_from(cwd, DEFAULT_SINGLE_PROMPT_FILE)
+            and _path_exists_from(cwd, DEFAULT_SEQUENCE_PROMPT_FILE)
+        ):
+            mode = "sequence"
+            prompt_file = DEFAULT_SEQUENCE_PROMPT_FILE
+        else:
+            mode = "single"
+            prompt_file = DEFAULT_SINGLE_PROMPT_FILE
+    elif not prompt_file_explicit:
+        prompt_file = DEFAULT_SEQUENCE_PROMPT_FILE if mode == "sequence" else DEFAULT_SINGLE_PROMPT_FILE
+
+    return replace(looper, mode=mode, prompt_file=prompt_file)
 
 
 def render_template(parts: list[str], context: CommandContext) -> list[str]:
@@ -296,6 +358,12 @@ def build_command(
 
 def compile_stop_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
     return [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
+
+
+def compile_completion_marker(looper: LooperConfig) -> re.Pattern[str] | None:
+    if not looper.completion_enabled:
+        return None
+    return re.compile(looper.completion_marker)
 
 
 def _json_blob(value: Any) -> str:
@@ -545,6 +613,7 @@ async def run_command(
     patterns: list[re.Pattern[str]],
     scan_stdout: bool,
     kill_on_stop_pattern: bool,
+    completion_pattern: re.Pattern[str] | None = None,
 ) -> ProcessResult:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     merged_env = os.environ.copy()
@@ -575,6 +644,9 @@ async def run_command(
                 _safe_stream_write(output_stream, text)
                 log_file.write(f"[{utc_stamp()}] {stream_name}: {text}")
                 log_file.flush()
+
+                if completion_pattern and completion_pattern.search(text):
+                    result.completion_detected = True
 
                 parsed = parse_output_line(
                     line=text,
@@ -662,8 +734,12 @@ def make_run_dir(log_dir: Path, label: str) -> Path:
 
 def apply_run_options(config: LooperConfig, options: RunOptions) -> LooperConfig:
     updates: dict[str, Any] = {}
+    if options.mode is not None:
+        updates["mode"] = options.mode
+        updates["mode_explicit"] = True
     if options.prompt_file is not None:
         updates["prompt_file"] = options.prompt_file
+        updates["prompt_file_explicit"] = True
     if options.timeout_seconds is not None:
         updates["timeout_seconds"] = options.timeout_seconds
     if options.sleep_seconds is not None:
@@ -674,6 +750,11 @@ def apply_run_options(config: LooperConfig, options: RunOptions) -> LooperConfig
         updates["max_transient_retries"] = options.max_transient_retries
     if options.retry_notify_after_seconds is not None:
         updates["retry_notify_after_seconds"] = options.retry_notify_after_seconds
+    if options.completion_marker is not None:
+        updates["completion_enabled"] = True
+        updates["completion_marker"] = options.completion_marker
+    if options.completion_streak is not None:
+        updates["completion_streak"] = options.completion_streak
     if options.once:
         updates["max_loops"] = 1
     if options.fresh_session_per_loop is not None:
@@ -684,12 +765,14 @@ def apply_run_options(config: LooperConfig, options: RunOptions) -> LooperConfig
 
 
 async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOptions) -> int:
+    looper = resolve_prompt_defaults(looper, cwd=Path.cwd())
     label = make_label(options.label, options.agent_name)
     run_dir = make_run_dir(looper.log_dir, label)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    prompts = load_prompts(looper.prompt_file, looper.separator)
+    prompts = load_prompts_for_mode(looper.prompt_file, looper.separator, looper.mode)
     patterns = compile_stop_patterns(looper.stop_patterns)
+    completion_pattern = compile_completion_marker(looper)
 
     if options.cwd is not None:
         agent = replace(agent, cwd=options.cwd)
@@ -707,6 +790,7 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
 
     print(f"agent: {agent.name} ({agent.kind})")
     print(f"label: {label}")
+    print(f"mode: {looper.mode}")
     print(f"prompts: {len(prompts)} from {looper.prompt_file}")
     print(f"logs: {run_dir}")
     print(
@@ -715,11 +799,13 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
     )
 
     loop_number = 0
+    completion_streak_count = 0
     persistent_session_name = label
     persistent_session_id = ""
 
     while True:
         loop_number += 1
+        loop_completion_detected = False
         session_name = (
             f"{label}-loop-{loop_number:04d}" if looper.fresh_session_per_loop else persistent_session_name
         )
@@ -770,7 +856,11 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
                         looper.scan_stdout_for_stop_patterns or agent.scan_stdout_for_stop_patterns
                     ),
                     kill_on_stop_pattern=looper.kill_on_stop_pattern,
+                    completion_pattern=completion_pattern,
                 )
+
+                if result.completion_detected:
+                    loop_completion_detected = True
 
                 if result.session_id:
                     session_id = result.session_id
@@ -829,6 +919,23 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
                 break
 
         print(f"\ncompleted loop {loop_number}")
+
+        if looper.completion_enabled:
+            if loop_completion_detected:
+                completion_streak_count += 1
+                print(
+                    "completion marker detected "
+                    f"({completion_streak_count}/{looper.completion_streak})"
+                )
+                if completion_streak_count >= looper.completion_streak:
+                    print("completion streak reached; stopping")
+                    set_tmux_window_option(TMUX_STATE_OPTION, "READY")
+                    set_tmux_window_option(TMUX_STOP_REASON_OPTION, "completion marker")
+                    return 0
+            else:
+                if completion_streak_count:
+                    print("completion marker missing; resetting completion streak")
+                completion_streak_count = 0
 
         if options.dry_run:
             print("dry run complete")
@@ -1084,9 +1191,18 @@ def load_config(path: Path) -> LoadedConfig:
         raise ConfigError("[looper] must be a TOML table")
 
     default_looper = LooperConfig()
+    raw_mode = str(raw_looper.get("mode", default_looper.mode))
+    if raw_mode not in {"single", "sequence"}:
+        raise ConfigError("looper.mode must be single or sequence")
+    completion_streak = int(raw_looper.get("completion_streak", default_looper.completion_streak))
+    if completion_streak <= 0:
+        raise ConfigError("looper.completion_streak must be greater than zero")
     looper = LooperConfig(
         default_agent=str(raw_looper.get("default_agent", default_looper.default_agent)),
+        mode=raw_mode,  # type: ignore[arg-type]
+        mode_explicit="mode" in raw_looper,
         prompt_file=_path(raw_looper.get("prompt_file"), default_looper.prompt_file),
+        prompt_file_explicit="prompt_file" in raw_looper,
         separator=str(raw_looper.get("separator", default_looper.separator)),
         timeout_seconds=float(raw_looper.get("timeout_seconds", default_looper.timeout_seconds)),
         sleep_seconds=float(raw_looper.get("sleep_seconds", default_looper.sleep_seconds)),
@@ -1113,6 +1229,13 @@ def load_config(path: Path) -> LoadedConfig:
                 default_looper.scan_stdout_for_stop_patterns,
             )
         ),
+        completion_enabled=bool(
+            raw_looper.get("completion_enabled", default_looper.completion_enabled)
+        ),
+        completion_marker=str(
+            raw_looper.get("completion_marker", default_looper.completion_marker)
+        ),
+        completion_streak=completion_streak,
     )
 
     agents = default_agents()
@@ -1443,7 +1566,8 @@ def split_agent_args(argv: list[str]) -> tuple[list[str], list[str]]:
 def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | None = None) -> None:
     parser.add_argument("-a", "--agent", default=None, help="agent config name")
     parser.add_argument("-c", "--config", default="agent-looper.toml", help="config file path")
-    parser.add_argument("-p", "--prompt-file", help="prompt sequence file")
+    parser.add_argument("--mode", choices=("single", "sequence"), help="prompt loading mode")
+    parser.add_argument("-p", "--prompt-file", help="prompt file")
     parser.add_argument("-l", "--label", help="human-readable run label; also used for resumable sessions")
     parser.add_argument("--timeout", type=positive_float, help="timeout seconds per prompt")
     parser.add_argument("--sleep", type=positive_float, help="sleep seconds between loops")
@@ -1458,6 +1582,16 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
         dest="retry_notify_after_seconds",
         type=nonnegative_float,
         help="show tmux notification for retry waits at or above this many seconds; 0 disables",
+    )
+    parser.add_argument(
+        "--complete-on",
+        dest="completion_marker",
+        help="stop after a completed loop whose output matches this regex",
+    )
+    parser.add_argument(
+        "--completion-streak",
+        type=positive_int,
+        help="completion marker matches required on consecutive loops before stopping",
     )
     parser.add_argument("--once", action="store_true", help="run the sequence once, then stop")
     session_group = parser.add_mutually_exclusive_group()
@@ -1512,6 +1646,7 @@ def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None 
     return RunOptions(
         agent_name=args.agent,
         config_path=Path(args.config),
+        mode=args.mode,
         prompt_file=Path(args.prompt_file) if args.prompt_file else None,
         agent_args=list(agent_args or []),
         label=args.label,
@@ -1520,6 +1655,8 @@ def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None 
         max_loops=args.max_loops,
         max_transient_retries=args.max_transient_retries,
         retry_notify_after_seconds=args.retry_notify_after_seconds,
+        completion_marker=args.completion_marker,
+        completion_streak=args.completion_streak,
         once=args.once,
         fresh_session_per_loop=args.fresh_session_per_loop,
         cwd=Path(args.cwd) if args.cwd else None,

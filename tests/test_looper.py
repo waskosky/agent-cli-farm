@@ -45,6 +45,49 @@ class LooperCoreTests(unittest.TestCase):
                 ["one", "two", "three"],
             )
 
+    def test_single_mode_keeps_prompt_file_as_one_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "PROMPT.md"
+            path.write_text("one\n---\ntwo\n", encoding="utf-8")
+
+            self.assertEqual(
+                self.looper.load_prompts_for_mode(path, r"^---\s*$", "single"),
+                ["one\n---\ntwo"],
+            )
+
+    def test_sequence_mode_splits_prompt_file_on_separator_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "prompts.md"
+            path.write_text("one\n---\ntwo\n", encoding="utf-8")
+
+            self.assertEqual(
+                self.looper.load_prompts_for_mode(path, r"^---\s*$", "sequence"),
+                ["one", "two"],
+            )
+
+    def test_prompt_defaults_use_single_prompt_file_without_existing_sequence_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            resolved = self.looper.resolve_prompt_defaults(
+                self.looper.LooperConfig(),
+                cwd=Path(td),
+            )
+
+        self.assertEqual(resolved.mode, "single")
+        self.assertEqual(resolved.prompt_file, Path("PROMPT.md"))
+
+    def test_prompt_defaults_infer_sequence_when_only_legacy_prompts_file_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "prompts.md").write_text("legacy\n", encoding="utf-8")
+
+            resolved = self.looper.resolve_prompt_defaults(
+                self.looper.LooperConfig(),
+                cwd=root,
+            )
+
+        self.assertEqual(resolved.mode, "sequence")
+        self.assertEqual(resolved.prompt_file, Path("prompts.md"))
+
     def test_builds_codex_first_and_resume_commands(self) -> None:
         agent = self.looper.AgentConfig(
             name="codex",
@@ -697,6 +740,180 @@ scan_stdout_for_stop_patterns = true
         self.assertEqual(result, 0)
         self.assertEqual(calls, 3)
         self.assertEqual(sleeps, [0.25, 0.25])
+
+    def test_run_loop_stops_after_completion_marker(self) -> None:
+        async def exercise() -> tuple[int, int, list[float]]:
+            calls = 0
+            sleeps: list[float] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+
+            async def fake_run_command(**kwargs: object) -> object:
+                nonlocal calls
+                calls += 1
+                return self.looper.ProcessResult(returncode=0, completion_detected=True)
+
+            async def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        mode="single",
+                        mode_explicit=True,
+                        prompt_file=prompt_file,
+                        prompt_file_explicit=True,
+                        log_dir=root / "runs",
+                        sleep_seconds=0.25,
+                        completion_enabled=True,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="complete-smoke",
+                    )
+
+                    result = await self.looper.run_loop(agent=agent, looper=looper, options=options)
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+
+            return result, calls, sleeps
+
+        result, calls, sleeps = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, 1)
+        self.assertEqual(sleeps, [])
+
+    def test_run_loop_requires_completion_streak(self) -> None:
+        async def exercise() -> tuple[int, int, list[float]]:
+            calls = 0
+            sleeps: list[float] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+
+            async def fake_run_command(**kwargs: object) -> object:
+                nonlocal calls
+                calls += 1
+                return self.looper.ProcessResult(returncode=0, completion_detected=True)
+
+            async def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        mode="single",
+                        mode_explicit=True,
+                        prompt_file=prompt_file,
+                        prompt_file_explicit=True,
+                        log_dir=root / "runs",
+                        sleep_seconds=0.25,
+                        completion_enabled=True,
+                        completion_streak=2,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="streak-smoke",
+                    )
+
+                    result = await self.looper.run_loop(agent=agent, looper=looper, options=options)
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+
+            return result, calls, sleeps
+
+        result, calls, sleeps = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, 2)
+        self.assertEqual(sleeps, [0.25])
+
+    def test_run_loop_resets_completion_streak_when_marker_is_missing(self) -> None:
+        async def exercise() -> tuple[int, int, list[float]]:
+            detections = [True, False, True, True]
+            calls = 0
+            sleeps: list[float] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+
+            async def fake_run_command(**kwargs: object) -> object:
+                nonlocal calls
+                calls += 1
+                return self.looper.ProcessResult(
+                    returncode=0,
+                    completion_detected=detections[calls - 1],
+                )
+
+            async def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        mode="single",
+                        mode_explicit=True,
+                        prompt_file=prompt_file,
+                        prompt_file_explicit=True,
+                        log_dir=root / "runs",
+                        sleep_seconds=0.25,
+                        completion_enabled=True,
+                        completion_streak=2,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="reset-smoke",
+                    )
+
+                    result = await self.looper.run_loop(agent=agent, looper=looper, options=options)
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+
+            return result, calls, sleeps
+
+        result, calls, sleeps = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, 4)
+        self.assertEqual(sleeps, [0.25, 0.25, 0.25])
 
 
 class LooperCliTests(unittest.TestCase):
