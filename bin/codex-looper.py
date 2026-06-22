@@ -1500,6 +1500,8 @@ def load_config(path: Path, *, preset_paths: list[Path] | None = None) -> Loaded
 def build_example_config(
     *,
     default_agent: str = "codex",
+    mode: LooperMode = "single",
+    prompt_file: str = "PROMPT.md",
     timeout_seconds: str = "7200",
     sleep_seconds: str = "2",
     max_loops: str = "0",
@@ -1507,11 +1509,13 @@ def build_example_config(
     retry_notify_after_seconds: str = "300",
 ) -> str:
     return f"""# agent-looper.toml
-# Prompt files split sequences with a line containing only ---.
+# Default mode loops one prompt file forever. Set mode = "sequence" to split
+# prompt_file on lines containing only ---.
 
 [looper]
 default_agent = {json.dumps(default_agent)}
-prompt_file = "prompts.md"
+mode = {json.dumps(mode)}
+prompt_file = {json.dumps(prompt_file)}
 timeout_seconds = {timeout_seconds}
 sleep_seconds = {sleep_seconds}
 fresh_session_per_loop = true
@@ -1561,11 +1565,7 @@ scan_stdout_for_stop_patterns = true
 EXAMPLE_CONFIG = build_example_config()
 
 
-EXAMPLE_PROMPTS = """Summarize the repository layout. Do not modify files.
----
-Identify the smallest useful task to improve the project. Do not modify files.
----
-If the previous task is safe and obvious, implement it. Then run the most relevant fast check.
+EXAMPLE_PROMPTS = """Summarize the repository layout. Identify one safe cleanup, but do not modify files unless the cleanup is obvious and low-risk.
 """
 
 
@@ -1574,10 +1574,11 @@ def write_starter_files(
     force: bool,
     config_text: str = EXAMPLE_CONFIG,
     prompts_text: str = EXAMPLE_PROMPTS,
+    prompt_path: Path = DEFAULT_SINGLE_PROMPT_FILE,
 ) -> list[Path]:
     files = [
         (Path("agent-looper.toml"), config_text),
-        (Path("prompts.md"), prompts_text),
+        (prompt_path, prompts_text),
     ]
     written: list[Path] = []
     for path, content in files:
@@ -1590,7 +1591,7 @@ def write_starter_files(
     return written
 
 
-def guidance_lines(*, initialized: bool) -> list[str]:
+def guidance_lines(*, initialized: bool, prompt_path: Path = DEFAULT_SINGLE_PROMPT_FILE) -> list[str]:
     heading = (
         "Initialized Agent Looper starter files."
         if initialized
@@ -1600,7 +1601,7 @@ def guidance_lines(*, initialized: bool) -> list[str]:
         heading,
         "",
         "Next steps:",
-        "  1. Edit prompts.md; split prompts with a line containing only ---",
+        f"  1. Edit {prompt_path}",
         "  2. Run in the default tmux farm: codex-looper",
         "  3. Inspect activity: codex-status activity",
         "",
@@ -1608,14 +1609,15 @@ def guidance_lines(*, initialized: bool) -> list[str]:
     ]
 
 
-def print_guidance(*, initialized: bool) -> None:
-    print("\n".join(guidance_lines(initialized=initialized)))
+def print_guidance(*, initialized: bool, prompt_path: Path = DEFAULT_SINGLE_PROMPT_FILE) -> None:
+    print("\n".join(guidance_lines(initialized=initialized, prompt_path=prompt_path)))
 
 
 def first_run_main() -> int:
     config = Path("agent-looper.toml")
-    prompts = Path("prompts.md")
-    already_initialized = config.exists() and prompts.exists()
+    already_initialized = config.exists() and (
+        DEFAULT_SINGLE_PROMPT_FILE.exists() or DEFAULT_SEQUENCE_PROMPT_FILE.exists()
+    )
     written = write_starter_files(force=False)
     print("")
     print_guidance(initialized=bool(written) and not already_initialized)
@@ -1666,7 +1668,7 @@ def _ask_nonnegative_int(prompt: str, default: str) -> str:
     return str(parsed)
 
 
-def interactive_starter_content() -> tuple[str, str]:
+def interactive_starter_content() -> tuple[str, str, Path]:
     print("Agent Looper interactive setup")
     default_agent = _ask("Default agent (codex, claude, gemini)", "codex")
     if default_agent not in default_agents():
@@ -1691,10 +1693,19 @@ def interactive_starter_content() -> tuple[str, str]:
         if not prompt:
             break
         prompts.append(prompt)
-    prompt_text = "\n---\n".join(prompts).strip() + "\n" if prompts else EXAMPLE_PROMPTS
+    if len(prompts) > 1:
+        mode: LooperMode = "sequence"
+        prompt_path = DEFAULT_SEQUENCE_PROMPT_FILE
+        prompt_text = "\n---\n".join(prompts).strip() + "\n"
+    else:
+        mode = "single"
+        prompt_path = DEFAULT_SINGLE_PROMPT_FILE
+        prompt_text = (prompts[0].strip() + "\n") if prompts else EXAMPLE_PROMPTS
     return (
         build_example_config(
             default_agent=default_agent,
+            mode=mode,
+            prompt_file=str(prompt_path),
             timeout_seconds=timeout_seconds,
             sleep_seconds=sleep_seconds,
             max_loops=max_loops,
@@ -1702,6 +1713,7 @@ def interactive_starter_content() -> tuple[str, str]:
             retry_notify_after_seconds=retry_notify_after_seconds,
         ),
         prompt_text,
+        prompt_path,
     )
 
 
@@ -1970,13 +1982,19 @@ def init_main(argv: list[str] | None = None) -> int:
 
     config_text = EXAMPLE_CONFIG
     prompts_text = EXAMPLE_PROMPTS
+    prompt_path = DEFAULT_SINGLE_PROMPT_FILE
     if args.interactive:
-        config_text, prompts_text = interactive_starter_content()
+        config_text, prompts_text, prompt_path = interactive_starter_content()
 
-    write_starter_files(force=args.force, config_text=config_text, prompts_text=prompts_text)
+    write_starter_files(
+        force=args.force,
+        config_text=config_text,
+        prompts_text=prompts_text,
+        prompt_path=prompt_path,
+    )
     print("")
     print("Starter files are ready.")
-    print_guidance(initialized=True)
+    print_guidance(initialized=True, prompt_path=prompt_path)
     return 0
 
 
@@ -2007,7 +2025,11 @@ def main(argv: list[str] | None = None) -> int:
     real_argv = list(sys.argv[1:] if argv is None else argv)
     default_agent = default_agent_from_invocation()
     if not real_argv:
-        if Path("agent-looper.toml").exists() and Path("prompts.md").exists():
+        if (
+            Path("agent-looper.toml").exists()
+            or DEFAULT_SINGLE_PROMPT_FILE.exists()
+            or DEFAULT_SEQUENCE_PROMPT_FILE.exists()
+        ):
             return run_command_main([], default_agent=default_agent)
         return first_run_main()
     if real_argv[0] in {"-h", "--help"}:

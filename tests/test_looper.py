@@ -1300,13 +1300,15 @@ class LooperCliTests(unittest.TestCase):
                 check=False,
             )
             config = Path(td) / "agent-looper.toml"
-            prompts = Path(td) / "prompts.md"
+            prompt = Path(td) / "PROMPT.md"
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(config.exists())
-            self.assertTrue(prompts.exists())
+            self.assertTrue(prompt.exists())
             config_text = config.read_text(encoding="utf-8")
             self.assertIn("[looper]", config_text)
+            self.assertIn('mode = "single"', config_text)
+            self.assertIn('prompt_file = "PROMPT.md"', config_text)
             self.assertIn("timeout_seconds = 7200", config_text)
             self.assertIn("max_transient_retries = 12", config_text)
             self.assertIn("retry_notify_after_seconds = 300", config_text)
@@ -1323,9 +1325,9 @@ class LooperCliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((Path(td) / "agent-looper.toml").exists())
-            self.assertTrue((Path(td) / "prompts.md").exists())
+            self.assertTrue((Path(td) / "PROMPT.md").exists())
             self.assertIn("Initialized Agent Looper", result.stdout)
-            self.assertIn("Edit prompts.md", result.stdout)
+            self.assertIn("Edit PROMPT.md", result.stdout)
             self.assertIn("Run in the default tmux farm: codex-looper", result.stdout)
 
     def test_no_args_in_initialized_directory_launches_default_farm(self) -> None:
@@ -1345,9 +1347,9 @@ set -euo pipefail
 """,
             )
             config = Path(td) / "agent-looper.toml"
-            prompts = Path(td) / "prompts.md"
+            prompt = Path(td) / "PROMPT.md"
             config.write_text("custom config\n", encoding="utf-8")
-            prompts.write_text("custom prompt\n", encoding="utf-8")
+            prompt.write_text("custom prompt\n", encoding="utf-8")
             env = os.environ.copy()
             env["PATH"] = f"{tmpdir}:{env.get('PATH', '')}"
 
@@ -1362,7 +1364,7 @@ set -euo pipefail
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(config.read_text(encoding="utf-8"), "custom config\n")
-            self.assertEqual(prompts.read_text(encoding="utf-8"), "custom prompt\n")
+            self.assertEqual(prompt.read_text(encoding="utf-8"), "custom prompt\n")
             lines = log.read_text(encoding="utf-8").splitlines()
             self.assertIn(f"args=-d {tmpdir.resolve()}", lines)
             name_line = next(line for line in lines if line.startswith("CODEX_NAME="))
@@ -1401,6 +1403,8 @@ set -euo pipefail
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('default_agent = "claude"', config)
+            self.assertIn('mode = "sequence"', config)
+            self.assertIn('prompt_file = "prompts.md"', config)
             self.assertIn("timeout_seconds = 600", config)
             self.assertIn("sleep_seconds = 5", config)
             self.assertIn("max_loops = 12", config)
