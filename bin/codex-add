@@ -163,6 +163,7 @@ CMD="$(get_env CMD "$tool_name")"
 ARGS_ENV="$(get_env ARGS "")"
 LOCK_TITLES="$(get_env LOCK_TITLES 0)"
 ANNOTATOR_AUTOSTART="$(get_env ANNOTATOR_AUTOSTART 1)"
+REMAIN_ON_EXIT="$(get_env REMAIN_ON_EXIT 1)"
 TIPS_PROMPT="$(get_env TIPS_PROMPT "")"
 STATE_BASENAME="$(get_env STATE_BASENAME "codexfarm")"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$STATE_BASENAME"
@@ -397,6 +398,17 @@ start_status_annotator() {
   fi
 }
 
+remain_on_exit_enabled() {
+  case "${REMAIN_ON_EXIT:-1}" in
+    0|false|FALSE|False|off|OFF|Off|no|NO|No)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 # Setup logging directory
 mkdir -p "$LOGDIR"
 
@@ -420,8 +432,16 @@ fi
 if [ ${#tool_args[@]} -gt 0 ]; then
   CMDLINE="$CMDLINE ${tool_args[*]}"
 fi
+WINDOW_CMDLINE="$CMDLINE"
+if remain_on_exit_enabled; then
+  WINDOW_CMDLINE="tmux set-window-option -q remain-on-exit on >/dev/null 2>&1 || true; exec $CMDLINE"
+fi
 
-WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" "$CMDLINE")
+WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" "$WINDOW_CMDLINE")
+
+if remain_on_exit_enabled; then
+  tmux set-window-option -t "$SESSION:$WIN" remain-on-exit on >/dev/null 2>&1 || true
+fi
 
 # Keep tmux from overwriting the chosen window title unless explicitly requested
 if [ "${LOCK_TITLES:-1}" -eq 1 ]; then
@@ -435,7 +455,13 @@ fi
 # Setup logging
 STAMP=$(date +%Y%m%d-%H%M%S)
 LOGFILE="$LOGDIR/${NAME}_${STAMP}.log"
-tmux pipe-pane -o -t "$SESSION:$WIN" "cat >> \"$LOGFILE\""
+if ! pipe_error=$(tmux pipe-pane -o -t "$SESSION:$WIN" "cat >> \"$LOGFILE\"" 2>&1); then
+  if [ -n "$pipe_error" ]; then
+    echo "warning: unable to attach log pipe; pane may have exited already: $pipe_error" >&2
+  else
+    echo "warning: unable to attach log pipe; pane may have exited already" >&2
+  fi
+fi
 
 # Link to board session if it exists
 tmux has-session -t "$BOARD_SESSION" 2>/dev/null && tmux link-window -s "$SESSION:$WIN" -t "$BOARD_SESSION"

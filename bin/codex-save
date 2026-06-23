@@ -24,6 +24,11 @@ trim_command_field() {
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
   fi
+  case "$value" in
+    "tmux set-window-option -q remain-on-exit on"*"; exec "*)
+      value="${value#*; exec }"
+      ;;
+  esac
   printf '%s' "$value"
 }
 

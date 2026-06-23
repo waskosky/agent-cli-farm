@@ -112,6 +112,91 @@ esac
         ]
         self.assertEqual(title_lock_commands, [], f"Unexpected title locks: {commands}")
 
+    def test_codex_add_keeps_window_after_command_exit_by_default(self):
+        target_dir = self.tmpdir / "proj-remain"
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "-d", str(target_dir)],
+            check=True,
+            env=self.env,
+        )
+
+        commands = self.read_tmux_commands()
+        remain_commands = [
+            cmd
+            for cmd in commands
+            if cmd
+            and cmd[0] == "set-window-option"
+            and "remain-on-exit" in cmd
+        ]
+        self.assertEqual(
+            remain_commands,
+            [["set-window-option", "-t", "codexfarm:1", "remain-on-exit", "on"]],
+            f"Expected remain-on-exit to be enabled for new windows: {commands}",
+        )
+
+    def test_codex_add_can_disable_remain_on_exit(self):
+        target_dir = self.tmpdir / "proj-close-on-exit"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        env = self.env.copy()
+        env["CODEX_REMAIN_ON_EXIT"] = "0"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "-d", str(target_dir)],
+            check=True,
+            env=env,
+        )
+
+        commands = self.read_tmux_commands()
+        joined_commands = [" ".join(cmd) for cmd in commands]
+        self.assertFalse(
+            any("remain-on-exit" in command for command in joined_commands),
+            f"remain-on-exit should be disabled: {commands}",
+        )
+
+    def test_codex_add_survives_log_pipe_race_after_fast_exit(self):
+        target_dir = self.tmpdir / "proj-fast-exit"
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        tmux_stub = """#!/usr/bin/env bash
+set -euo pipefail
+log="${TMUX_LOG}"
+echo "$*" >> "$log"
+case "$1" in
+  has-session)
+    exit 1
+    ;;
+  new-window)
+    echo "1"
+    exit 0
+    ;;
+  pipe-pane)
+    echo "target pane has exited" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"""
+        make_executable(self.tmpdir / "tmux", tmux_stub)
+
+        env = self.env.copy()
+        env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "-d", str(target_dir)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Started codex in codexfarm:1", result.stdout)
+        self.assertIn("warning: unable to attach log pipe", result.stderr)
+
     def test_gemini_add_uses_named_session(self):
         target_dir = self.tmpdir / "proj-gemini"
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -334,7 +419,13 @@ case "$1" in
       *:0'|#{window_name}') printf '*READY* home\\n' ;;
       *:1'|#{window_name}') printf '*RUN* proj\\n' ;;
       *:1.0'|#{pane_current_path}') printf '/tmp/project\\n' ;;
-      *:1.0'|#{pane_start_command}') printf 'codex\\n' ;;
+      *:1.0'|#{pane_start_command}')
+        if [ "${WRAPPED_CODEX_START:-0}" = "1" ]; then
+          printf 'tmux set-window-option -q remain-on-exit on >/dev/null 2>&1 || true; exec codex\\n'
+        else
+          printf 'codex\\n'
+        fi
+        ;;
       *:1.0'|#{pane_pid}') printf '100\\n' ;;
       *:2'|#{window_name}') printf 'claude-proj\\n' ;;
       *:2.0'|#{pane_current_path}') printf '/tmp/claude-project\\n' ;;
@@ -430,6 +521,22 @@ esac
         )
         rows = manifest.read_text(encoding="utf-8").splitlines()
         self.assertEqual(rows[0], "name\tdir\tcmd\targs")
+        self.assertIn(
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+            rows,
+        )
+
+    def test_codex_save_trims_remain_on_exit_wrapper(self):
+        env = self.env.copy()
+        env["WRAPPED_CODEX_START"] = "1"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        rows = self.manifest.read_text(encoding="utf-8").splitlines()
         self.assertIn(
             "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
             rows,

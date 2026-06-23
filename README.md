@@ -216,6 +216,7 @@ Common:
 - **`CODEX_STATE_BASENAME`** - state/log directory base name (default: `codexfarm`)
 - **`CODEX_TIPS_PROMPT`** - show tmux tips prompt: `0` to disable, `1` to force (default respects a persisted opt-out)
 - **`CODEX_LOCK_TITLES`** - set to `1` to keep Codex windows named after their directory (default `0` lets Codex's native title updates show)
+- **`CODEX_REMAIN_ON_EXIT`** - keep tmux windows visible after the pane command exits (default `1`; set to `0` to close windows on exit)
 - **`CODEX_WATCH_MODE`** - `auto` (default), `tail`, or `multitail` to control codex-watch display
 - **`CODEX_STATUS_ACTIVITY_LINES`** - recent pane lines shown by `codex-status activity` (default `8`)
 - **`CODEX_AUTOSERVICE_CHOICE`** - `yes` or `no` to persist autoservice choice

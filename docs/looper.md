@@ -254,6 +254,7 @@ Logs are written under `.agent-looper/runs/<timestamp>__<label>/`.
 ## Farm Integration
 
 Normal non-dry-run looper commands call `codex-add` so existing farm behavior still owns session creation, board linking, pipe-pane logging, and annotator startup. Use `--local` to run in the current terminal. Use `--farm-session NAME` for a separate farm.
+Farm windows enable tmux `remain-on-exit` by default, so a stopped looper leaves its final pane visible for inspection instead of closing the window. Set `CODEX_REMAIN_ON_EXIT=0` when launching if you want the old close-on-exit behavior.
 
 Example:
 
