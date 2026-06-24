@@ -646,6 +646,87 @@ scan_stdout_for_stop_patterns = true
         tmux_commands = asyncio.run(exercise())
 
         self.assertNotIn(["tmux", "rename-window", "window-smoke"], tmux_commands)
+        self.assertFalse(
+            any(command[:2] == ["tmux", "split-window"] for command in tmux_commands),
+            tmux_commands,
+        )
+
+    def test_run_loop_split_layout_opens_tail_pane_and_tracks_current_log(self) -> None:
+        async def exercise() -> tuple[int, list[list[str]], str]:
+            tmux_commands: list[list[str]] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+            original_subprocess_run = self.looper.subprocess.run
+            original_shutil_which = self.looper.shutil.which
+            original_tmux = self.looper.os.environ.get("TMUX")
+
+            async def fake_run_command(**kwargs: object) -> object:
+                return self.looper.ProcessResult(returncode=0)
+
+            async def fake_sleep(seconds: float) -> None:
+                return None
+
+            def fake_which(name: str):
+                if name == "tmux":
+                    return "tmux"
+                return original_shutil_which(name)
+
+            def fake_subprocess_run(command: list[str], **kwargs: object) -> object:
+                if command and command[0] == "tmux":
+                    tmux_commands.append(command)
+                return self.looper.subprocess.CompletedProcess(command, 0)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            self.looper.shutil.which = fake_which
+            self.looper.subprocess.run = fake_subprocess_run
+            self.looper.os.environ["TMUX"] = "tmux-session"
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        prompt_file=prompt_file,
+                        log_dir=root / "runs",
+                        max_loops=1,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="split-smoke",
+                        tmux_layout="split",
+                    )
+
+                    result = await self.looper.run_loop(agent=agent, looper=looper, options=options)
+                    pointer_path = next((root / "runs").glob("*/current-log.path"))
+                    pointer_text = pointer_path.read_text(encoding="utf-8")
+                    return result, tmux_commands, pointer_text
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+                self.looper.shutil.which = original_shutil_which
+                self.looper.subprocess.run = original_subprocess_run
+                if original_tmux is None:
+                    self.looper.os.environ.pop("TMUX", None)
+                else:
+                    self.looper.os.environ["TMUX"] = original_tmux
+
+        result, tmux_commands, pointer_text = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        split_commands = [command for command in tmux_commands if command[:2] == ["tmux", "split-window"]]
+        self.assertEqual(len(split_commands), 1, tmux_commands)
+        self.assertIn("-d", split_commands[0])
+        self.assertIn("current-log.path", split_commands[0][-1])
+        self.assertIn("tail -n +1 -F", split_commands[0][-1])
+        self.assertIn("loop-0001__prompt-001.log", pointer_text)
 
     def test_run_loop_notifies_for_long_retry_delay(self) -> None:
         async def exercise() -> list[str]:
@@ -1742,6 +1823,7 @@ set -euo pipefail
   echo "CODEX_NAME=${{CODEX_NAME:-}}"
   echo "CODEX_CMD=${{CODEX_CMD:-}}"
   echo "CODEX_ARGS=${{CODEX_ARGS:-}}"
+  echo "CODEX_LOOPER_LAYOUT=${{CODEX_LOOPER_LAYOUT:-}}"
 }} >> {shlex.quote(str(log))}
 """,
             )
@@ -1773,11 +1855,13 @@ set -euo pipefail
             lines = log.read_text(encoding="utf-8").splitlines()
             self.assertIn(f"args=-d work {project}", lines)
             self.assertIn("CODEX_NAME=project", lines)
+            self.assertIn("CODEX_LOOPER_LAYOUT=split", lines)
             cmd_line = next(line for line in lines if line.startswith("CODEX_CMD="))
             args_line = next(line for line in lines if line.startswith("CODEX_ARGS="))
-            self.assertTrue(cmd_line.endswith("codex-looper.py"), cmd_line)
+            self.assertEqual(cmd_line, f"CODEX_CMD={LOOPER_PATH.resolve()}")
             self.assertIn("--agent codex", args_line)
             self.assertIn("--label sweep", args_line)
+            self.assertIn("--tmux-layout split", args_line)
             self.assertNotIn("--farm-session", args_line)
             self.assertNotIn("--farm-add-bin", args_line)
 

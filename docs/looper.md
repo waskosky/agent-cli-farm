@@ -103,6 +103,7 @@ Use `--once` or `--max-loops N` for bounded runs. Without either, the looper rep
 | `--ignore-nonzero` | off | Continue after nonzero agent exits. |
 | `--stop-on-nonzero` | on | Stop after nonzero agent exits. |
 | `--hold-on-stop` | off | Wait for Enter before closing after stop. |
+| `--tmux-layout auto\|single\|split` | `CODEX_LOOPER_LAYOUT` or `auto`; farm launch sets `split` | Split creates a second tmux pane that tails the active prompt log while the main pane keeps supervisor status. |
 | `--local` | off | Run in the current terminal instead of launching through the default farm. |
 | `--farm-session [NAME]` | default farm | Select the farm tmux session for `codex-add`. Omitting NAME uses the default farm session. |
 | `--farm-attach` | off | Attach after `--farm-session` launch. |
@@ -256,6 +257,7 @@ Logs are written under `.agent-looper/runs/<timestamp>__<label>/`.
 Normal non-dry-run looper commands call `codex-add` so existing farm behavior still owns session creation, board linking, pipe-pane logging, and annotator startup. Use `--local` to run in the current terminal. Use `--farm-session NAME` for a separate farm.
 Farm windows enable tmux `remain-on-exit` by default, so a stopped looper leaves its final pane visible for inspection instead of closing the window. Set `CODEX_REMAIN_ON_EXIT=0` when launching if you want the old close-on-exit behavior.
 Looper labels are kept for logs and agent session names only. They do not rename tmux windows; farm window names come from `CODEX_NAME` when set, otherwise the working directory basename.
+Farm-launched loopers default to `CODEX_LOOPER_LAYOUT=split`: the main pane shows the looper supervisor and a second detached pane tails the current `.agent-looper/runs/.../loop-*.log` file. Use `--tmux-layout single` or `CODEX_LOOPER_LAYOUT=single` to keep the older one-pane view.
 
 Example:
 

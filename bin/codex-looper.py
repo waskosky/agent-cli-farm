@@ -28,8 +28,10 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 only.
 VERSION = "0.3.1"
 AgentKind = Literal["claude", "codex", "generic"]
 LooperMode = Literal["single", "sequence"]
+TmuxLayout = Literal["auto", "single", "split"]
 TMUX_STATE_OPTION = "@codex_state"
 TMUX_STOP_REASON_OPTION = "@codex_stop_reason"
+CURRENT_LOG_POINTER_FILENAME = "current-log.path"
 DEFAULT_TIMEOUT_SECONDS = 7200.0
 DEFAULT_MAX_LOOPS = 0
 DEFAULT_MAX_TRANSIENT_RETRIES = 12
@@ -175,6 +177,7 @@ class RunOptions:
     farm_session: str | None = None
     farm_attach: bool = False
     farm_add_bin: str = "codex-add"
+    tmux_layout: TmuxLayout = "auto"
     local: bool = False
 
 
@@ -850,6 +853,71 @@ def display_tmux_message(message: str) -> None:
     subprocess.run([tmux, "display-message", message], check=False)
 
 
+def current_log_pointer_path(run_dir: Path) -> Path:
+    return run_dir / CURRENT_LOG_POINTER_FILENAME
+
+
+def tmux_log_tail_command(*, pointer_path: Path, supervisor_pid: int) -> str:
+    pointer = shlex.quote(str(pointer_path))
+    supervisor = shlex.quote(str(supervisor_pid))
+    return (
+        "export CODEX_LOOPER_TAIL_PANE=1; "
+        f"pointer={pointer}; supervisor={supervisor}; "
+        'printf "Waiting for looper log pointer: %s\\n" "$pointer"; '
+        "last=''; tail_pid=''; "
+        'while kill -0 "$supervisor" 2>/dev/null; do '
+        'next=$(cat "$pointer" 2>/dev/null || true); '
+        'if [ -n "$next" ] && [ "$next" != "$last" ]; then '
+        'if [ -n "$tail_pid" ]; then '
+        'kill "$tail_pid" 2>/dev/null || true; '
+        'wait "$tail_pid" 2>/dev/null || true; '
+        "fi; "
+        'printf "\\n==> %s <==\\n" "$next"; '
+        'tail -n +1 -F "$next" & tail_pid=$!; last="$next"; '
+        "fi; "
+        "sleep 1; "
+        "done; "
+        'if [ -n "$tail_pid" ]; then '
+        'kill "$tail_pid" 2>/dev/null || true; '
+        'wait "$tail_pid" 2>/dev/null || true; '
+        "fi; "
+        'printf "\\nLooper supervisor exited; log tail stopped.\\n"'
+    )
+
+
+def start_tmux_log_pane(run_dir: Path, options: RunOptions) -> bool:
+    if options.tmux_layout != "split":
+        return False
+    if not os.environ.get("TMUX"):
+        return False
+    tmux = shutil.which("tmux")
+    if not tmux:
+        return False
+
+    pointer_path = current_log_pointer_path(run_dir)
+    pointer_path.write_text("", encoding="utf-8")
+    set_tmux_window_option("remain-on-exit", "on")
+    subprocess.run(
+        [
+            tmux,
+            "split-window",
+            "-d",
+            "-v",
+            "-l",
+            "35%",
+            tmux_log_tail_command(pointer_path=pointer_path, supervisor_pid=os.getpid()),
+        ],
+        check=False,
+    )
+    return True
+
+
+def update_current_log_pointer(*, run_dir: Path, log_path: Path) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.touch(exist_ok=True)
+    current_log_pointer_path(run_dir).write_text(f"{log_path}\n", encoding="utf-8")
+
+
 def make_label(label: str | None, agent_name: str) -> str:
     if label:
         return label
@@ -926,6 +994,7 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
     if options.agent_args:
         agent = replace(agent, extra_args=[*agent.extra_args, *options.agent_args])
 
+    tail_pane_active = start_tmux_log_pane(run_dir, options)
     set_tmux_window_option(TMUX_STATE_OPTION, "RUN")
     set_tmux_window_option(TMUX_STOP_REASON_OPTION, "")
 
@@ -986,6 +1055,8 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
             first_prompt_in_session = False
             retry_count = 0
             log_path = run_dir / f"loop-{loop_number:04d}__prompt-{prompt_index:03d}.log"
+            if tail_pane_active:
+                update_current_log_pointer(run_dir=run_dir, log_path=log_path)
 
             while True:
                 context = CommandContext(
@@ -1854,17 +1925,41 @@ def _argv_has_option(argv: list[str], *names: str) -> bool:
     return False
 
 
+def default_tmux_layout_from_env() -> TmuxLayout:
+    raw = os.environ.get("CODEX_LOOPER_LAYOUT", "auto").strip().lower()
+    if raw in {"auto", "single", "split"}:
+        return raw  # type: ignore[return-value]
+    return "auto"
+
+
+def resolve_self_executable() -> str:
+    configured = os.environ.get("CODEX_LOOPER_COMMAND")
+    if configured:
+        return str(Path(configured).expanduser().resolve())
+
+    argv0 = Path(sys.argv[0]).expanduser()
+    if argv0.is_absolute() or argv0.parent != Path("."):
+        return str(argv0.resolve())
+
+    executable = shutil.which(argv0.name) or str(argv0)
+    return str(Path(executable).resolve())
+
+
 def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | None:
     if options.local or options.farm_session is None:
         return None
 
-    executable = os.environ.get("CODEX_LOOPER_COMMAND") or shutil.which(Path(sys.argv[0]).name) or sys.argv[0]
-    executable = str(Path(executable).resolve())
+    executable = resolve_self_executable()
     cwd = options.cwd or Path.cwd()
     env = os.environ.copy()
     env["CODEX_NAME"] = env.get("CODEX_NAME") or cwd.name
     env["CODEX_CMD"] = executable
     inner_args = clean_farm_args(original_argv)
+    layout_arg_present = _argv_has_option(inner_args, "--tmux-layout")
+    propagated_layout = options.tmux_layout if options.tmux_layout != "auto" or layout_arg_present else "split"
+    env["CODEX_LOOPER_LAYOUT"] = env.get("CODEX_LOOPER_LAYOUT") or propagated_layout
+    if not layout_arg_present:
+        inner_args.extend(["--tmux-layout", propagated_layout])
     if not _argv_has_option(inner_args, "--local"):
         inner_args.append("--local")
     if options.label and not _argv_has_option(inner_args, "--label", "-l"):
@@ -1894,6 +1989,12 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
     parser.add_argument("--mode", choices=("single", "sequence"), help="prompt loading mode")
     parser.add_argument("-p", "--prompt-file", help="prompt file")
     parser.add_argument("-l", "--label", help="human-readable run/session/log label; does not rename tmux windows")
+    parser.add_argument(
+        "--tmux-layout",
+        choices=("auto", "single", "split"),
+        default=default_tmux_layout_from_env(),
+        help="tmux layout for local execution: auto, single, or split (default from CODEX_LOOPER_LAYOUT or auto)",
+    )
     parser.add_argument("--timeout", type=positive_float, help="timeout seconds per prompt")
     parser.add_argument("--sleep", type=positive_float, help="sleep seconds between loops")
     parser.add_argument("--max-loops", type=nonnegative_int, help="0 means forever")
@@ -2015,6 +2116,7 @@ def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None 
         farm_session=args.farm_session,
         farm_attach=args.farm_attach,
         farm_add_bin=args.farm_add_bin,
+        tmux_layout=args.tmux_layout,
         local=args.local,
     )
 

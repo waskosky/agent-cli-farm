@@ -88,6 +88,7 @@ codex-looper --local --once --label local-smoke
 ```
 
 Looper labels are used for logs and agent session names only. Farm tmux window names stay tied to `CODEX_NAME` or the working directory basename.
+Farm-launched loopers use a two-pane tmux layout by default: the main pane shows supervisor status and the second pane tails the active prompt log. Use `--tmux-layout single` or `CODEX_LOOPER_LAYOUT=single` to keep one pane.
 
 Inspect a running looper or agent without attaching:
 ```bash
@@ -224,6 +225,7 @@ Common:
 - **`CODEX_AUTOSERVICE_CHOICE`** - `yes` or `no` to persist autoservice choice
 - **`CODEX_ANNOTATOR_AUTOSTART`** - set to `0` to skip starting the annotator
 - **`CODEX_LOOPER_PYTHON_BIN`** - Python 3.10+ interpreter for `codex-looper` (default `python3`)
+- **`CODEX_LOOPER_LAYOUT`** - looper tmux layout: `auto`, `single`, or `split`; farm launches default to `split`
 
 Annotator-specific:
 - **`CODEX_ANNOTATOR_ENABLED`** - set to `0` to disable the annotator loop
