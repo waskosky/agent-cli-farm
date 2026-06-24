@@ -36,6 +36,7 @@ DEFAULT_TIMEOUT_SECONDS = 7200.0
 DEFAULT_MAX_LOOPS = 0
 DEFAULT_MAX_TRANSIENT_RETRIES = 12
 DEFAULT_RETRY_NOTIFY_AFTER_SECONDS = 300.0
+STREAM_READ_CHUNK_BYTES = 64 * 1024
 DEFAULT_SINGLE_PROMPT_FILE = Path("PROMPT.md")
 DEFAULT_SEQUENCE_PROMPT_FILE = Path("prompts.md")
 DEFAULT_COMPLETION_MARKER = r"EXIT_SIGNAL:\s*true"
@@ -776,34 +777,57 @@ async def run_command(
         if reader is None:
             return
         output_stream = sys.stdout if stream_name == "stdout" else sys.stderr
+
+        def handle_line(raw_line: bytes, log_file: TextIO) -> None:
+            text = raw_line.decode("utf-8", errors="replace")
+            result.output_bytes += len(raw_line)
+            _safe_stream_write(output_stream, text)
+            log_file.write(f"[{utc_stamp()}] {stream_name}: {text}")
+            log_file.flush()
+
+            if completion_pattern and completion_pattern.search(text):
+                result.completion_detected = True
+
+            parsed = parse_output_line(
+                line=text,
+                stream=stream_name,
+                agent_kind=agent_kind,
+                patterns=patterns,
+                scan_stdout=scan_stdout,
+            )
+            if parsed.session_id and not result.session_id:
+                result.session_id = parsed.session_id
+            if parsed.stop_reason and not result.stop_reason:
+                result.stop_reason = parsed.stop_reason
+                result.retry_after_seconds = parsed.retry_after_seconds
+                result.retry_kind = parsed.retry_kind
+                stop_event.set()
+
         with log_path.open("a", encoding="utf-8") as log_file:
-            while True:
-                chunk = await reader.readline()
-                if not chunk:
-                    break
-                text = chunk.decode("utf-8", errors="replace")
-                result.output_bytes += len(chunk)
-                _safe_stream_write(output_stream, text)
-                log_file.write(f"[{utc_stamp()}] {stream_name}: {text}")
+            pending = bytearray()
+            try:
+                while True:
+                    chunk = await reader.read(STREAM_READ_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    pending.extend(chunk)
+                    while True:
+                        newline_index = pending.find(b"\n")
+                        if newline_index < 0:
+                            break
+                        raw_line = bytes(pending[: newline_index + 1])
+                        del pending[: newline_index + 1]
+                        handle_line(raw_line, log_file)
+                if pending:
+                    handle_line(bytes(pending), log_file)
+            except Exception as exc:
+                message = f"local {stream_name} reader failed: {type(exc).__name__}: {exc}"
+                if not result.stop_reason:
+                    result.stop_reason = message
+                log_file.write(f"[{utc_stamp()}] {stream_name}_reader_error: {message}\n")
                 log_file.flush()
-
-                if completion_pattern and completion_pattern.search(text):
-                    result.completion_detected = True
-
-                parsed = parse_output_line(
-                    line=text,
-                    stream=stream_name,
-                    agent_kind=agent_kind,
-                    patterns=patterns,
-                    scan_stdout=scan_stdout,
-                )
-                if parsed.session_id and not result.session_id:
-                    result.session_id = parsed.session_id
-                if parsed.stop_reason and not result.stop_reason:
-                    result.stop_reason = parsed.stop_reason
-                    result.retry_after_seconds = parsed.retry_after_seconds
-                    result.retry_kind = parsed.retry_kind
-                    stop_event.set()
+                stop_event.set()
+                await _terminate_process_group(process)
 
     async def wait_for_stop() -> None:
         await stop_event.wait()
@@ -818,7 +842,8 @@ async def run_command(
         await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
     except asyncio.TimeoutError:
         result.timed_out = True
-        result.stop_reason = f"local timeout after {timeout_seconds:g} seconds"
+        if not result.stop_reason:
+            result.stop_reason = f"local timeout after {timeout_seconds:g} seconds"
         await _terminate_process_group(process)
     finally:
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
