@@ -81,7 +81,7 @@ Use `--once` or `--max-loops N` for bounded runs. Without either, the looper rep
 | `--preset NAME_OR_PATH` | unset | Layer a preset TOML file over project config. Named presets resolve from `~/.config/codexfarm/presets/` and repo `examples/presets/`. |
 | `--mode single\|sequence` | `single`, with legacy inference | Select prompt loading mode. |
 | `--prompt-file PATH` | `PROMPT.md` in single mode, `prompts.md` in sequence mode | Prompt file. |
-| `--label LABEL` | `Looper_<short-id>` | Human-readable run/session label. |
+| `--label LABEL` | `Looper_<short-id>` | Human-readable run/session/log label. It does not rename tmux windows. |
 | `--timeout SECONDS` | `7200` | Per-prompt subprocess timeout. |
 | `--sleep SECONDS` | `2` | Sleep between completed loops. |
 | `--max-loops N` | `0` | Maximum loops; `0` means unlimited. |
@@ -255,6 +255,7 @@ Logs are written under `.agent-looper/runs/<timestamp>__<label>/`.
 
 Normal non-dry-run looper commands call `codex-add` so existing farm behavior still owns session creation, board linking, pipe-pane logging, and annotator startup. Use `--local` to run in the current terminal. Use `--farm-session NAME` for a separate farm.
 Farm windows enable tmux `remain-on-exit` by default, so a stopped looper leaves its final pane visible for inspection instead of closing the window. Set `CODEX_REMAIN_ON_EXIT=0` when launching if you want the old close-on-exit behavior.
+Looper labels are kept for logs and agent session names only. They do not rename tmux windows; farm window names come from `CODEX_NAME` when set, otherwise the working directory basename.
 
 Example:
 

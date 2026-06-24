@@ -850,15 +850,6 @@ def display_tmux_message(message: str) -> None:
     subprocess.run([tmux, "display-message", message], check=False)
 
 
-def rename_current_window(label: str) -> None:
-    if not os.environ.get("TMUX"):
-        return
-    tmux = shutil.which("tmux")
-    if not tmux:
-        return
-    subprocess.run([tmux, "rename-window", label], check=False)
-
-
 def make_label(label: str | None, agent_name: str) -> str:
     if label:
         return label
@@ -935,7 +926,6 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
     if options.agent_args:
         agent = replace(agent, extra_args=[*agent.extra_args, *options.agent_args])
 
-    rename_current_window(label)
     set_tmux_window_option(TMUX_STATE_OPTION, "RUN")
     set_tmux_window_option(TMUX_STOP_REASON_OPTION, "")
 
@@ -1872,7 +1862,7 @@ def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | No
     executable = str(Path(executable).resolve())
     cwd = options.cwd or Path.cwd()
     env = os.environ.copy()
-    env["CODEX_NAME"] = options.label or cwd.name
+    env["CODEX_NAME"] = env.get("CODEX_NAME") or cwd.name
     env["CODEX_CMD"] = executable
     inner_args = clean_farm_args(original_argv)
     if not _argv_has_option(inner_args, "--local"):
@@ -1903,7 +1893,7 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
     parser.add_argument("--preset", help="preset name or TOML path to layer over project config")
     parser.add_argument("--mode", choices=("single", "sequence"), help="prompt loading mode")
     parser.add_argument("-p", "--prompt-file", help="prompt file")
-    parser.add_argument("-l", "--label", help="human-readable run label; also used for resumable sessions")
+    parser.add_argument("-l", "--label", help="human-readable run/session/log label; does not rename tmux windows")
     parser.add_argument("--timeout", type=positive_float, help="timeout seconds per prompt")
     parser.add_argument("--sleep", type=positive_float, help="sleep seconds between loops")
     parser.add_argument("--max-loops", type=nonnegative_int, help="0 means forever")

@@ -87,6 +87,8 @@ claude-looper --farm-session work --label cleanup-pass --cwd /path/to/project
 codex-looper --local --once --label local-smoke
 ```
 
+Looper labels are used for logs and agent session names only. Farm tmux window names stay tied to `CODEX_NAME` or the working directory basename.
+
 Inspect a running looper or agent without attaching:
 ```bash
 codex-status activity
