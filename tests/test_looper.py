@@ -503,6 +503,105 @@ scan_stdout_for_stop_patterns = true
         self.assertEqual(result.stop_reason, "local timeout after 0.01 seconds")
         self.assertTrue(transport.closed)
 
+    def test_run_command_drains_jsonl_line_larger_than_asyncio_default_limit(self) -> None:
+        async def exercise() -> tuple[object, str, int]:
+            large_text = "x" * (70 * 1024)
+            first_line = "{" + f'"type":"assistant","message":"{large_text}"' + "}\n"
+            second_line = '{"type":"result","subtype":"success"}\n'
+            script = (
+                "import sys\n"
+                f"sys.stdout.write({first_line!r})\n"
+                f"sys.stdout.write({second_line!r})\n"
+                "sys.stdout.flush()\n"
+            )
+
+            with tempfile.TemporaryDirectory() as td:
+                log_path = Path(td) / "run.log"
+                result = await self.looper.run_command(
+                    command=[sys.executable, "-c", script],
+                    cwd=Path(td),
+                    env={},
+                    timeout_seconds=1.0,
+                    log_path=log_path,
+                    agent_kind="claude",
+                    patterns=[],
+                    scan_stdout=False,
+                    kill_on_stop_pattern=True,
+                )
+                return result, log_path.read_text(encoding="utf-8"), len(first_line) + len(second_line)
+
+        result, log_text, expected_bytes = asyncio.run(exercise())
+
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(result.timed_out)
+        self.assertEqual(result.output_bytes, expected_bytes)
+        self.assertIn('"message":"xxxxxxxxxx', log_text)
+        self.assertIn('"type":"result"', log_text)
+
+    def test_run_command_reports_reader_failure_instead_of_waiting_for_timeout(self) -> None:
+        async def exercise() -> tuple[object, str]:
+            stderr = asyncio.StreamReader()
+            stderr.feed_eof()
+
+            class FailingReader:
+                async def read(self, size: int = -1) -> bytes:
+                    raise RuntimeError("stream exploded")
+
+                async def readline(self) -> bytes:
+                    raise RuntimeError("stream exploded")
+
+            class FakeProcess:
+                def __init__(self) -> None:
+                    self.pid = 12345
+                    self.returncode = None
+                    self.stdout = FailingReader()
+                    self.stderr = stderr
+                    self._done = asyncio.Event()
+
+                async def wait(self) -> int:
+                    await self._done.wait()
+                    return int(self.returncode or 0)
+
+            process = FakeProcess()
+            original_create = self.looper.asyncio.create_subprocess_exec
+            original_terminate = self.looper._terminate_process_group
+
+            async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
+                return process
+
+            async def fake_terminate_process_group(fake_process: FakeProcess) -> None:
+                fake_process.returncode = -15
+                fake_process._done.set()
+                await fake_process.wait()
+
+            self.looper.asyncio.create_subprocess_exec = fake_create_subprocess_exec
+            self.looper._terminate_process_group = fake_terminate_process_group
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    log_path = Path(td) / "run.log"
+                    result = await self.looper.run_command(
+                        command=["failing-agent"],
+                        cwd=Path(td),
+                        env={},
+                        timeout_seconds=1.0,
+                        log_path=log_path,
+                        agent_kind="generic",
+                        patterns=[],
+                        scan_stdout=False,
+                        kill_on_stop_pattern=True,
+                    )
+                    return result, log_path.read_text(encoding="utf-8")
+            finally:
+                self.looper.asyncio.create_subprocess_exec = original_create
+                self.looper._terminate_process_group = original_terminate
+
+        result, log_text = asyncio.run(exercise())
+
+        self.assertEqual(result.returncode, -15)
+        self.assertFalse(result.timed_out)
+        self.assertEqual(result.stop_reason, "local stdout reader failed: RuntimeError: stream exploded")
+        self.assertIn("stdout_reader_error", log_text)
+
     def test_run_loop_retries_current_prompt_after_rate_limit_stop(self) -> None:
         async def exercise() -> tuple[int, list[list[str]], list[float], list[tuple[str, str]]]:
             calls: list[list[str]] = []
