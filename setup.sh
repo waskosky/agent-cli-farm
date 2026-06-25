@@ -58,9 +58,11 @@ PY
     local candidate="$1"
     local existing
     [ -e "$candidate" ] || return 0
-    for existing in "${scripts_to_copy[@]}"; do
-      [ "$existing" = "$candidate" ] && return 0
-    done
+    if [ "${#scripts_to_copy[@]}" -gt 0 ]; then
+      for existing in "${scripts_to_copy[@]}"; do
+        [ "$existing" = "$candidate" ] && return 0
+      done
+    fi
     scripts_to_copy+=("$candidate")
   }
 
