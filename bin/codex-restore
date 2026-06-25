@@ -15,6 +15,14 @@ case "$script_name" in
 esac
 ADD_BIN="${CODEX_ADD_BIN:-$SCRIPT_DIR/codex-add}"
 
+usage() {
+  cat <<EOF
+Usage: $script_name [-a|--attach] [-f|--force] [--all-registered] [manifest-path]
+
+Restore tmux farm windows from a trusted executable manifest.
+EOF
+}
+
 trim_command_field() {
   local value="$1"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -38,11 +46,20 @@ trim_command_field() {
 
 strip_status_prefix() {
   local value="$1"
-  case "$value" in
-    "*READY* "*) value="${value#\*READY\* }" ;;
-    "*RUN* "*) value="${value#\*RUN\* }" ;;
-    "*ERR* "*) value="${value#\*ERR\* }" ;;
-  esac
+  local old match
+  while :; do
+    old="$value"
+    case "$value" in
+      "*READY* "*) value="${value#\*READY\* }" ;;
+      "*RUN* "*) value="${value#\*RUN\* }" ;;
+      "*ERR* "*) value="${value#\*ERR\* }" ;;
+    esac
+    if [[ "$value" =~ ^\*[0-9]+(\.[0-9]+)?\+MB\*\*[[:space:]]* ]]; then
+      match="${BASH_REMATCH[0]}"
+      value="${value:${#match}}"
+    fi
+    [ "$value" = "$old" ] && break
+  done
   printf '%s' "$value"
 }
 
@@ -213,6 +230,7 @@ while (( "$#" )); do
   case "${1:-}" in
     -a|--attach) attach=1; shift ;;
     -f|--force) force=1; shift ;;
+    -h|--help) usage; exit 0 ;;
     --all-registered) all_registered=1; shift ;;
     --) shift; while (( "$#" )); do args_pos+=("$1"); shift; done ;;
     -*) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -220,15 +238,24 @@ while (( "$#" )); do
   esac
 done
 
+if [ "${#args_pos[@]}" -gt 1 ]; then
+  echo "Unexpected argument: ${args_pos[1]}" >&2
+  exit 2
+fi
+
+if [ "$all_registered" -eq 1 ] && [ "${#args_pos[@]}" -gt 0 ]; then
+  echo "--all-registered cannot be combined with a manifest path" >&2
+  exit 2
+fi
+
 SESSION="${CODEX_SESSION:-$DEFAULT_SESSION}"
 MANIFEST_PATH="${args_pos[0]:-$(default_manifest_path_for_session "$SESSION")}"
 
-if ! command -v tmux >/dev/null; then
-  echo "tmux not found" >&2
-  exit 127
-fi
-
 if [ "$all_registered" -eq 1 ]; then
+  if ! command -v tmux >/dev/null; then
+    echo "tmux not found" >&2
+    exit 127
+  fi
   restore_all_registered "$attach" "$force"
   exit $?
 fi
@@ -238,12 +265,28 @@ if [ ! -f "$MANIFEST_PATH" ]; then
   exit 1
 fi
 
+IFS= read -r manifest_header < "$MANIFEST_PATH" || manifest_header=""
+if [ "$manifest_header" != $'name\tdir\tcmd\targs' ]; then
+  echo "Malformed manifest header: $MANIFEST_PATH" >&2
+  exit 2
+fi
+
+if ! command -v tmux >/dev/null; then
+  echo "tmux not found" >&2
+  exit 127
+fi
+
 # Ensure session exists
 tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
 
 # Read manifest; skip header
 { read -r _header || true; cat; } < "$MANIFEST_PATH" | while IFS=$'\t' read -r name dir cmd args || [ -n "${name:-}" ]; do
   [ -z "${name:-}" ] && continue
+  restore_dir="${dir:-$HOME}"
+  if [ ! -d "$restore_dir" ]; then
+    echo "Warning: saved directory not found, using HOME: $restore_dir" >&2
+    restore_dir="$HOME"
+  fi
   # Skip if window exists and not forcing
   existing_target="$(existing_window_target "$SESSION" "$name" || true)"
   if [ -n "$existing_target" ]; then
@@ -255,7 +298,7 @@ tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" 
     fi
   fi
   normalize_restore_command "${cmd:-}" "${args:-}"
-  CODEX_NAME="$name" CODEX_CMD="$RESTORE_CMD" CODEX_ARGS="$RESTORE_ARGS" "$ADD_BIN" -d "${dir:-$HOME}"
+  CODEX_NAME="$name" CODEX_CMD="$RESTORE_CMD" CODEX_ARGS="$RESTORE_ARGS" "$ADD_BIN" -d "$restore_dir"
 done
 
 if [ "$attach" -eq 1 ]; then

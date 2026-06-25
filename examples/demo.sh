@@ -1,72 +1,96 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Demo script showing how to use Codex CLI Farm
-# This creates a demo session with mock Codex instances
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-cd "$(dirname "$0")/.."
-
-echo "=== Codex CLI Farm Demo ==="
-echo ""
-
-# Check if tmux is available
-if ! command -v tmux >/dev/null; then
-    echo "❌ tmux not found. Please install it first."
-    exit 1
+if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux not found; install tmux to run this demo." >&2
+    exit 127
 fi
 
-echo "Starting demo with mock Codex instances..."
+tmp_root="$(mktemp -d)"
+session="codexfarm-demo-$$"
+board_session="${session}-board"
+
+cleanup() {
+    set +e
+    tmux kill-session -t "$session" >/dev/null 2>&1 || true
+    tmux kill-session -t "$board_session" >/dev/null 2>&1 || true
+    if [ -n "${TMUX_TMPDIR:-}" ] && [ -d "$TMUX_TMPDIR" ]; then
+        tmux kill-server >/dev/null 2>&1 || true
+    fi
+    rm -rf "$tmp_root"
+}
+trap cleanup EXIT HUP INT TERM
+
+export HOME="$tmp_root/home"
+export XDG_CONFIG_HOME="$tmp_root/config"
+export XDG_STATE_HOME="$tmp_root/state"
+export TMUX_TMPDIR="$tmp_root/tmux"
+export PATH="$repo_root/bin:$tmp_root/bin:$PATH"
+export CODEX_SESSION="$session"
+export CODEX_STATE_BASENAME="codexfarm-demo-$$"
+export CODEX_TIPS_PROMPT=0
+export CODEX_AUTOSERVICE_CHOICE=no
+export CODEX_ANNOTATOR_AUTOSTART=0
+unset TMUX
+
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$TMUX_TMPDIR" "$tmp_root/bin"
+
+mock_agent="$tmp_root/bin/mock-codex"
+cat > "$mock_agent" <<'EOF'
+#!/usr/bin/env bash
+trap 'exit 0' TERM INT
+printf 'mock agent running in %s\n' "$PWD"
+while :; do sleep 1; done
+EOF
+chmod +x "$mock_agent"
+export CODEX_CMD="$mock_agent"
+export CODEX_ARGS=""
+
+project1="$tmp_root/projects/project1"
+project2="$tmp_root/projects/project2"
+manifest="$tmp_root/manifest.tsv"
+mkdir -p "$project1" "$project2"
+printf '# Demo Project 1\n' > "$project1/README.md"
+printf '# Demo Project 2\n' > "$project2/README.md"
+
+echo "=== Codex CLI Farm Demo ==="
+echo "session: $session"
 echo ""
 
-# Add to PATH for this demo
-demo_root="$(pwd)"
-export PATH="$demo_root/bin:$demo_root/examples:$PATH"
-
-# Use mock-codex instead of real codex
-export CODEX_CMD="mock-codex"
-
-echo "1. Adding first Codex instance..."
-mkdir -p /tmp/demo-project1
-echo "# Demo Project 1" > /tmp/demo-project1/README.md
-CODEX_NAME="project1" bin/codex-add -d /tmp/demo-project1 || true
+echo "1. Adding first mock instance..."
+CODEX_NAME="project1" "$repo_root/bin/codex-add" -d "$project1"
 
 echo ""
-echo "2. Adding second Codex instance..."
-mkdir -p /tmp/demo-project2  
-echo "# Demo Project 2" > /tmp/demo-project2/README.md
-CODEX_NAME="project2" bin/codex-add -d /tmp/demo-project2 || true
+echo "2. Adding second mock instance..."
+CODEX_NAME="project2" "$repo_root/bin/codex-add" -d "$project2"
 
 echo ""
 echo "3. Checking status..."
-bin/codex-status sessions
+"$repo_root/bin/codex-status" sessions
 echo ""
-bin/codex-status windows
-echo ""
-
-echo "4. Creating board session..."
-bin/codex-board create
-bin/codex-board link
+"$repo_root/bin/codex-status" windows
 
 echo ""
-echo "5. Checking logs..."
-sleep 2
-bin/codex-status logs
+echo "4. Creating and linking board..."
+"$repo_root/bin/codex-board" create
+"$repo_root/bin/codex-board" link
 
 echo ""
-echo "6. Saving and restoring manifest..."
-bin/codex-save
-bin/codex-restore
+echo "5. Saving manifest..."
+"$repo_root/bin/codex-save" "$manifest"
 
 echo ""
-echo "Demo complete! The following sessions are now running:"
-echo "- codexfarm: Main session with Codex instances"
-echo "- board: Navigation session"
+echo "6. Restoring from manifest..."
+tmux kill-session -t "$session"
+"$repo_root/bin/codex-restore" "$manifest"
+
 echo ""
-echo "To interact with them:"
-echo "  tmux attach -t codexfarm   # Main session"
-echo "  tmux attach -t board       # Board session"
-echo "  bin/codex-watch           # Watch all logs"
+echo "7. Checking restored status..."
+"$repo_root/bin/codex-status" windows
+
 echo ""
-echo "To clean up:"
-echo "  tmux kill-session -t codexfarm"
-echo "  tmux kill-session -t board"
+echo "Demo complete. Temporary data was isolated under:"
+echo "  $tmp_root"
+echo "It will be removed when this script exits."

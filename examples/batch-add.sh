@@ -14,13 +14,13 @@ fi
 
 for d in "$@"; do
   if [ -d "$d" ]; then
-    name=$(basename "$(readlink -f "$d")")
-    echo "Adding $name ($d) ..."
-    CODEX_NAME="$name" codex-add -d "$d"
+    resolved="$(cd -P -- "$d" && pwd)"
+    name=$(basename "$resolved")
+    echo "Adding $name ($resolved) ..."
+    CODEX_NAME="$name" codex-add -d "$resolved"
   else
     echo "Skipping non-directory: $d" >&2
   fi
 done
 
 echo "Batch add complete. Attach with: tmux attach -t ${CODEX_SESSION:-codexfarm}"
-

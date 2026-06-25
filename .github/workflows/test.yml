@@ -2,53 +2,62 @@ name: Test Codex CLI Farm
 
 on:
   push:
-    branches: [ main, develop ]
   pull_request:
-    branches: [ main, develop ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install dependencies
-      run: ./setup.sh
-      
-    - name: Run validation tests
-      run: ./validate.sh
-      
-    - name: Run demo
-      run: |
-        export PATH="$HOME/bin:$PATH"
-        cd examples
-        ./demo.sh
-        
-    - name: Check script syntax
-      run: |
-        for script in bin/codex-*; do
-          echo "Checking $script..."
-          shebang="$(head -n 1 "$script")"
-          if echo "$shebang" | grep -qE '^#!.*(env[[:space:]]+)?(ba)?sh([[:space:]]|$)'; then
-            bash -n "$script"
-          elif echo "$shebang" | grep -qE '^#!.*python'; then
-            PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile "$script"
-          else
-            echo "Skipping $script (unknown shebang)"
-          fi
-        done
-        
-    - name: Test help messages
-      run: |
-        export PATH="$HOME/bin:$PATH"
-        codex-looper --help 2>&1 | grep -q "Tiny coding-agent looper"
-        codex-board --help 2>&1 | grep -q "Usage:"
-        codex-status --help 2>&1 | grep -q "Usage:"
-        
-    - name: Test status commands
-      run: |
-        export PATH="$HOME/bin:$PATH"
-        codex-status sessions
-        codex-status logs
-        codex-status windows
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux shellcheck
+
+      - name: Install development dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Check Python formatting
+        run: ruff format --check .
+
+      - name: Run Python lint
+        run: ruff check .
+
+      - name: Check Bash syntax
+        run: |
+          while IFS= read -r file; do
+            bash -n "$file"
+          done < <(git grep -l '^#!/usr/bin/env bash')
+
+      - name: Run ShellCheck
+        run: git grep -lZ '^#!/usr/bin/env bash' | xargs -0 shellcheck --severity=warning
+
+      - name: Run unit tests
+        run: CODEX_ANNOTATOR_AUTOSTART=0 python -m unittest discover -s tests -v
+
+      - name: Run isolated validation
+        if: matrix.python-version == '3.13'
+        run: ./validate.sh
+
+      - name: Run isolated demo
+        if: matrix.python-version == '3.13'
+        run: ./examples/demo.sh

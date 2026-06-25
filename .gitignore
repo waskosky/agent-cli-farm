@@ -1,21 +1,27 @@
-# .gitignore for Codex CLI Farm
+# Python
+__pycache__/
+*.py[cod]
+.ruff_cache/
 
-# Temporary files
+# Coverage
+.coverage
+htmlcov/
+
+# Temporary files and build output
 /tmp/
 /temp/
 *.tmp
 *.temp
-__pycache__/
-*.pyc
-
-# Log files (these are created in user's home directory)
-*.log
-
-# Build artifacts (if any are added later)
 /dist/
 /build/
 
-# OS generated files
+# Runtime output
+*.log
+/.local/
+/.agent-looper/runs/
+/.worktrees/
+
+# OS files
 .DS_Store
 .DS_Store?
 ._*
@@ -30,20 +36,3 @@ Thumbs.db
 *.swp
 *.swo
 *~
-
-# Runtime directories that may be created during testing
-/.local/
-/.agent-looper/runs/
-/.worktrees/
-/bin/*
-!/bin/add_high_memory_warning.sh
-!/bin/codex-*
-!/bin/claude-*
-!/bin/gemini-*
-/tests
-!/tests/
-!/tests/test_annotator_status.py
-!/tests/test_add_scripts.py
-!/tests/test_claude_wrappers.py
-!/tests/test_codex_annotator.py
-!/tests/test_looper.py

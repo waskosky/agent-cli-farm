@@ -1,4 +1,5 @@
 import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -54,6 +55,29 @@ esac
     def read_tmux_commands(self) -> list[list[str]]:
         lines = self.tmux_log.read_text(encoding="utf-8").splitlines()
         return [line.split() for line in lines]
+
+    def test_help_does_not_require_tmux_or_agent(self):
+        env = self.env.copy()
+        sparse_path = self.tmpdir / "sparse-path"
+        sparse_path.mkdir()
+        for command in ["bash", "basename", "cat", "tr"]:
+            system_path = shutil.which(command)
+            if not system_path:
+                raise RuntimeError(f"Missing required test command: {command}")
+            (sparse_path / command).symlink_to(system_path)
+        env["PATH"] = str(sparse_path)
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "--help"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Usage:", result.stdout)
+        self.assertNotIn("not found", result.stderr)
 
     def test_claude_add_passthrough_and_shorthand(self):
         target_dir = self.tmpdir / "proj"
@@ -394,6 +418,21 @@ exit 0
             "Dry run complete: 0 windows scanned, threshold 200 MiB, 0 sockets skipped.\n",
         )
 
+    def test_codex_watch_rejects_invalid_mode_without_creating_state(self):
+        state_home = Path(self.env["XDG_STATE_HOME"])
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-watch", "--mode", "sideways"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Invalid mode: sideways", result.stderr)
+        self.assertFalse((state_home / "codexfarm").exists())
+
 
 class SaveScriptTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -431,7 +470,7 @@ case "$1" in
     printf '0\\n1\\n2\\n3\\n'
     exit 0
     ;;
-  display-message)
+      display-message)
     target=""
     format=""
     while [ "$#" -gt 0 ]; do
@@ -443,7 +482,13 @@ case "$1" in
     done
     case "$target|$format" in
       *:0'|#{window_name}') printf '*READY* home\\n' ;;
-      *:1'|#{window_name}') printf '*RUN* proj\\n' ;;
+      *:1'|#{window_name}')
+        if [ -n "${STACKED_WINDOW_NAME:-}" ]; then
+          printf '%s\\n' "$STACKED_WINDOW_NAME"
+        else
+          printf '*RUN* proj\\n'
+        fi
+        ;;
       *:1.0'|#{pane_current_path}') printf '/tmp/project\\n' ;;
       *:1.0'|#{pane_start_command}')
         if [ "${WRAPPED_CODEX_START:-0}" = "1" ]; then
@@ -533,6 +578,35 @@ esac
             "gemini-proj\t/tmp/gemini-project\tgemini\t--resume 27bd36d0-2977-4cce-9d5d-33764d915f1d",
             rows,
         )
+        self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o600)
+
+    def test_codex_save_strips_stacked_status_and_memory_prefixes(self):
+        env = self.env.copy()
+        env["STACKED_WINDOW_NAME"] = "*READY* *512+MB** *RUN* proj"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        rows = self.manifest.read_text(encoding="utf-8").splitlines()
+        self.assertIn(
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+            rows,
+        )
+
+    def test_codex_save_rejects_extra_manifest_arguments(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", str(self.manifest), str(self.tmpdir / "other.tsv")],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Unexpected argument", result.stderr)
 
     def test_codex_save_named_session_uses_named_manifest_by_default(self):
         env = self.env.copy()
@@ -617,6 +691,8 @@ class RestoreScriptTests(unittest.TestCase):
         self.tmux_log = self.tmpdir / "tmux.log"
         self.codex_add_log = self.tmpdir / "codex-add.log"
         self.manifest = self.tmpdir / "manifest.tsv"
+        self.project_dir = self.tmpdir / "project"
+        self.project_dir.mkdir()
 
         tmux_stub = """#!/usr/bin/env bash
 set -euo pipefail
@@ -647,7 +723,7 @@ exit 0
 
         self.manifest.write_text(
             "name\tdir\tcmd\targs\n"
-            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4\n",
+            f"proj\t{self.project_dir}\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4\n",
             encoding="utf-8",
         )
 
@@ -676,7 +752,7 @@ exit 0
         self.assertEqual(
             add_calls,
             [
-                "proj|codex|resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4|-d /tmp/project"
+                f"proj|codex|resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4|-d {self.project_dir}"
             ],
         )
         self.assertFalse(
@@ -686,7 +762,7 @@ exit 0
 
     def test_codex_restore_adds_legacy_codex_resume_last(self):
         self.manifest.write_text(
-            "name\tdir\tcmd\targs\nproj\t/tmp/project\tcodex\t\n",
+            f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tcodex\t\n",
             encoding="utf-8",
         )
 
@@ -697,11 +773,11 @@ exit 0
         )
 
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(add_calls, ["proj|codex|resume --last|-d /tmp/project"])
+        self.assertEqual(add_calls, [f"proj|codex|resume --last|-d {self.project_dir}"])
 
     def test_codex_restore_uses_manifest_tool_for_claude(self):
         self.manifest.write_text(
-            "name\tdir\tcmd\targs\nproj\t/tmp/project\tclaude\t--continue\n",
+            f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tclaude\t--continue\n",
             encoding="utf-8",
         )
 
@@ -712,11 +788,11 @@ exit 0
         )
 
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(add_calls, ["proj|claude|--continue|-d /tmp/project"])
+        self.assertEqual(add_calls, [f"proj|claude|--continue|-d {self.project_dir}"])
 
     def test_codex_restore_uses_manifest_tool_for_gemini(self):
         self.manifest.write_text(
-            "name\tdir\tcmd\targs\nproj\t/tmp/project\tgemini\t--resume latest\n",
+            f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tgemini\t--resume latest\n",
             encoding="utf-8",
         )
 
@@ -727,7 +803,7 @@ exit 0
         )
 
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(add_calls, ["proj|gemini|--resume latest|-d /tmp/project"])
+        self.assertEqual(add_calls, [f"proj|gemini|--resume latest|-d {self.project_dir}"])
 
     def test_codex_restore_skips_existing_annotated_window_name(self):
         env = self.env.copy()
@@ -746,11 +822,60 @@ exit 0
         )
         self.assertEqual(add_calls, [])
 
+    def test_codex_restore_matches_stacked_annotated_window_name(self):
+        env = self.env.copy()
+        env["TMUX_WINDOWS_OUTPUT"] = "@9\t*READY* *512+MB** *RUN* proj"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        add_calls = (
+            self.codex_add_log.read_text(encoding="utf-8").splitlines()
+            if self.codex_add_log.exists()
+            else []
+        )
+        self.assertEqual(add_calls, [])
+
+    def test_codex_restore_rejects_invalid_manifest_header(self):
+        self.manifest.write_text("bad\theader\n", encoding="utf-8")
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Malformed manifest header", result.stderr)
+        self.assertFalse(self.tmux_log.exists())
+
+    def test_codex_restore_falls_back_when_saved_directory_is_missing(self):
+        missing_dir = self.tmpdir / "missing"
+        self.manifest.write_text(
+            "name\tdir\tcmd\targs\n"
+            f"proj\t{missing_dir}\tcodex\tresume --last\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=self.env,
+        )
+
+        add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(add_calls, [f"proj|codex|resume --last|-d {self.tmpdir}"])
+
     def test_codex_restore_all_registered_restores_each_farm_manifest(self):
         work_manifest = self.tmpdir / "work.tsv"
         work_manifest.write_text(
             "name\tdir\tcmd\targs\n"
-            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4\n",
+            f"proj\t{self.project_dir}\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4\n",
             encoding="utf-8",
         )
         registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm" / "farms.tsv"
@@ -792,7 +917,11 @@ case "$1" in
     exit 1
     ;;
   list-windows)
-    printf '0\n1\n2\n'
+    if [ "${TMUX_LIST_WINDOWS_WITH_NAMES:-0}" = "1" ]; then
+      printf '0\talpha\n1\thome\n2\tbeta\n'
+    else
+      printf '0\n1\n2\n'
+    fi
     exit 0
     ;;
   new-window)
@@ -862,8 +991,67 @@ esac
         )
 
         commands = self.read_tmux_commands()
-        self.assertIn(["list-windows", "-t", "work", "-F", "#{window_index}"], commands)
+        self.assertIn(
+            ["list-windows", "-t", "work", "-F", "#{window_index}", "#{window_name}"],
+            commands,
+        )
         self.assertIn(["link-window", "-s", "work:1", "-t", "work-board"], commands)
+
+    def test_codex_resume_rejects_extra_session_arguments(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-resume", "work", "other"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Unexpected argument: other", result.stderr)
+
+    def test_codex_resume_rejects_duplicate_session_arguments(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-resume", "--session", "work", "other"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Session specified multiple times", result.stderr)
+
+    def test_codex_board_rejects_extra_session_arguments(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-board", "link", "work", "other"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Unexpected argument: other", result.stderr)
+
+    def test_codex_board_link_skips_home_window_by_name(self):
+        env = self.env.copy()
+        env["TMUX_EXISTING_SESSIONS"] = "work work-board"
+        env["TMUX_LIST_WINDOWS_WITH_NAMES"] = "1"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-board", "link", "work"],
+            check=True,
+            env=env,
+        )
+
+        commands = self.read_tmux_commands()
+        self.assertIn(
+            ["list-windows", "-t", "work", "-F", "#{window_index}", "#{window_name}"],
+            commands,
+        )
+        self.assertIn(["link-window", "-s", "work:0", "-t", "work-board"], commands)
+        self.assertNotIn(["link-window", "-s", "work:1", "-t", "work-board"], commands)
+        self.assertIn(["link-window", "-s", "work:2", "-t", "work-board"], commands)
 
 
 class StatusAndWatchScriptsTests(unittest.TestCase):
@@ -930,7 +1118,29 @@ esac
             capture_output=True,
         )
 
-        self.assertIn(f"Watches 1 log file(s) in {logdir}", result.stdout)
+        self.assertIn(f"Watches log files in {logdir}", result.stdout)
+
+    def test_codex_status_reports_missing_tmux(self):
+        env = self.env.copy()
+        sparse_path = self.tmpdir / "sparse-path"
+        sparse_path.mkdir()
+        for command in ["bash", "basename"]:
+            system_path = shutil.which(command)
+            if not system_path:
+                raise RuntimeError(f"Missing required test command: {command}")
+            (sparse_path / command).symlink_to(system_path)
+        env["PATH"] = str(sparse_path)
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-status", "sessions"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 127)
+        self.assertIn("tmux not found", result.stderr)
 
 
 if __name__ == "__main__":

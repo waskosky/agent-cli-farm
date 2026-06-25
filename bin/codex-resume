@@ -69,6 +69,16 @@ EOF
   shift
 done
 
+if [ -n "$SESSION_ARG" ] && [ ${#POSITIONALS[@]} -gt 0 ]; then
+  echo "Session specified multiple times" >&2
+  exit 2
+fi
+
+if [ ${#POSITIONALS[@]} -gt 1 ]; then
+  echo "Unexpected argument: ${POSITIONALS[1]}" >&2
+  exit 2
+fi
+
 if [ -z "$SESSION_ARG" ] && [ ${#POSITIONALS[@]} -gt 0 ]; then
   SESSION_ARG="${POSITIONALS[0]}"
 fi

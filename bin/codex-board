@@ -63,12 +63,27 @@ EOF
   shift
 done
 
+if [ -n "$SESSION_ARG" ] && [ ${#POSITIONALS[@]} -gt 0 ]; then
+  echo "Session specified multiple times" >&2
+  exit 2
+fi
+
+if [ ${#POSITIONALS[@]} -gt 1 ]; then
+  echo "Unexpected argument: ${POSITIONALS[1]}" >&2
+  exit 2
+fi
+
 if [ -z "$SESSION_ARG" ] && [ ${#POSITIONALS[@]} -gt 0 ]; then
   SESSION_ARG="${POSITIONALS[0]}"
 fi
 
 SESSION="${SESSION_ARG:-${CODEX_SESSION:-$DEFAULT_SESSION}}"
 BOARD_SESSION="$(board_session_name "$SESSION")"
+
+if ! command -v tmux >/dev/null; then
+  echo "tmux not found" >&2
+  exit 127
+fi
 
 case "$ACTION" in
   create)
@@ -91,9 +106,11 @@ case "$ACTION" in
       tmux new-session -d -s "$BOARD_SESSION"
     fi
 
-    for idx in $(tmux list-windows -t "$SESSION" -F '#{window_index}' | tail -n +2); do
+    while IFS=$'\t' read -r idx name; do
+      [ -n "${idx:-}" ] || continue
+      [ "${name:-}" = "home" ] && continue
       tmux link-window -s "$SESSION:$idx" -t "$BOARD_SESSION" 2>/dev/null || true
-    done
+    done < <(tmux list-windows -t "$SESSION" -F $'#{window_index}\t#{window_name}')
     echo "Linked all Codex windows to board session"
     ;;
 

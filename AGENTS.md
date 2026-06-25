@@ -1,43 +1,47 @@
-# Codex CLI Farm - Agent Status Detection Notes
+# Codex CLI Farm - Agent Status Maintenance
 
-## Why these rules exist
-Our tmux window READY/RUN/ERR detection mirrors the heuristics used by the **CLI Agent Orchestrator (CAO)** project so we can distinguish "running" vs "waiting for user" as reliably as possible from terminal output alone.
+## Source of truth
 
-Because Codex/Claude CLIs do not emit a structured status channel, we rely on prompt patterns and spinner/selection cues. This document records the CAO source files used so we can re-sync if their logic changes.
+Status classification lives in code and tests, not in notes copied from another project.
 
-## Reference sources (CAO)
-We based our rules on these files in a local checkout of `cli-agent-orchestrator` when available:
-
-- **Codex provider**: `src/cli_agent_orchestrator/providers/codex.py`
-  - Patterns: `IDLE_PROMPT_AT_END_PATTERN`, `WAITING_PROMPT_PATTERN`, `PROCESSING_PATTERN`, `ERROR_PATTERN`
-  - Gating: `USER_PREFIX_PATTERN` + `ASSISTANT_PREFIX_PATTERN` (WAITING/ERROR only count if they appear *after* the last user message and are not part of an assistant response)
-  - Status decisions: `get_status()` around lines ~55-120 (see in repo)
-
-- **Claude provider**: `src/cli_agent_orchestrator/providers/claude_code.py`
-  - Patterns: `PROCESSING_PATTERN`, `WAITING_USER_ANSWER_PATTERN`, `IDLE_PROMPT_PATTERN`
-  - Status decisions: `get_status()` around lines ~84-110 (see in repo)
-
-If the local checkout is absent, fetch or inspect the current CAO source before re-syncing these rules. If CAO updates those patterns or ordering, re-check our implementation and update `bin/codex-annotator` accordingly.
-
-## Our implementation (Codex CLI Farm)
-Current rules live here:
-
-- `bin/codex-annotator`
+- `bin/codex-annotator.py`
   - `classify_codex_output()`
   - `classify_claude_output()`
-  - `classify_pane()` and `aggregate_window_state()`
+  - `classify_pane()`
+  - `aggregate_window_state()`
+- `tests/test_codex_annotator.py`
+- `tests/test_annotator_status.py`
 
-Key behavior differences vs CAO (intentional):
+Update those tests whenever prompt, spinner, provider, or tmux-pane behavior changes.
 
-- **RUN only on explicit processing markers.**
-  - We do **not** mark RUN just because there is no idle prompt.
-  - This was a deliberate choice to avoid false RUN when the CLI is quiet.
+## Classification model
 
-- **WAITING prompts map to READY.**
-  - CAO returns `WAITING_USER_ANSWER`, but our UI uses READY to indicate “needs your reply.”
+The annotator classifies each pane from a combination of:
 
-- **Codex waiting/error gating kept.**
-  - We only treat WAITING/ERROR prompts as actionable if they appear after the last user message and not inside assistant output (same gating as CAO).
+- Captured terminal output.
+- `pane_current_command`.
+- `pane_start_command`.
+- Dead-pane state.
+- Provider-specific prompt, processing, waiting, and error patterns.
 
-## When to revisit
-If Codex/Claude CLI output changes (prompt symbols, spinner glyphs, approval prompt wording), re-open the CAO files above and re-copy the latest patterns and ordering.
+Provider-specific output classification must run before generic running-command
+heuristics. This matters for Node-installed CLIs where `pane_current_command` is
+often `node`, while `pane_start_command` identifies Codex or Claude.
+
+## UI meaning
+
+- READY means the pane appears available or is waiting for user action.
+- RUN means the pane shows an explicit running/processing signal.
+- ERR means the pane shows an actionable error signal.
+
+These states are heuristic because Codex, Claude, Gemini, and generic shells do
+not expose a structured status channel through tmux.
+
+## Operational rules
+
+- Title rewriting is off by default; native CLI window-title updates should be
+  allowed unless the user opts into managed status titles.
+- Memory markers must be preserved when status prefixes are added or removed.
+- Stale window state must be pruned during annotation passes.
+- Invalid user-supplied patterns, templates, or intervals must fail cleanly and
+  must not crash a long-running annotator daemon.

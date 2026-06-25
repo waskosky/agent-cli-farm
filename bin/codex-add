@@ -11,6 +11,24 @@ esac
 # Portable uppercasing for older macOS bash (no ${var^^})
 TOOL_PREFIX=$(printf '%s' "$tool_name" | tr '[:lower:]' '[:upper:]')
 
+usage() {
+  cat <<EOF
+Usage: $script_name [options] [farm|dir] [dir] [-- tool-arg ...]
+
+Start a provider CLI in a tmux farm window.
+
+Options:
+  -d, --detach              Start without attaching
+  -s, --session SESSION     Target farm session
+  --install-autoservice     Install autosave/autorestore units only
+  -h, --help                Show this help
+
+One non-path positional value is treated as a farm name. Use --session to avoid
+ambiguity. Arguments after -- are passed to the provider as data. ${TOOL_PREFIX}_ARGS
+and CODEX_ARGS remain trusted shell fragments for compatibility.
+EOF
+}
+
 get_env() {
   # Prefer tool-specific env var, then CODEX_*, then default.
   local key="${TOOL_PREFIX}_$1"
@@ -57,17 +75,23 @@ default_manifest_path_for_session() {
 
 register_managed_session() {
   mkdir -p "$(dirname "$ANNOTATOR_SESSION_REGISTRY")"
-  touch "$ANNOTATOR_SESSION_REGISTRY"
+  if [ ! -f "$ANNOTATOR_SESSION_REGISTRY" ]; then
+    ( umask 077; : > "$ANNOTATOR_SESSION_REGISTRY" )
+  fi
+  chmod 600 "$ANNOTATOR_SESSION_REGISTRY" 2>/dev/null || true
   if ! grep -Fxq -- "$SESSION" "$ANNOTATOR_SESSION_REGISTRY"; then
     printf '%s\n' "$SESSION" >> "$ANNOTATOR_SESSION_REGISTRY"
   fi
 }
 
 register_autoservice_farm() {
-  local manifest tmp
+  local manifest tmp registry_dir
   manifest="$(default_manifest_path_for_session "$SESSION")"
   mkdir -p "$CONFIG_DIR" "$(dirname "$manifest")"
-  tmp="$(mktemp)"
+  registry_dir="$(dirname "$AUTOSERVICE_REGISTRY")"
+  mkdir -p "$registry_dir"
+  tmp="$(mktemp "$registry_dir/.farms.tsv.XXXXXX")"
+  chmod 600 "$tmp" 2>/dev/null || true
   printf 'session\tmanifest\n' > "$tmp"
   if [ -f "$AUTOSERVICE_REGISTRY" ]; then
     awk -F '\t' -v session="$SESSION" \
@@ -76,6 +100,32 @@ register_autoservice_farm() {
   fi
   printf '%s\t%s\n' "$SESSION" "$manifest" >> "$tmp"
   mv "$tmp" "$AUTOSERVICE_REGISTRY"
+  chmod 600 "$AUTOSERVICE_REGISTRY" 2>/dev/null || true
+}
+
+valid_session_name() {
+  local value="$1"
+  [ -n "$value" ] || return 1
+  case "$value" in
+    *:*|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
+  esac
+  return 0
+}
+
+valid_window_name() {
+  local value="$1"
+  [ -n "$value" ] || return 1
+  case "$value" in
+    *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
+  esac
+  return 0
+}
+
+false_value() {
+  case "${1:-}" in
+    0|false|FALSE|False|off|OFF|Off|no|NO|No) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 detach=0
@@ -99,6 +149,10 @@ while (( "$#" )); do
       ;;
     --install-autoservice)
       install_autoservice_only=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
       ;;
     -dsp)
       if [ "$tool_name" = "claude" ]; then
@@ -179,13 +233,27 @@ ANNOTATOR_SESSION_REGISTRY="$STATE_DIR/managed_sessions"
 SAVE_BIN="${CODEX_SAVE_BIN:-$(dirname "$0")/codex-save}"
 RESTORE_BIN="${CODEX_RESTORE_BIN:-$(dirname "$0")/codex-restore}"
 
-# Check dependencies
-for c in tmux "$CMD"; do
-    command -v "$c" >/dev/null || {
-        echo "$c not found" >&2
-        exit 127
-    }
-done
+if ! valid_session_name "$SESSION"; then
+  echo "Invalid session name: $SESSION" >&2
+  exit 2
+fi
+if ! valid_window_name "$NAME"; then
+  echo "Invalid window name: $NAME" >&2
+  exit 2
+fi
+if [ "$install_autoservice_only" -eq 0 ] && [ ! -d "$DIR" ]; then
+  echo "Project directory not found: $DIR" >&2
+  exit 2
+fi
+
+if [ "$install_autoservice_only" -eq 0 ]; then
+  for c in tmux "$CMD"; do
+      command -v "$c" >/dev/null || {
+          echo "$c not found" >&2
+          exit 127
+      }
+  done
+fi
 
 # Fix tmux socket directory permissions if needed
 # tmux requires its socket directory to be owned by current user with mode 700
@@ -224,8 +292,10 @@ fix_tmux_socket_dir() {
     return 0
 }
 
-# Attempt to fix tmux socket permissions before any tmux commands
-fix_tmux_socket_dir || exit 1
+if [ "$install_autoservice_only" -eq 0 ]; then
+  # Attempt to fix tmux socket permissions before any tmux commands.
+  fix_tmux_socket_dir || exit 1
+fi
 
 # Offer tmux directions for beginners (interactive only and when attaching)
 show_tmux_tips() {
@@ -391,7 +461,7 @@ if [ -t 0 ] && [ -z "${TMUX:-}" ] && [ "$detach" -eq 0 ]; then
 fi
 
 start_status_annotator() {
-  [ "$ANNOTATOR_AUTOSTART" -eq 0 ] && return
+  false_value "$ANNOTATOR_AUTOSTART" && return
   if [ -x "$ANNOTATOR_BIN" ]; then
     # Runs detached; helper enforces a single instance via its lockfile.
     ( "$ANNOTATOR_BIN" >/dev/null 2>&1 || true ) &
@@ -425,12 +495,15 @@ register_managed_session
 start_status_annotator
 
 # Create new window and start Codex
-CMDLINE="$CMD"
+printf -v CMDLINE '%q' "$CMD"
 if [ -n "$ARGS_ENV" ]; then
   CMDLINE="$CMDLINE $ARGS_ENV"
 fi
 if [ ${#tool_args[@]} -gt 0 ]; then
-  CMDLINE="$CMDLINE ${tool_args[*]}"
+  for tool_arg in "${tool_args[@]}"; do
+    printf -v quoted_arg '%q' "$tool_arg"
+    CMDLINE="$CMDLINE $quoted_arg"
+  done
 fi
 WINDOW_CMDLINE="$CMDLINE"
 if remain_on_exit_enabled; then
@@ -454,8 +527,9 @@ fi
 
 # Setup logging
 STAMP=$(date +%Y%m%d-%H%M%S)
-LOGFILE="$LOGDIR/${NAME}_${STAMP}.log"
-if ! pipe_error=$(tmux pipe-pane -o -t "$SESSION:$WIN" "cat >> \"$LOGFILE\"" 2>&1); then
+LOGFILE="$LOGDIR/$(safe_name "$NAME")_${STAMP}.log"
+printf -v quoted_logfile '%q' "$LOGFILE"
+if ! pipe_error=$(tmux pipe-pane -o -t "$SESSION:$WIN" "cat >> $quoted_logfile" 2>&1); then
   if [ -n "$pipe_error" ]; then
     echo "warning: unable to attach log pipe; pane may have exited already: $pipe_error" >&2
   else

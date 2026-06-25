@@ -73,6 +73,16 @@ case "$ACTIVITY_LINES" in
     ''|*[!0-9]*|0) ACTIVITY_LINES=8 ;;
 esac
 
+case "$ACTION" in
+    help|logs) ;;
+    *)
+        if ! command -v tmux >/dev/null; then
+            echo "tmux not found" >&2
+            exit 127
+        fi
+        ;;
+esac
+
 stat_epoch() {
     local path="$1"
     if stat -c '%Y' "$path" >/dev/null 2>&1; then

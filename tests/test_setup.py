@@ -30,7 +30,17 @@ class SetupScriptTests(unittest.TestCase):
         self.env["SHELL"] = "/bin/bash"
 
         Path(self.env["HOME"]).mkdir(parents=True, exist_ok=True)
-        for command in ["basename", "cat", "chmod", "cp", "dirname", "grep", "mkdir", "rm"]:
+        for command in [
+            "basename",
+            "cat",
+            "chmod",
+            "cp",
+            "dirname",
+            "grep",
+            "mkdir",
+            "python3",
+            "rm",
+        ]:
             system_path = shutil.which(command)
             if not system_path:
                 raise RuntimeError(f"Missing required test command: {command}")
@@ -137,6 +147,44 @@ exit 98
             result.stdout,
         )
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-watch").exists())
+
+    def test_can_be_sourced_without_leaking_strict_shell_options(self) -> None:
+        make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(self.bin_dir / "multitail", "#!/usr/bin/env bash\nexit 0\n")
+        outside = self.tmpdir / "outside"
+        outside.mkdir()
+
+        script = f"""
+set +e
+set +u
+set +o pipefail
+cd "{outside}"
+. "{REPO_ROOT / "setup.sh"}"
+case "$-" in *e*) echo "errexit leaked"; exit 41;; esac
+case "$-" in *u*) echo "nounset leaked"; exit 42;; esac
+if set -o | grep -q '^pipefail[[:space:]]*on'; then
+  echo "pipefail leaked"
+  exit 43
+fi
+case ":$PATH:" in
+  *:"$HOME/bin":*) ;;
+  *) echo "home bin missing from PATH"; exit 44;;
+esac
+if declare -F codexfarm_setup_main >/dev/null; then
+  echo "setup helper leaked"
+  exit 45
+fi
+"""
+
+        result = subprocess.run(
+            ["/bin/bash", "-c", script],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

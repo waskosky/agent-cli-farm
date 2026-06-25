@@ -14,6 +14,7 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$STATE_BASENAME"
 LOGDIR="$STATE_DIR/logs"
 mode="${CODEX_WATCH_MODE:-auto}"
 show_help=0
+positionals=()
 
 while (( "$#" )); do
   case "${1:-}" in
@@ -27,37 +28,65 @@ while (( "$#" )); do
       shift 2
       ;;
     -m|--mode)
-      shift
-      mode="${1:-auto}"
-      shift || true
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for $1" >&2
+        exit 2
+      fi
+      mode="$2"
+      shift 2
       ;;
     -h|--help)
       show_help=1
       shift
       ;;
-    --) shift; break ;;
+    --)
+      shift
+      while (( "$#" )); do
+        positionals+=("$1")
+        shift
+      done
+      break
+      ;;
     -*) echo "Unknown option: $1" >&2; exit 2 ;;
-    *) break ;;
+    *)
+      positionals+=("$1")
+      shift
+      ;;
   esac
 done
 
-mkdir -p "$LOGDIR"
+case "$mode" in
+  auto|multitail|tail) ;;
+  *)
+    echo "Invalid mode: $mode" >&2
+    exit 2
+    ;;
+esac
 
-# Find all log files
-shopt -s nullglob
-files=( "$LOGDIR"/*.log )
+if [ ${#positionals[@]} -gt 0 ]; then
+  echo "Unexpected argument: ${positionals[0]}" >&2
+  exit 2
+fi
 
 if [ "$show_help" -eq 1 ]; then
       cat <<EOF
 Usage: $(basename "$0") [--session SESSION] [--simple] [--mode auto|multitail|tail]
 
-Watches ${#files[@]} log file(s) in $LOGDIR
+Watches log files in $LOGDIR
 - auto (default): multitail when terminal is big enough, else tail
 - tail: simpler output, best for small/phone screens
 - multitail: force multitail (may error on very small screens)
+
+Log files are discovered once at startup. Restart to see new files.
 EOF
       exit 0
 fi
+
+mkdir -p "$LOGDIR"
+
+# Find all log files once at startup.
+shopt -s nullglob
+files=( "$LOGDIR"/*.log )
 
 if [ ${#files[@]} -eq 0 ]; then
     echo "No logs yet in $LOGDIR"
@@ -139,10 +168,9 @@ pick_tail() {
   # Prefer less if available for scrollback; fall back to plain tail
   if command -v less >/dev/null; then
     echo "Using tail | less -SR +F (compact)" >&2
-    trap 'kill 0' INT TERM EXIT
-    tail -n 200 -F -q "${files[@]}" | less -SR +F
+    tail -n 200 -F "${files[@]}" | less -SR +F
   else
-    exec tail -n 200 -F -q "${files[@]}"
+    exec tail -n 200 -F "${files[@]}"
   fi
 }
 
@@ -158,7 +186,7 @@ case "$mode" in
       multitail -n 200 "${files[@]}" || { echo "multitail exited; falling back to tail" >&2; pick_tail; }
     fi
     ;;
-  auto|*)
+  auto)
     if command -v multitail >/dev/null && [ "$small_term" -eq 0 ]; then
       multitail -n 200 "${files[@]}" || { echo "multitail exited; falling back to tail" >&2; pick_tail; }
     else
