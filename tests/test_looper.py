@@ -72,6 +72,19 @@ class LooperCoreTests(unittest.TestCase):
         self.assertTrue(callable(codex_looper.load_config))
         self.assertTrue(callable(codex_looper.run_command_main))
 
+    def test_looper_package_exports_remaining_runtime_modules(self) -> None:
+        import codex_looper.agents as agents
+        import codex_looper.cli as cli
+        import codex_looper.farm as farm
+        import codex_looper.init as init
+        import codex_looper.runner as runner
+
+        self.assertTrue(callable(agents.build_command))
+        self.assertTrue(callable(runner.run_loop))
+        self.assertTrue(callable(init.write_starter_files))
+        self.assertTrue(callable(farm.maybe_launch_farm))
+        self.assertTrue(callable(cli.run_command_main))
+
     def test_single_mode_keeps_prompt_file_as_one_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "PROMPT.md"

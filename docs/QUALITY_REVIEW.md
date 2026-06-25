@@ -19,6 +19,13 @@ developer update.
 - Looper process output keeps the current chunked reader, oversized JSON Lines
   handling, reader-failure handling, and split-pane transcript routing.
 
+## Completed Architectural Follow-Ups
+
+- The looper implementation is split into focused package modules for command
+  construction, CLI parsing, farm launch, first-run initialization, run-loop
+  orchestration, config, prompts, retries, git safety, process execution, and
+  tmux integration. The executable remains a compatibility facade.
+
 ## Documentation Parity
 
 Public docs and help text should describe:
@@ -34,7 +41,6 @@ Public docs and help text should describe:
 
 ## Remaining Priorities
 
-- Split the large Python looper into focused modules.
 - Reduce duplicated Bash command surfaces.
 - Design a versioned structured manifest format.
 - Add tmux integration coverage across Linux and macOS.

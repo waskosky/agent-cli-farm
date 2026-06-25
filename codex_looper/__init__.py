@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
-from functools import lru_cache
-from pathlib import Path
-from types import ModuleType
-
+from .agents import agent_extra_args, build_command, render_template
+from .cli import run_command_main
 from .config import (
     default_agents,
+    load_config,
     merge_raw_config,
     parse_basic_toml,
     read_config_raw,
     repo_root,
     resolve_preset_path,
 )
+from .farm import clean_farm_args, maybe_launch_farm
 from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
+from .init import write_starter_files
 from .models import (
     CURRENT_LOG_POINTER_FILENAME,
     DEFAULT_COMPLETION_MARKER,
@@ -43,7 +42,7 @@ from .models import (
     RunOptions,
     TmuxLayout,
 )
-from .process import run_command
+from .process import _close_subprocess_transport, _safe_stream_write, _terminate_process_group
 from .prompts import load_prompts, load_prompts_for_mode, resolve_prompt_defaults
 from .retry import (
     format_byte_count,
@@ -58,6 +57,18 @@ from .retry import (
     transient_retry_limit_message,
     transient_retry_limit_reached,
 )
+from .runner import (
+    apply_run_options,
+    compile_completion_marker,
+    compile_stop_patterns,
+    make_label,
+    make_run_dir,
+    markdown_plan_has_unchecked_tasks,
+    plan_file_all_tasks_checked,
+    run_command,
+    run_loop,
+    run_loop_sync,
+)
 from .tmux import (
     current_log_pointer_path,
     display_tmux_message,
@@ -66,28 +77,6 @@ from .tmux import (
     tmux_log_tail_command,
     update_current_log_pointer,
 )
-
-
-@lru_cache(maxsize=1)
-def _cli_module() -> ModuleType:
-    repo_root = Path(__file__).resolve().parent.parent
-    looper_path = repo_root / "bin" / "codex-looper.py"
-    spec = importlib.util.spec_from_file_location("_codex_looper_cli", looper_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load looper CLI module from {looper_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def load_config(*args: object, **kwargs: object) -> object:
-    return _cli_module().load_config(*args, **kwargs)
-
-
-def run_command_main(*args: object, **kwargs: object) -> int:
-    return _cli_module().run_command_main(*args, **kwargs)
-
 
 __all__ = [
     "CURRENT_LOG_POINTER_FILENAME",
@@ -108,10 +97,6 @@ __all__ = [
     "CommandContext",
     "CommandTemplateError",
     "ConfigError",
-    "create_backup_branch",
-    "current_log_pointer_path",
-    "default_agents",
-    "display_tmux_message",
     "LoadedConfig",
     "LooperConfig",
     "LooperMode",
@@ -120,27 +105,48 @@ __all__ = [
     "PromptError",
     "RunOptions",
     "TmuxLayout",
-    "load_config",
-    "load_prompts",
-    "load_prompts_for_mode",
-    "merge_raw_config",
-    "parse_basic_toml",
+    "_close_subprocess_transport",
+    "_safe_stream_write",
+    "_terminate_process_group",
+    "agent_extra_args",
+    "apply_run_options",
+    "build_command",
+    "clean_farm_args",
+    "compile_completion_marker",
+    "compile_stop_patterns",
+    "create_backup_branch",
+    "current_log_pointer_path",
+    "default_agents",
+    "display_tmux_message",
     "format_byte_count",
     "format_duration",
     "format_loop_metrics",
     "git_workspace_fingerprint",
     "is_retryable_stop_reason",
+    "load_config",
+    "load_prompts",
+    "load_prompts_for_mode",
+    "make_label",
+    "make_run_dir",
+    "markdown_plan_has_unchecked_tasks",
+    "maybe_launch_farm",
+    "merge_raw_config",
+    "parse_basic_toml",
     "parse_output_line",
+    "plan_file_all_tasks_checked",
     "prune_backup_branches",
     "read_config_raw",
+    "render_template",
+    "repo_root",
+    "resolve_prompt_defaults",
+    "resolve_preset_path",
     "retry_delay_seconds",
     "retry_notification_message",
     "retry_status_message",
-    "resolve_prompt_defaults",
-    "resolve_preset_path",
-    "repo_root",
     "run_command",
     "run_command_main",
+    "run_loop",
+    "run_loop_sync",
     "set_tmux_window_option",
     "should_notify_retry_wait",
     "start_tmux_log_pane",
@@ -148,4 +154,5 @@ __all__ = [
     "transient_retry_limit_message",
     "transient_retry_limit_reached",
     "update_current_log_pointer",
+    "write_starter_files",
 ]

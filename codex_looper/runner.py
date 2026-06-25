@@ -1,0 +1,477 @@
+from __future__ import annotations
+
+import asyncio
+import re
+import secrets
+import shlex
+import sys
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .agents import build_command
+from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
+from .models import (
+    TMUX_STATE_OPTION,
+    TMUX_STOP_REASON_OPTION,
+    AgentConfig,
+    CommandContext,
+    ConfigError,
+    LooperConfig,
+    ProcessResult,
+    RunOptions,
+)
+from .process import (
+    _close_subprocess_transport,
+    _terminate_process_group,
+)
+from .process import (
+    run_command as _run_command_impl,
+)
+from .prompts import load_prompts_for_mode, resolve_prompt_defaults
+from .retry import (
+    format_byte_count,
+    format_duration,
+    format_loop_metrics,
+    is_retryable_stop_reason,
+    retry_delay_seconds,
+    retry_notification_message,
+    retry_status_message,
+    should_notify_retry_wait,
+    transient_retry_limit_message,
+    transient_retry_limit_reached,
+)
+from .tmux import (
+    display_tmux_message,
+    set_tmux_window_option,
+    start_tmux_log_pane,
+    update_current_log_pointer,
+)
+
+RunCommandFn = Callable[..., Awaitable[ProcessResult]]
+SetTmuxWindowOptionFn = Callable[[str, str], None]
+DisplayTmuxMessageFn = Callable[[str], None]
+StartTmuxLogPaneFn = Callable[[Path, RunOptions], bool]
+UpdateCurrentLogPointerFn = Callable[..., None]
+SleepFn = Callable[[float], Awaitable[None]]
+
+
+def utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def compile_stop_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
+    compiled: list[re.Pattern[str]] = []
+    for pattern in patterns:
+        try:
+            compiled.append(re.compile(pattern, re.IGNORECASE))
+        except re.error as exc:
+            raise ConfigError(f"invalid stop pattern {pattern!r}: {exc}") from exc
+    return compiled
+
+
+def compile_completion_marker(looper: LooperConfig) -> re.Pattern[str] | None:
+    if not looper.completion_enabled:
+        return None
+    try:
+        return re.compile(looper.completion_marker)
+    except re.error as exc:
+        raise ConfigError(f"invalid completion marker {looper.completion_marker!r}: {exc}") from exc
+
+
+UNCHECKED_MARKDOWN_TASK_PATTERN = re.compile(r"^\s*[-*]\s+\[\s\]", re.MULTILINE)
+
+
+def markdown_plan_has_unchecked_tasks(text: str) -> bool:
+    return bool(UNCHECKED_MARKDOWN_TASK_PATTERN.search(text))
+
+
+def plan_file_all_tasks_checked(path: Path) -> bool:
+    if not path.exists():
+        raise ConfigError(f"plan file not found: {path}")
+    return not markdown_plan_has_unchecked_tasks(path.read_text(encoding="utf-8"))
+
+
+async def run_command(
+    *,
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    timeout_seconds: float,
+    log_path: Path,
+    agent_kind: str,
+    patterns: list[re.Pattern[str]],
+    scan_stdout: bool,
+    kill_on_stop_pattern: bool,
+    completion_pattern: re.Pattern[str] | None = None,
+    stream_output: bool = True,
+) -> ProcessResult:
+    return await _run_command_impl(
+        command=command,
+        cwd=cwd,
+        env=env,
+        timeout_seconds=timeout_seconds,
+        log_path=log_path,
+        agent_kind=agent_kind,
+        patterns=patterns,
+        scan_stdout=scan_stdout,
+        kill_on_stop_pattern=kill_on_stop_pattern,
+        completion_pattern=completion_pattern,
+        stream_output=stream_output,
+        terminate_process_group=_terminate_process_group,
+        close_subprocess_transport=_close_subprocess_transport,
+        utc_stamp_fn=utc_stamp,
+    )
+
+
+def make_label(label: str | None, agent_name: str) -> str:
+    if label:
+        return label
+    return f"Looper_{secrets.token_hex(3)}"
+
+
+def make_run_dir(log_dir: Path, label: str) -> Path:
+    safe_label = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in label).strip("-")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    return log_dir / f"{stamp}__{safe_label or 'agent'}__{secrets.token_hex(3)}"
+
+
+def apply_run_options(config: LooperConfig, options: RunOptions) -> LooperConfig:
+    updates: dict[str, Any] = {}
+    if options.mode is not None:
+        updates["mode"] = options.mode
+        updates["mode_explicit"] = True
+    if options.prompt_file is not None:
+        updates["prompt_file"] = options.prompt_file
+        updates["prompt_file_explicit"] = True
+    if options.timeout_seconds is not None:
+        updates["timeout_seconds"] = options.timeout_seconds
+    if options.sleep_seconds is not None:
+        updates["sleep_seconds"] = options.sleep_seconds
+    if options.max_loops is not None:
+        updates["max_loops"] = options.max_loops
+    if options.max_transient_retries is not None:
+        updates["max_transient_retries"] = options.max_transient_retries
+    if options.retry_notify_after_seconds is not None:
+        updates["retry_notify_after_seconds"] = options.retry_notify_after_seconds
+    if options.completion_marker is not None:
+        updates["completion_enabled"] = True
+        updates["completion_marker"] = options.completion_marker
+    if options.completion_streak is not None:
+        updates["completion_streak"] = options.completion_streak
+    if options.plan_file is not None:
+        updates["plan_file"] = options.plan_file
+    if options.backup_enabled:
+        updates["backup_enabled"] = True
+    if options.backup_prefix is not None:
+        updates["backup_prefix"] = options.backup_prefix
+    if options.backup_keep is not None:
+        updates["backup_keep"] = options.backup_keep
+    if options.cb_no_progress is not None:
+        updates["cb_no_progress"] = options.cb_no_progress
+    if options.cb_output_decline is not None:
+        updates["cb_output_decline"] = options.cb_output_decline
+    if options.once:
+        updates["max_loops"] = 1
+    if options.fresh_session_per_loop is not None:
+        updates["fresh_session_per_loop"] = options.fresh_session_per_loop
+    if options.ignore_nonzero is not None:
+        updates["ignore_nonzero"] = options.ignore_nonzero
+    return replace(config, **updates)
+
+
+async def run_loop(
+    *,
+    agent: AgentConfig,
+    looper: LooperConfig,
+    options: RunOptions,
+    run_command_fn: RunCommandFn = run_command,
+    set_tmux_window_option_fn: SetTmuxWindowOptionFn = set_tmux_window_option,
+    display_tmux_message_fn: DisplayTmuxMessageFn = display_tmux_message,
+    start_tmux_log_pane_fn: StartTmuxLogPaneFn = start_tmux_log_pane,
+    update_current_log_pointer_fn: UpdateCurrentLogPointerFn = update_current_log_pointer,
+    sleep_fn: SleepFn = asyncio.sleep,
+) -> int:
+    looper = resolve_prompt_defaults(looper, cwd=Path.cwd())
+    label = make_label(options.label, options.agent_name)
+    run_dir = make_run_dir(looper.log_dir, label)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    prompts = load_prompts_for_mode(looper.prompt_file, looper.separator, looper.mode)
+    patterns = compile_stop_patterns(looper.stop_patterns)
+    completion_pattern = compile_completion_marker(looper)
+
+    if options.cwd is not None:
+        agent = replace(agent, cwd=options.cwd)
+
+    if not agent.cwd.exists():
+        print(f"agent cwd does not exist: {agent.cwd}", file=sys.stderr)
+        return 2
+
+    if options.agent_args:
+        agent = replace(agent, extra_args=[*agent.extra_args, *options.agent_args])
+
+    tail_pane_active = start_tmux_log_pane_fn(run_dir, options)
+    set_tmux_window_option_fn(TMUX_STATE_OPTION, "RUN")
+    set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, "")
+
+    print(f"agent: {agent.name} ({agent.kind})")
+    print(f"label: {label}")
+    print(f"mode: {looper.mode}")
+    print(f"prompts: {len(prompts)} from {looper.prompt_file}")
+    print(f"logs: {run_dir}")
+    print(
+        "session mode: "
+        + (
+            "fresh session per loop"
+            if looper.fresh_session_per_loop
+            else "one session reused across loops"
+        )
+    )
+
+    loop_number = 0
+    completion_streak_count = 0
+    no_progress_count = 0
+    output_decline_count = 0
+    previous_loop_output_bytes: int | None = None
+    persistent_session_name = label
+    persistent_session_id = ""
+    fingerprint_ignored_paths = [run_dir.resolve()]
+
+    while True:
+        loop_number += 1
+        loop_started_at = time.monotonic()
+        loop_output_bytes = 0
+        loop_completion_detected = False
+        progress_before = None
+        session_name = (
+            f"{label}-loop-{loop_number:04d}"
+            if looper.fresh_session_per_loop
+            else persistent_session_name
+        )
+        session_id = "" if looper.fresh_session_per_loop else persistent_session_id
+        first_prompt_in_session = looper.fresh_session_per_loop or loop_number == 1
+
+        print(f"\n===== loop {loop_number} / session {session_name} =====")
+
+        if looper.cb_no_progress:
+            progress_before = git_workspace_fingerprint(
+                agent.cwd, ignored_paths=fingerprint_ignored_paths
+            )
+            if progress_before is None:
+                raise ConfigError("cb_no_progress requires an agent cwd inside a git work tree")
+
+        if looper.backup_enabled and not options.dry_run:
+            backup_branch = create_backup_branch(
+                agent.cwd,
+                prefix=looper.backup_prefix,
+                loop_number=loop_number,
+            )
+            print(f"backup branch: {backup_branch}")
+            for pruned_branch in prune_backup_branches(
+                agent.cwd,
+                prefix=looper.backup_prefix,
+                keep=looper.backup_keep,
+            ):
+                print(f"pruned backup branch: {pruned_branch}")
+
+        for prompt_index, prompt in enumerate(prompts, start=1):
+            attempt_first_prompt_in_session = first_prompt_in_session
+            first_prompt_in_session = False
+            retry_count = 0
+            log_path = run_dir / f"loop-{loop_number:04d}__prompt-{prompt_index:03d}.log"
+            if tail_pane_active:
+                update_current_log_pointer_fn(run_dir=run_dir, log_path=log_path)
+
+            while True:
+                context = CommandContext(
+                    prompt=prompt,
+                    session=session_name,
+                    session_id=session_id,
+                    loop=loop_number,
+                    prompt_index=prompt_index,
+                    label=label,
+                    run_dir=run_dir,
+                )
+                command = build_command(
+                    agent=agent,
+                    context=context,
+                    is_first_prompt_in_session=attempt_first_prompt_in_session,
+                )
+
+                print(f"\n--- prompt {prompt_index}/{len(prompts)} ---")
+                if retry_count:
+                    print(f"retry attempt: {retry_count}")
+                print(f"$ {shlex.join(command)}")
+
+                if options.dry_run:
+                    break
+
+                result = await run_command_fn(
+                    command=command,
+                    cwd=agent.cwd,
+                    env=agent.env,
+                    timeout_seconds=looper.timeout_seconds,
+                    log_path=log_path,
+                    agent_kind=agent.kind,
+                    patterns=patterns,
+                    scan_stdout=(
+                        looper.scan_stdout_for_stop_patterns or agent.scan_stdout_for_stop_patterns
+                    ),
+                    kill_on_stop_pattern=looper.kill_on_stop_pattern,
+                    completion_pattern=completion_pattern,
+                    stream_output=not tail_pane_active,
+                )
+
+                if result.completion_detected:
+                    loop_completion_detected = True
+                loop_output_bytes += result.output_bytes
+
+                if result.session_id:
+                    session_id = result.session_id
+                    if not looper.fresh_session_per_loop:
+                        persistent_session_id = session_id
+
+                if result.stop_reason:
+                    if is_retryable_stop_reason(result.stop_reason):
+                        retry_count += 1
+                        if transient_retry_limit_reached(
+                            result=result,
+                            retry_count=retry_count,
+                            looper=looper,
+                        ):
+                            limit_reason = transient_retry_limit_message(
+                                result=result,
+                                max_retries=looper.max_transient_retries,
+                            )
+                            print(f"\nSTOP: {limit_reason}")
+                            print(f"last log: {log_path}")
+                            set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
+                            set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, limit_reason[:250])
+                            return 0
+                        if result.session_id or agent.kind == "claude":
+                            attempt_first_prompt_in_session = False
+                        delay_seconds = retry_delay_seconds(result, looper)
+                        retry_status = retry_status_message(
+                            result=result,
+                            attempt=retry_count,
+                            delay_seconds=delay_seconds,
+                        )
+                        set_tmux_window_option_fn(TMUX_STATE_OPTION, "RUN")
+                        set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, retry_status[:250])
+                        if should_notify_retry_wait(delay_seconds=delay_seconds, looper=looper):
+                            display_tmux_message_fn(retry_notification_message(retry_status))
+                        print(f"\nRETRY: {result.stop_reason}")
+                        print(f"last log: {log_path}")
+                        print(f"sleeping {format_duration(delay_seconds)} before retry")
+                        await sleep_fn(delay_seconds)
+                        continue
+
+                    print(f"\nSTOP: {result.stop_reason}")
+                    print(f"last log: {log_path}")
+                    set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
+                    set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, result.stop_reason[:250])
+                    return 0
+
+                if result.returncode not in (0, None) and not looper.ignore_nonzero:
+                    print(f"\nSTOP: command exited with code {result.returncode}")
+                    print(f"last log: {log_path}")
+                    set_tmux_window_option_fn(TMUX_STATE_OPTION, "ERR")
+                    set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, f"exit {result.returncode}")
+                    return int(result.returncode or 1)
+
+                set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, "")
+                break
+
+        print(f"\ncompleted loop {loop_number}")
+        loop_duration_seconds = time.monotonic() - loop_started_at
+        print(
+            format_loop_metrics(
+                loop_number=loop_number,
+                duration_seconds=loop_duration_seconds,
+                output_bytes=loop_output_bytes,
+            )
+        )
+
+        if looper.completion_enabled:
+            if loop_completion_detected:
+                if looper.plan_file and not plan_file_all_tasks_checked(looper.plan_file):
+                    completion_streak_count = 0
+                    print(
+                        "completion marker detected, but plan file still has unchecked tasks: "
+                        f"{looper.plan_file}"
+                    )
+                else:
+                    completion_streak_count += 1
+                    print(
+                        "completion marker detected "
+                        f"({completion_streak_count}/{looper.completion_streak})"
+                    )
+                    if completion_streak_count >= looper.completion_streak:
+                        print("completion streak reached; stopping")
+                        set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
+                        set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, "completion marker")
+                        return 0
+            else:
+                if completion_streak_count:
+                    print("completion marker missing; resetting completion streak")
+                completion_streak_count = 0
+
+        if looper.cb_no_progress:
+            progress_after = git_workspace_fingerprint(
+                agent.cwd, ignored_paths=fingerprint_ignored_paths
+            )
+            if progress_after is None:
+                raise ConfigError("cb_no_progress requires an agent cwd inside a git work tree")
+            if progress_after == progress_before:
+                no_progress_count += 1
+                print(f"no git progress detected ({no_progress_count}/{looper.cb_no_progress})")
+                if no_progress_count >= looper.cb_no_progress:
+                    reason = f"no git progress for {no_progress_count} loop(s)"
+                    print(f"STOP: {reason}")
+                    set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
+                    set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, reason[:250])
+                    return 0
+            else:
+                no_progress_count = 0
+
+        if looper.cb_output_decline:
+            if (
+                previous_loop_output_bytes is not None
+                and loop_output_bytes < previous_loop_output_bytes
+            ):
+                output_decline_count += 1
+                print(
+                    "output declined "
+                    f"({output_decline_count}/{looper.cb_output_decline}): "
+                    f"{format_byte_count(previous_loop_output_bytes)} -> "
+                    f"{format_byte_count(loop_output_bytes)}"
+                )
+                if output_decline_count >= looper.cb_output_decline:
+                    reason = f"output declined for {output_decline_count} consecutive loop(s)"
+                    print(f"STOP: {reason}")
+                    set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
+                    set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, reason[:250])
+                    return 0
+            else:
+                output_decline_count = 0
+            previous_loop_output_bytes = loop_output_bytes
+
+        if options.dry_run:
+            print("dry run complete")
+            set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
+            return 0
+
+        if looper.max_loops and loop_number >= looper.max_loops:
+            print(f"max loops reached: {looper.max_loops}")
+            set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
+            return 0
+
+        await sleep_fn(looper.sleep_seconds)
+
+
+def run_loop_sync(*, agent: AgentConfig, looper: LooperConfig, options: RunOptions) -> int:
+    return asyncio.run(run_loop(agent=agent, looper=looper, options=options))
