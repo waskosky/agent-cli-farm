@@ -6,6 +6,15 @@ from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 
+from .config import (
+    default_agents,
+    merge_raw_config,
+    parse_basic_toml,
+    read_config_raw,
+    repo_root,
+    resolve_preset_path,
+)
+from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
 from .models import (
     CURRENT_LOG_POINTER_FILENAME,
     DEFAULT_COMPLETION_MARKER,
@@ -34,9 +43,8 @@ from .models import (
     RunOptions,
     TmuxLayout,
 )
-from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
-from .prompts import load_prompts, load_prompts_for_mode, resolve_prompt_defaults
 from .process import run_command
+from .prompts import load_prompts, load_prompts_for_mode, resolve_prompt_defaults
 from .retry import (
     format_byte_count,
     format_duration,
@@ -102,6 +110,7 @@ __all__ = [
     "ConfigError",
     "create_backup_branch",
     "current_log_pointer_path",
+    "default_agents",
     "display_tmux_message",
     "LoadedConfig",
     "LooperConfig",
@@ -114,6 +123,8 @@ __all__ = [
     "load_config",
     "load_prompts",
     "load_prompts_for_mode",
+    "merge_raw_config",
+    "parse_basic_toml",
     "format_byte_count",
     "format_duration",
     "format_loop_metrics",
@@ -121,10 +132,13 @@ __all__ = [
     "is_retryable_stop_reason",
     "parse_output_line",
     "prune_backup_branches",
+    "read_config_raw",
     "retry_delay_seconds",
     "retry_notification_message",
     "retry_status_message",
     "resolve_prompt_defaults",
+    "resolve_preset_path",
+    "repo_root",
     "run_command",
     "run_command_main",
     "set_tmux_window_option",

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
-from .models import ConfigError, ProcessResult, STREAM_READ_CHUNK_BYTES
+from .models import STREAM_READ_CHUNK_BYTES, ConfigError, ProcessResult
 from .retry import parse_output_line
 
 TerminateProcessGroup = Callable[[asyncio.subprocess.Process], Awaitable[None]]
