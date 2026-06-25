@@ -12,19 +12,48 @@ codexfarm_setup_main() (
     command -v "$1" >/dev/null 2>&1
   }
 
-  require_python() {
-    if ! have_command python3; then
-      echo "python3 not found; Python 3.10 or newer is required." >&2
-      exit 127
-    fi
-    if ! python3 - <<'PY'
+  have_executable() {
+    case "$1" in
+      */*) [ -x "$1" ] ;;
+      *) have_command "$1" ;;
+    esac
+  }
+
+  python_is_supported() {
+    "$1" - <<'PY'
 import sys
 raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
 PY
-    then
-      echo "Python 3.10 or newer is required." >&2
+  }
+
+  find_python() {
+    local candidate
+    for candidate in \
+      "${CODEXFARM_PYTHON_BIN:-}" \
+      python3 \
+      python3.14 \
+      python3.13 \
+      python3.12 \
+      python3.11 \
+      python3.10
+    do
+      [ -n "$candidate" ] || continue
+      have_executable "$candidate" || continue
+      if python_is_supported "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+    return 1
+  }
+
+  require_python() {
+    local python_bin
+    if ! python_bin="$(find_python)"; then
+      echo "Python 3.10 or newer is required; install python3.10+ or set CODEXFARM_PYTHON_BIN." >&2
       exit 1
     fi
+    echo "Using Python interpreter: $python_bin"
   }
 
   install_dependencies() {
@@ -172,6 +201,12 @@ EOF
     chmod +x "$HOME/bin/$base"
     copied+=("$base")
   done
+
+  if [ -d "$script_dir/codex_looper" ]; then
+    mkdir -p "$HOME/bin/codex_looper"
+    cp -f "$script_dir"/codex_looper/*.py "$HOME/bin/codex_looper/"
+    copied+=("codex_looper/")
+  fi
 
   if [ "${#missing[@]}" -gt 0 ]; then
     for wrapper in "${missing[@]}"; do

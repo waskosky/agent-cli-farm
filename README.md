@@ -256,7 +256,9 @@ Common:
 - **`CODEX_STATUS_ACTIVITY_LINES`** - recent pane lines shown by `codex-status activity` (default `8`)
 - **`CODEX_AUTOSERVICE_CHOICE`** - `yes` or `no` to persist autoservice choice
 - **`CODEX_ANNOTATOR_AUTOSTART`** - set to `0` to skip starting the annotator
-- **`CODEX_LOOPER_PYTHON_BIN`** - Python 3.10+ interpreter for `codex-looper` (default `python3`)
+- **`CODEX_LOOPER_PYTHON_BIN`** - Python 3.10+ interpreter for `codex-looper` (default searches `python3`, then versioned `python3.14` through `python3.10`)
+- **`CODEX_ANNOTATOR_PYTHON_BIN`** - Python 3.10+ interpreter for `codex-annotator` (default searches `python3`, then versioned `python3.14` through `python3.10`)
+- **`CODEXFARM_PYTHON_BIN`** - Python 3.10+ interpreter to prefer during `./setup.sh`
 - **`CODEX_LOOPER_LAYOUT`** - looper tmux layout: `auto`, `single`, or `split`; farm launches default to `split`
 
 Annotator-specific:

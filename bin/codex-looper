@@ -1,7 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PYTHON_BIN="${CODEX_LOOPER_PYTHON_BIN:-python3}"
+have_executable() {
+  case "$1" in
+    */*) [ -x "$1" ] ;;
+    *) command -v "$1" >/dev/null 2>&1 ;;
+  esac
+}
+
+python_is_supported() {
+  "$1" - <<'PY'
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+PY
+}
+
+find_python_bin() {
+  local candidate
+  for candidate in \
+    "${CODEX_LOOPER_PYTHON_BIN:-}" \
+    python3 \
+    python3.14 \
+    python3.13 \
+    python3.12 \
+    python3.11 \
+    python3.10
+  do
+    [ -n "$candidate" ] || continue
+    have_executable "$candidate" || continue
+    if python_is_supported "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "Python 3.10 or newer is required; install python3.10+ or set CODEX_LOOPER_PYTHON_BIN." >&2
+  return 1
+}
+
+PYTHON_BIN="$(find_python_bin)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CODEX_LOOPER_DISPLAY_NAME="${CODEX_LOOPER_DISPLAY_NAME:-$(basename "$0")}" \

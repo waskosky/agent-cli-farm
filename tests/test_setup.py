@@ -2,6 +2,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,23 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 def make_executable(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def make_fake_python(path: Path, major: int, minor: int) -> None:
+    exit_code = 0 if (major, minor) >= (3, 10) else 1
+    make_executable(
+        path,
+        f"""#!/bin/bash
+if [ -n "${{FAKE_PYTHON_LOG:-}}" ]; then
+  echo "${{0##*/}} $*" >> "$FAKE_PYTHON_LOG"
+fi
+if [ "${{1:-}}" = "--version" ]; then
+  echo "Python {major}.{minor}.0"
+  exit 0
+fi
+exit {exit_code}
+""",
+    )
 
 
 class SetupScriptTests(unittest.TestCase):
@@ -37,13 +55,13 @@ class SetupScriptTests(unittest.TestCase):
             "dirname",
             "grep",
             "mkdir",
-            "python3",
             "rm",
         ]:
             system_path = shutil.which(command)
             if not system_path:
                 raise RuntimeError(f"Missing required test command: {command}")
             (self.bin_dir / command).symlink_to(system_path)
+        make_fake_python(self.bin_dir / "python3", 3, 12)
 
     def run_setup(self) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -144,6 +162,61 @@ exit 98
             result.stdout,
         )
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-watch").exists())
+
+    def test_uses_versioned_python_when_python3_is_too_old(self) -> None:
+        make_fake_python(self.bin_dir / "python3", 3, 9)
+        make_fake_python(self.bin_dir / "python3.12", 3, 12)
+        make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(self.bin_dir / "multitail", "#!/usr/bin/env bash\nexit 0\n")
+
+        result = self.run_setup()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Using Python interpreter: python3.12", result.stdout)
+
+    def test_installed_python_wrappers_fall_back_to_versioned_python(self) -> None:
+        make_fake_python(self.bin_dir / "python3", 3, 9)
+        make_fake_python(self.bin_dir / "python3.12", 3, 12)
+        make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(self.bin_dir / "multitail", "#!/usr/bin/env bash\nexit 0\n")
+
+        result = self.run_setup()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.tmpdir / "python-wrapper.log"
+        self.env["FAKE_PYTHON_LOG"] = str(log)
+        wrapper = Path(self.env["HOME"]) / "bin" / "codex-looper"
+        wrapper_result = subprocess.run(
+            ["/bin/bash", str(wrapper), "--help"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(wrapper_result.returncode, 0, wrapper_result.stderr)
+        self.assertTrue(log.exists())
+        log_lines = log.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(log_lines[-1].startswith("python3.12 "))
+
+    def test_installed_codex_looper_imports_packaged_modules(self) -> None:
+        (self.bin_dir / "python3").unlink()
+        (self.bin_dir / "python3").symlink_to(sys.executable)
+        make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(self.bin_dir / "multitail", "#!/usr/bin/env bash\nexit 0\n")
+
+        result = self.run_setup()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        wrapper = Path(self.env["HOME"]) / "bin" / "codex-looper"
+        wrapper_result = subprocess.run(
+            ["/bin/bash", str(wrapper), "--help"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(wrapper_result.returncode, 0, wrapper_result.stderr)
+        self.assertIn("Tiny coding-agent looper", wrapper_result.stdout)
 
     def test_can_be_sourced_without_leaking_strict_shell_options(self) -> None:
         make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")

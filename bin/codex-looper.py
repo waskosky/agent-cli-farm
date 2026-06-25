@@ -11,9 +11,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT_FOR_IMPORTS = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT_FOR_IMPORTS) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT_FOR_IMPORTS))
+SCRIPT_DIR_FOR_IMPORTS = Path(__file__).resolve().parent
+for import_root in (SCRIPT_DIR_FOR_IMPORTS.parent, SCRIPT_DIR_FOR_IMPORTS):
+    if (import_root / "codex_looper").is_dir():
+        sys.path.insert(0, str(import_root))
+        break
 
 from codex_looper import cli as _cli
 from codex_looper import farm as _farm
