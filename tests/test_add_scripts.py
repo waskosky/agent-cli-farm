@@ -77,6 +77,8 @@ esac
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("Usage:", result.stdout)
+        normalized_stdout = " ".join(result.stdout.split())
+        self.assertIn("CODEX_ARGS, CLAUDE_ARGS, and GEMINI_ARGS", normalized_stdout)
         self.assertNotIn("not found", result.stderr)
 
     def test_claude_add_passthrough_and_shorthand(self):

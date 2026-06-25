@@ -24,8 +24,8 @@ Options:
   -h, --help                Show this help
 
 One non-path positional value is treated as a farm name. Use --session to avoid
-ambiguity. Arguments after -- are passed to the provider as data. ${TOOL_PREFIX}_ARGS
-and CODEX_ARGS remain trusted shell fragments for compatibility.
+ambiguity. Arguments after -- are passed to the provider as data. CODEX_ARGS,
+CLAUDE_ARGS, and GEMINI_ARGS remain trusted shell fragments for compatibility.
 EOF
 }
 

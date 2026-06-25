@@ -1,8 +1,8 @@
 # Agent Looper Reference
 
-`codex-looper`, `claude-looper`, and `gemini-looper` run repeated file-backed prompts against local agent CLIs. The default model is one prompt file looped forever with a fresh agent session each loop. Sequence mode, completion detection, task-plan gates, git backups, circuit breakers, and presets are available when a project needs them.
+`codex-looper`, `claude-looper`, and `gemini-looper` run repeated file-backed prompts against local agent CLIs. By default, they loop one prompt file forever with a fresh agent session each loop. Sequence mode, completion detection, task-plan gates, git backups, circuit breakers, and presets are available when a project needs them.
 
-Runtime requirement: Python 3.10 or newer. On Python 3.11+, the standard library TOML parser is used; on Python 3.10, the looper uses its built-in parser for the supported `agent-looper.toml` schema documented below.
+Runtime requirement: Python 3.10 or newer. On Python 3.11+, the standard library TOML parser is used. On Python 3.10, the looper uses its built-in parser for the supported `agent-looper.toml` schema documented below; do not rely on full TOML features outside simple tables, strings, booleans, finite numbers, and string arrays.
 
 ## First Run
 
@@ -23,6 +23,14 @@ codex-looper init --interactive --force
 ```
 
 Interactive setup writes `PROMPT.md` in `single` mode when you enter one prompt. If you enter multiple prompts, it writes `prompts.md` and sets `mode = "sequence"`.
+
+Prompt defaults are resolved exactly this way:
+
+1. An explicit `--mode` wins.
+2. Otherwise `[looper].mode` wins.
+3. Otherwise a custom `--prompt-file` uses `single` mode.
+4. Otherwise the legacy default file `prompts.md` implies `sequence`.
+5. Otherwise `PROMPT.md` with `single` mode is used.
 
 ## Prompt Modes
 
@@ -68,47 +76,51 @@ codex-looper --local --once --label local-preview
 codex-looper --dry-run --once --label preview
 ```
 
-Use `--once` or `--max-loops N` for bounded runs. Without either, the looper repeats until a stop condition occurs. Non-dry-run commands launch through the default farm unless `--local` is set.
+Use `--once` or `--max-loops N` for bounded runs. Without either, the looper repeats until a stop condition occurs. The `run` subcommand is optional: in an initialized directory, `codex-looper` and `codex-looper run` are equivalent. Non-dry-run commands launch through the default farm unless `--local` is set.
 
 `--timeout` is a per-prompt wall-clock limit for the local agent process. The default is 7200 seconds. Short values such as `90` seconds can stop a long Claude/Codex tool call even when the provider is still working; raise it on the command line or in `[looper].timeout_seconds` for heavier prompts.
 
 ## CLI Options
 
-| Option | Default | Purpose |
-| --- | --- | --- |
-| `--agent NAME` | `[looper].default_agent` or wrapper default | Selects an agent config from `agent-looper.toml`. |
-| `--config PATH` | `agent-looper.toml` | Project config file path. Missing config is allowed. |
-| `--preset NAME_OR_PATH` | unset | Layer a preset TOML file over project config. Named presets resolve from `~/.config/codexfarm/presets/` and repo `examples/presets/`. |
-| `--mode single\|sequence` | `single`, with legacy inference | Select prompt loading mode. |
-| `--prompt-file PATH` | `PROMPT.md` in single mode, `prompts.md` in sequence mode | Prompt file. |
-| `--label LABEL` | `Looper_<short-id>` | Human-readable run/session/log label. It does not rename tmux windows. |
-| `--timeout SECONDS` | `7200` | Per-prompt subprocess timeout. |
-| `--sleep SECONDS` | `2` | Sleep between completed loops. |
-| `--max-loops N` | `0` | Maximum loops; `0` means unlimited. |
-| `--max-transient-retries N` | `12` | Cap non-rate-limit transient retries; `0` means unlimited. |
-| `--retry-notify-after SECONDS` | `300` | Show a tmux notification for retry waits at or above this threshold; `0` disables. |
-| `--complete-on REGEX` | unset | Enable completion detection and stop after completed loops whose output matches the regex. |
-| `--completion-streak N` | `1` | Require N consecutive completed loops with the completion marker before stopping. |
-| `--plan-file PATH` | unset | Markdown checklist gate; completion requires no unchecked `- [ ]` tasks. |
-| `--backup` | off | Create a git backup branch before each non-dry-run loop. |
-| `--backup-prefix PREFIX` | `looper-backup` | Branch prefix for backup branches. |
-| `--backup-keep N` | `10` | Prune older backup branches, keeping the newest N. `0` disables pruning. |
-| `--cb-no-progress N` | `0` | Stop after N completed loops with no git HEAD or worktree-status change. |
-| `--cb-output-decline N` | `0` | Stop after N consecutive completed loops whose captured output byte count is lower than the prior loop. |
-| `--once` | off | Equivalent to `--max-loops 1`. |
-| `--fresh-session-per-loop` | on | Start a new agent session for each completed loop. |
-| `--reuse-session` | off | Reuse one agent session across all loops. |
-| `--cwd PATH` | current directory | Working directory for agent commands. |
-| `--dry-run` | off | Print commands without running agents or creating backup branches. |
-| `--ignore-nonzero` | off | Continue after nonzero agent exits. |
-| `--stop-on-nonzero` | on | Stop after nonzero agent exits. |
-| `--hold-on-stop` | off | Wait for Enter before closing after stop. |
-| `--tmux-layout auto\|single\|split` | `CODEX_LOOPER_LAYOUT` or `auto`; farm launch sets `split` | Split creates a second tmux pane that tails the active prompt log while the main pane keeps supervisor status. |
-| `--local` | off | Run in the current terminal instead of launching through the default farm. |
-| `--farm-session [NAME]` | default farm | Select the farm tmux session for `codex-add`. Omitting NAME uses the default farm session. |
-| `--farm-attach` | off | Attach after `--farm-session` launch. |
-| `--farm-add-bin PATH` | `codex-add` | Launcher compatible with `codex-add`. |
-| `-- AGENT_ARGS...` | unset | Pass native flags to built-in Codex/Claude command templates. |
+Values are resolved in this order: built-in defaults, project config, preset config, environment layout defaults where documented, and finally CLI flags. Agent-native argv after `--` is appended to built-in Codex/Claude command templates for that invocation.
+
+Numeric constraints are strict. Integer counters must be whole numbers and finite; values documented as nonnegative accept `0`; values documented as positive must be greater than `0`. Float seconds must be finite and nonnegative unless the row says positive.
+
+| Option | Default | Constraint | Purpose |
+| --- | --- | --- | --- |
+| `--agent NAME` | `[looper].default_agent` or wrapper default | nonempty string | Selects an agent config from `agent-looper.toml`. |
+| `--config PATH` | `agent-looper.toml` | path string | Project config file path. Missing config is allowed. |
+| `--preset NAME_OR_PATH` | unset | name or path string | Layer a preset TOML file over project config. Named presets resolve from `${XDG_CONFIG_HOME:-~/.config}/codexfarm/presets/` and repo `examples/presets/`. |
+| `--mode single\|sequence` | `single`, with legacy inference | enum | Select prompt loading mode. |
+| `--prompt-file PATH` | see prompt precedence below | path string | Prompt file. |
+| `--label LABEL` | `Looper_<short-id>` | string | Human-readable run/session/log label. It does not rename tmux windows. |
+| `--timeout SECONDS` | `7200` | positive finite float | Per-prompt subprocess timeout. |
+| `--sleep SECONDS` | `2` | nonnegative finite float | Sleep between completed loops. |
+| `--max-loops N` | `0` | nonnegative integer | Maximum loops; `0` means unlimited. |
+| `--max-transient-retries N` | `12` | nonnegative integer | Cap non-rate-limit transient retries; `0` means unlimited. |
+| `--retry-notify-after SECONDS` | `300` | nonnegative finite float | Show a tmux notification for retry waits at or above this threshold; `0` disables. |
+| `--complete-on REGEX` | unset | valid regex string | Enable completion detection and stop after completed loops whose output matches the regex. |
+| `--completion-streak N` | `1` | positive integer | Require N consecutive completed loops with the completion marker before stopping. |
+| `--plan-file PATH` | unset | path string | Markdown checklist gate; completion requires no unchecked `- [ ]` tasks. |
+| `--backup` | off | boolean flag | Create a git backup branch before each non-dry-run loop. |
+| `--backup-prefix PREFIX` | `looper-backup` | nonempty string | Branch prefix for backup branches. |
+| `--backup-keep N` | `10` | nonnegative integer | Prune older backup branches, keeping the newest N. `0` disables pruning. |
+| `--cb-no-progress N` | `0` | nonnegative integer | Stop after N completed loops with no git workspace fingerprint change. |
+| `--cb-output-decline N` | `0` | nonnegative integer | Stop after N consecutive completed loops whose captured output byte count is lower than the prior loop. |
+| `--once` | off | boolean flag | Equivalent to `--max-loops 1`. |
+| `--fresh-session-per-loop` | on | boolean flag | Start a new agent session for each completed loop. |
+| `--reuse-session` | off | boolean flag | Reuse one agent session across all loops. |
+| `--cwd PATH` | current directory | process cwd path | Working directory for agent commands. |
+| `--dry-run` | off | boolean flag | Print commands without running agents or creating backup branches. |
+| `--ignore-nonzero` | off | boolean flag | Continue after nonzero agent exits. |
+| `--stop-on-nonzero` | on | boolean flag | Stop after nonzero agent exits. |
+| `--hold-on-stop` | off | boolean flag | Wait for Enter before closing after a stop. |
+| `--tmux-layout auto\|single\|split` | `CODEX_LOOPER_LAYOUT` or `auto`; farm launch sets `split` | enum | Split creates a second tmux pane that tails the active prompt log while the main pane keeps supervisor status. |
+| `--local` | off | boolean flag | Run in the current terminal instead of launching through the default farm. |
+| `--farm-session [NAME]` | default farm | optional session string | Select the farm tmux session for `codex-add`. Omitting NAME uses the default farm session. |
+| `--farm-attach` | off | boolean flag | Attach after `--farm-session` launch. |
+| `--farm-add-bin PATH` | `codex-add` | executable name or path | Launcher compatible with `codex-add`. |
+| `-- AGENT_ARGS...` | unset | argv tokens | Pass native flags to built-in Codex/Claude command templates. |
 
 Use `--` for one-off agent-native flags. For Claude, the correct spelling is `--dangerously-skip-permissions`; local Claude help recommends it only for isolated sandboxes. To make it permanent for a project, put the same values in `[agents.claude].extra_args`.
 
@@ -164,6 +176,20 @@ effort = "max"
 
 Custom `first_command` and `resume_command` templates fully control their argv, so include model or effort flags directly in those templates when using a custom command.
 
+Strict TOML typing is part of the contract:
+
+| Config key family | Required type |
+| --- | --- |
+| `looper.default_agent`, `mode`, `prompt_file`, `log_dir`, `completion_marker`, `plan_file`, `backup_prefix` | string |
+| `looper.timeout_seconds`, `sleep_seconds`, `retry_notify_after_seconds` | finite integer or float |
+| `looper.max_loops`, `max_transient_retries`, `completion_streak`, `backup_keep`, `cb_no_progress`, `cb_output_decline` | integer |
+| `looper.fresh_session_per_loop`, `completion_enabled`, `backup_enabled` | boolean |
+| `agents.<name>.kind`, `model`, `effort` | string |
+| `agents.<name>.extra_args`, `first_command`, `resume_command`, `stop_patterns` | array of strings |
+| `agents.<name>.scan_stdout_for_stop_patterns` | boolean |
+
+Wrong scalar types, non-finite numbers, invalid regexes, and empty values for documented nonempty fields fail during configuration instead of being coerced silently.
+
 Custom agents can use command templates:
 
 ```toml
@@ -202,9 +228,15 @@ looper-backup/20260622T120000Z-loop-0001
 
 Use `--backup-prefix` to name a separate backup family, and `--backup-keep` to prune older branches. `--backup-keep 0` disables pruning.
 
-`--cb-no-progress N` stops after N completed loops where git `HEAD` and worktree status are unchanged. The looper ignores its own run log directory when computing this fingerprint.
+Backup branches point to the current committed `HEAD`; they do not snapshot uncommitted or untracked worktree contents. Commit or stash important dirty work before relying on backup branches.
+
+Pruning is scoped to the exact configured namespace. For example, a prefix of `looper-backup` may prune `looper-backup/...` branches but not `looper-backup-old/...`.
+
+`--cb-no-progress N` stops after N completed loops where the git workspace fingerprint is unchanged. The fingerprint includes committed `HEAD`, porcelain status entries, tracked index metadata, and file contents for dirty and untracked paths. The looper ignores its own run log directory when computing this fingerprint.
 
 `--cb-output-decline N` stops after N consecutive completed loops where captured stdout/stderr bytes decline versus the prior completed loop. This is a lightweight signal for loops that are producing less useful work over time. It is off by default.
+
+Output-decline is byte-count based. It does not judge semantic quality, and it can be fooled by verbose low-value output or concise high-value output.
 
 Every completed loop prints a compact metrics line:
 
@@ -222,7 +254,7 @@ codex-looper --preset ./my-loop.toml
 
 Named presets resolve from:
 
-1. `~/.config/codexfarm/presets/<name>.toml`
+1. `${XDG_CONFIG_HOME:-~/.config}/codexfarm/presets/<name>.toml`
 2. `examples/presets/<name>.toml` in this repo
 
 The repo includes `examples/presets/rai.toml`:
@@ -250,14 +282,14 @@ The looper stops when it sees:
 - configured output-decline circuit breaker
 - configured max loop count
 
-Logs are written under `.agent-looper/runs/<timestamp>__<label>/`.
+Logs are written under `.agent-looper/runs/<timestamp>__<label>__<random>/`. Run directory names use UTC time with subsecond precision plus a random suffix to avoid collisions. The `.agent-looper/current-log` pointer is updated atomically so the split tmux tail pane either sees the previous complete pointer or the next complete pointer.
 
 ## Farm Integration
 
 Normal non-dry-run looper commands call `codex-add` so existing farm behavior still owns session creation, board linking, pipe-pane logging, and annotator startup. Use `--local` to run in the current terminal. Use `--farm-session NAME` for a separate farm.
 Farm windows enable tmux `remain-on-exit` by default, so a stopped looper leaves its final pane visible for inspection instead of closing the window. Set `CODEX_REMAIN_ON_EXIT=0` when launching if you want the old close-on-exit behavior.
 Looper labels are kept for logs and agent session names only. They do not rename tmux windows; farm window names come from `CODEX_NAME` when set, otherwise the working directory basename.
-Farm-launched loopers default to `CODEX_LOOPER_LAYOUT=split`: the main pane shows the looper supervisor and a second detached pane tails the current `.agent-looper/runs/.../loop-*.log` file. In split mode, the live agent transcript is shown in the tail pane rather than duplicated in the supervisor pane. Use `--tmux-layout single` or `CODEX_LOOPER_LAYOUT=single` to keep the older one-pane view.
+Farm-launched loopers default to `CODEX_LOOPER_LAYOUT=split`: the main pane shows the looper supervisor and a second detached pane tails the current `.agent-looper/runs/.../loop-*.log` file. In split mode, the live agent transcript is shown in the tail pane rather than duplicated in the supervisor pane. Use `--tmux-layout single` or `CODEX_LOOPER_LAYOUT=single` to keep the older one-pane view. If tmux split-pane creation fails, the looper keeps running and falls back to supervisor-pane streaming so the transcript is still visible.
 
 Example:
 
@@ -277,5 +309,8 @@ codex-status activity
 
 - It is a loop runner, not a scheduler, daemon, queue, or web UI.
 - It does not bypass authentication, permissions, sandboxing, or provider limits unless you explicitly pass agent-native flags that do so.
+- Provider status and stop detection are heuristic because Codex/Claude/Gemini CLIs do not expose a shared structured status protocol.
 - The Gemini backend is intentionally generic until a stable noninteractive resume interface is confirmed.
+- There is no per-worktree run lock. Starting multiple write-enabled loopers against the same checkout can race or overwrite work.
+- Backup branches protect committed `HEAD`, not dirty worktree state.
 - Use write-enabled agent flags only in repositories, worktrees, containers, or runners where automated edits are acceptable.

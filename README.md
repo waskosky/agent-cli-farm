@@ -12,8 +12,20 @@ A tmux session manager for running and restoring multiple Codex CLI instances, w
 - **Status updates**: Tracks RUN/READY/ERR in tmux metadata and notifies when a window becomes READY
 - **Memory warnings**: Flag tmux windows whose pane process trees exceed a chosen RSS threshold
 - **Autosave/autorestore (optional)**: Systemd user services to persist sessions across logins
-- **Prompt loopers**: Run repeated single prompts or prompt sequences with timeout handling, reset-aware rate-limit retries, completion markers, plan-file gates, git backups, no-progress/output-decline circuit breakers, presets, model/effort config sugar, loop metrics, long-wait notifications, and transient retry caps
+- **Prompt loopers**: Run one prompt or a prompt sequence repeatedly with retries, completion gates, git safety checks, logs, presets, and tmux visibility. See [Agent Looper Reference](docs/looper.md) for every parameter and default.
 - **Tool wrappers**: `claude-*` and `gemini-*` commands use the same tmux workflow
+
+## Requirements
+
+- Bash 3.2+ and Python 3.10+.
+- `tmux` for farm sessions, boards, status inspection, save/restore, and farm-launched loopers.
+- The selected provider executable on `PATH` (`codex`, `claude`, `gemini`, or a custom command).
+- Optional `multitail` for the richer `codex-watch` view. Without it, watch falls back to `tail`.
+- Optional `lsof` so save/restore can find exact live provider session files.
+- Git only for looper backup branches and git-progress circuit breakers.
+- Systemd user services only for autosave/autorestore.
+
+`setup.sh` reports missing operating-system dependencies; it does not install packages. Source it when you want the current shell's `PATH` refreshed. The script keeps strict shell options inside helper scopes, so sourcing it should not leak options or functions into your shell.
 
 ## Quick Start
 
@@ -57,6 +69,11 @@ claude-add /path/to/project
 gemini-add /path/to/project
 ```
 
+Launch notes:
+- A single non-path positional value is treated as a farm name. Use `--session NAME` when that would be ambiguous.
+- Provider flags after `--` are passed as argv data, which is the preferred path for one-off native options: `codex-add -d /repo -- --model gpt-5.4`.
+- `CODEX_ARGS`, `CLAUDE_ARGS`, and `GEMINI_ARGS` remain trusted shell fragments for compatibility. Set them only from config you control.
+
 ### 3. Run Prompt Loopers
 
 Create starter files in the project where an agent should work, then follow the printed next steps:
@@ -97,6 +114,14 @@ codex-status activity
 
 See [Agent Looper Reference](docs/looper.md) for prompt format, CLI parameters, config defaults, stop conditions, farm integration, and current backend limits.
 
+Looper defaults and limits:
+- The `run` subcommand is optional. In an initialized directory, `codex-looper` means `codex-looper run`.
+- Prompt mode defaults to `single` with `PROMPT.md`. A custom `--prompt-file` also defaults to `single`; the legacy default file `prompts.md` implies `sequence`.
+- Config loading is strict: documented scalars must have the expected TOML type, numeric values must be finite, and invalid regexes fail before the loop starts.
+- Backup branches point to committed `HEAD` only; they are not dirty-worktree snapshots. Pruning stays inside the exact configured prefix namespace.
+- The no-progress circuit breaker fingerprints committed `HEAD`, status entries, tracked metadata, and file contents while ignoring the looper run directory.
+- Run directories include a high-resolution timestamp and random suffix; the current-log pointer is updated atomically. In split mode, if tmux cannot create the tail pane, live transcript streaming falls back to the supervisor pane.
+
 ### 4. Watch All Instances
 
 Monitor all Codex logs in real-time:
@@ -108,6 +133,9 @@ Notes:
 - On small terminals (phones), `codex-watch` auto-switches to a simpler mode.
 - Force simple mode: `codex-watch --simple` or `CODEX_WATCH_MODE=tail codex-watch`.
 - Force full mode: `codex-watch --mode multitail`.
+- Logs contain output emitted after `tmux pipe-pane` is enabled; old scrollback cannot be recovered into log files.
+- `codex-watch` discovers log files once at startup. Restart it to include newly-created logs.
+- Multi-file tail output keeps source labels so interleaved lines can still be traced to a window log.
 - First run shows an optional tmux tips prompt; choose Yes to see basics. Answer "Don't show again" to persist your preference. Re-enable temporarily with `CODEX_TIPS_PROMPT=1` or permanently by removing `~/.local/state/codexfarm/no_tips`.
 
 ### 5. Save/Restore or Resume
@@ -117,6 +145,8 @@ Snapshot your current Codex windows:
 codex-save              # writes to ~/.config/codexfarm/manifest.tsv
 CODEX_SESSION=work codex-save
 # writes to ~/.config/codexfarm/manifests/work.tsv
+codex-save --all-registered
+# writes one manifest per farm registered for autoservice
 ```
 
 Restore them later (e.g., after reboot or on SSH login):
@@ -126,6 +156,8 @@ codex-restore -a        # recreates and attaches to the session
 
 Use `-f` to force re-creation of existing-named windows.
 Saved Codex, Claude, and Gemini windows restore with exact session IDs when `codex-save` can read the live session file from the pane's process tree. If the exact session is unavailable, restore falls back by tool: `codex resume --last`, `claude --continue`, or `gemini --resume latest`.
+Only pane 0 is saved. Split layouts and scrollback are not reconstructed. Missing saved directories fall back to `$HOME` with a warning.
+Manifests are written owner-only and via atomic replacement, but they are still trusted executable input because restore launches the recorded commands.
 
 If tmux sessions are already running (no manifest needed):
 ```bash
@@ -163,11 +195,11 @@ Set `CODEX_AUTOSERVICE_CHOICE=yes` to auto-accept the prompt, or `no` to suppres
 
 By default, the annotator does not rewrite tmux window titles. That lets Codex's native title animation remain visible while still making `codex-status windows` show state. When a window transitions from RUN to READY, the annotator emits a tmux `display-message` notification.
 
-Important: the **READY status** is best-effort and based on prompt detection. Use it as a signal, not a guarantee. Codex's native title animation is usually the primary visual signal.
+Important: the **RUN/READY/ERR status** is best-effort and based on terminal-output and command heuristics. Node-backed tools are recognized from pane start commands as well as current commands. Use READY as a signal, not a guarantee. Codex's native title animation is usually the primary visual signal.
 
 ### Memory Flags
 
-Run `codex-memoryflag` to prefix high-memory tmux windows with a marker such as `*200+MB**`. It scans tmux sockets available to the current user, sums each window's pane process trees by RSS, and renames windows at or above the threshold. Existing memory markers are updated or cleared on each run.
+Run `codex-memoryflag` to prefix high-memory tmux windows with a marker such as `*200+MB**`. It scans tmux sockets available to the current user, sums each window's pane process trees by RSS, and renames windows at or above the threshold. Existing memory markers are updated or cleared on each run, so window renaming is an intentional side effect.
 
 ```bash
 codex-memoryflag        # flag windows at 200 MiB and up
@@ -197,7 +229,7 @@ Tuning and controls:
 - **`codex-annotator`** - Track RUN/READY/ERR state and notify when windows become READY
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
-- **`codex-looper [init|doctor|run]`** - Run repeated prompt sequences with logs and stop detection; see [looper reference](docs/looper.md)
+- **`codex-looper [init|doctor|run]`** - Run a single prompt or prompt sequence repeatedly with logs and stop detection; see [looper reference](docs/looper.md)
 - **`codex-status [--session SESSION] [sessions|windows|activity|logs]`** - Show status information
 - **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
 - **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
@@ -276,6 +308,7 @@ codex-board switch
 
 Now you can use `tmux switch-client -t board` to scan through all Codex instances while the main `codexfarm` session continues running.
 For named farms, `codex-resume work --board` jumps directly to `work-board`.
+Boards link existing tmux windows; they do not duplicate provider processes.
 
 ### Remote SSH Tips
 
@@ -330,10 +363,21 @@ Run the basic validation script (requires tmux):
 ./validate.sh
 ```
 
+For the static checks used in CI without creating live tmux sessions:
+
+```bash
+VALIDATE_SKIP_TMUX=1 ./validate.sh
+```
+
 ## File Structure
 
 ```
 codex-cli-farm/
+├── .editorconfig      # Shared editor whitespace defaults
+├── .github/workflows/ # CI for lint, shell checks, tests, validate, demo
+├── pyproject.toml     # Ruff and test tooling configuration
+├── requirements-dev.txt # Python development dependencies
+├── CONTRIBUTING.md    # Local development and verification workflow
 ├── setup.sh           # Main setup script
 ├── bin/               # Helper scripts
 │   ├── codex-add      # Add new Codex instances
@@ -346,27 +390,26 @@ codex-cli-farm/
 │   ├── codex-resume   # Resume into existing session(s)
 │   ├── codex-status   # Status information
 │   └── claude-* / gemini-*  # Tool wrappers for the same commands
+├── docs/
+│   ├── looper.md      # Detailed looper contract
+│   └── QUALITY_REVIEW.md # Hardening review notes from the update guide
 ├── examples/
 │   ├── demo.sh        # End-to-end demo of farm
 │   └── mock-codex     # Fake CLI used by the demo
+├── tests/             # Python unit tests for scripts and looper behavior
 ├── validate.sh        # Basic repo validation script
 └── README.md          # This file
 ```
 
-## Requirements
-
-- Linux or Unix-like system
-- Bash shell
-- `lsof` is optional but recommended so autosaved Codex, Claude, and Gemini windows can record exact resume commands
-- `tmux` installed on `PATH` for the core tmux workflow
-- `multitail` is optional; without it, `codex-watch` uses simple mode automatically.
-
 ## Limitations
 
 - `tmux` cannot mirror the same live pane in two windows (use linked windows or logs)
+- `tmux` survives client disconnects, but not host reboot or tmux-server exit unless autosave/autorestore recreates windows later.
+- Autosave/autorestore is systemd-user-only.
 - `pipe-pane` logs only new output after activation
 - Manifest `cmd/args` are best-effort when saving from existing panes. Exact session IDs are captured from live processes when `lsof` can see the open session file: Codex under `~/.codex/sessions`, Claude under `~/.claude/projects`, and Gemini under a `.gemini/.../chats` directory. Missing IDs fall back to each tool's latest/continue behavior.
 - A single positional argument to `codex-add` is interpreted as a farm name when it does not look like a path. Use `--session NAME` to force farm selection when needed.
+- Gemini looper support is generic command execution, not a verified resumable protocol.
 
 ## License
 
