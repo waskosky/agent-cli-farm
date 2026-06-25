@@ -22,12 +22,16 @@ python3 -m pip install --disable-pip-version-check -r requirements-dev.txt
 ruff format .
 ruff check .
 while IFS= read -r file; do bash -n "$file"; done < <(git grep -l '^#!/usr/bin/env bash')
-git grep -lZ '^#!/usr/bin/env bash' | xargs -0 shellcheck --severity=warning
+git grep -l -z '^#!/usr/bin/env bash' | xargs -0 shellcheck --severity=warning
 CODEX_ANNOTATOR_AUTOSTART=0 python3 -m unittest discover -s tests -v
 VALIDATE_SKIP_TMUX=1 ./validate.sh
 ./validate.sh
 ./examples/demo.sh
 ```
+
+If system Python blocks direct pip installs in an externally managed
+environment, create a virtualenv outside the repo and run the Ruff commands from
+that environment instead.
 
 Validation and demo scripts must isolate `HOME`, XDG config/state directories,
 and tmux sockets. They must not read, mutate, or destroy the developer's normal

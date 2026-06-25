@@ -131,7 +131,7 @@ check_static_behavior() {
     echo ""
     echo "Checking empty log handling..."
     logdir="$XDG_STATE_HOME/$state_basename/logs"
-    rm -rf "$XDG_STATE_HOME/$state_basename"
+    rm -rf "${XDG_STATE_HOME:?}/${state_basename:?}"
     CODEX_STATE_BASENAME="$state_basename" "$repo_root/bin/codex-watch" 2>&1 | grep -q "No logs yet"
     [ -d "$logdir" ]
     echo "[OK] codex-watch handles empty log directory"

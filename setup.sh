@@ -17,7 +17,7 @@ codexfarm_setup_main() (
       echo "python3 not found; Python 3.10 or newer is required." >&2
       exit 127
     fi
-    if ! python3 - "$@" <<'PY'
+    if ! python3 - <<'PY'
 import sys
 raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
 PY

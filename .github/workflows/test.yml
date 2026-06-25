@@ -49,7 +49,7 @@ jobs:
           done < <(git grep -l '^#!/usr/bin/env bash')
 
       - name: Run ShellCheck
-        run: git grep -lZ '^#!/usr/bin/env bash' | xargs -0 shellcheck --severity=warning
+        run: git grep -l -z '^#!/usr/bin/env bash' | xargs -0 shellcheck --severity=warning
 
       - name: Run unit tests
         run: CODEX_ANNOTATOR_AUTOSTART=0 python -m unittest discover -s tests -v
