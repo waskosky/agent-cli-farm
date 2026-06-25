@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -85,9 +84,7 @@ exit 98
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-add").exists())
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-looper").exists())
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-memoryflag").exists())
-        self.assertTrue(
-            (Path(self.env["HOME"]) / "bin" / "add_high_memory_warning.sh").exists()
-        )
+        self.assertTrue((Path(self.env["HOME"]) / "bin" / "add_high_memory_warning.sh").exists())
 
     def test_installs_claude_and_gemini_wrappers(self) -> None:
         make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")

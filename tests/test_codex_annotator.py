@@ -2,9 +2,9 @@ import argparse
 import importlib.machinery
 import importlib.util
 import os
+import re
 import subprocess
 import sys
-import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -74,9 +74,7 @@ class AnnotatorWindowTests(unittest.TestCase):
         ]
         self.assertEqual(rename_session_calls, [], "Sessions should not be renamed")
 
-        rename_window_calls = [
-            cmd for cmd in stub.commands if cmd[:2] == ["tmux", "rename-window"]
-        ]
+        rename_window_calls = [cmd for cmd in stub.commands if cmd[:2] == ["tmux", "rename-window"]]
         self.assertEqual(rename_window_calls, [], "Titles are not rewritten by default")
 
         status_updates = [
@@ -107,9 +105,7 @@ class AnnotatorWindowTests(unittest.TestCase):
             verbose=False,
         )
 
-        rename_window_calls = [
-            cmd for cmd in stub.commands if cmd[:2] == ["tmux", "rename-window"]
-        ]
+        rename_window_calls = [cmd for cmd in stub.commands if cmd[:2] == ["tmux", "rename-window"]]
         self.assertEqual(
             rename_window_calls,
             [
@@ -194,9 +190,7 @@ class AnnotatorWindowTests(unittest.TestCase):
                 verbose=False,
             )
 
-        rename_window_calls = [
-            cmd for cmd in stub.commands if cmd[:2] == ["tmux", "rename-window"]
-        ]
+        rename_window_calls = [cmd for cmd in stub.commands if cmd[:2] == ["tmux", "rename-window"]]
         self.assertEqual(
             rename_window_calls,
             [["tmux", "rename-window", "-t", "@10", "*READY* alpha"]],

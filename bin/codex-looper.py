@@ -320,9 +320,8 @@ def resolve_prompt_defaults(looper: LooperConfig, *, cwd: Path) -> LooperConfig:
     if not looper.mode_explicit:
         if prompt_file_explicit:
             mode = "sequence" if prompt_file == DEFAULT_SEQUENCE_PROMPT_FILE else "single"
-        elif (
-            not _path_exists_from(cwd, DEFAULT_SINGLE_PROMPT_FILE)
-            and _path_exists_from(cwd, DEFAULT_SEQUENCE_PROMPT_FILE)
+        elif not _path_exists_from(cwd, DEFAULT_SINGLE_PROMPT_FILE) and _path_exists_from(
+            cwd, DEFAULT_SEQUENCE_PROMPT_FILE
         ):
             mode = "sequence"
             prompt_file = DEFAULT_SEQUENCE_PROMPT_FILE
@@ -330,7 +329,9 @@ def resolve_prompt_defaults(looper: LooperConfig, *, cwd: Path) -> LooperConfig:
             mode = "single"
             prompt_file = DEFAULT_SINGLE_PROMPT_FILE
     elif not prompt_file_explicit:
-        prompt_file = DEFAULT_SEQUENCE_PROMPT_FILE if mode == "sequence" else DEFAULT_SINGLE_PROMPT_FILE
+        prompt_file = (
+            DEFAULT_SEQUENCE_PROMPT_FILE if mode == "sequence" else DEFAULT_SINGLE_PROMPT_FILE
+        )
 
     return replace(looper, mode=mode, prompt_file=prompt_file)
 
@@ -503,7 +504,7 @@ def git_workspace_fingerprint(cwd: Path, ignored_paths: list[Path] | None = None
             ignored_prefixes.append(normalized)
 
     digest = hashlib.sha256()
-    digest.update(f"HEAD {head}\0".encode("utf-8"))
+    digest.update(f"HEAD {head}\0".encode())
     records = status_result.stdout.split(b"\0")
     index = 0
     while index < len(records):
@@ -521,7 +522,10 @@ def git_workspace_fingerprint(cwd: Path, ignored_paths: list[Path] | None = None
                 index += 1
                 stable_entry = f"{entry}\0{old_path}"
         path = status_path
-        if any(status_path == prefix or status_path.startswith(f"{prefix}/") for prefix in ignored_prefixes):
+        if any(
+            status_path == prefix or status_path.startswith(f"{prefix}/")
+            for prefix in ignored_prefixes
+        ):
             continue
         digest.update(stable_entry.encode("utf-8", errors="surrogateescape"))
         digest.update(b"\0")
@@ -530,15 +534,15 @@ def git_workspace_fingerprint(cwd: Path, ignored_paths: list[Path] | None = None
         try:
             stat_result = full_path.lstat()
         except OSError as exc:
-            digest.update(f"missing:{type(exc).__name__}".encode("utf-8"))
+            digest.update(f"missing:{type(exc).__name__}".encode())
         else:
             if full_path.is_symlink():
                 try:
-                    digest.update(f"symlink:{os.readlink(full_path)}".encode("utf-8"))
+                    digest.update(f"symlink:{os.readlink(full_path)}".encode())
                 except OSError as exc:
-                    digest.update(f"symlink-error:{type(exc).__name__}".encode("utf-8"))
+                    digest.update(f"symlink-error:{type(exc).__name__}".encode())
             elif full_path.is_file():
-                digest.update(f"file:{stat_result.st_mode}:{stat_result.st_size}:".encode("utf-8"))
+                digest.update(f"file:{stat_result.st_mode}:{stat_result.st_size}:".encode())
                 try:
                     with full_path.open("rb") as fh:
                         while True:
@@ -547,9 +551,9 @@ def git_workspace_fingerprint(cwd: Path, ignored_paths: list[Path] | None = None
                                 break
                             digest.update(chunk)
                 except OSError as exc:
-                    digest.update(f"file-error:{type(exc).__name__}".encode("utf-8"))
+                    digest.update(f"file-error:{type(exc).__name__}".encode())
             else:
-                digest.update(f"other:{stat_result.st_mode}".encode("utf-8"))
+                digest.update(f"other:{stat_result.st_mode}".encode())
 
         try:
             index_entry = _run_git(cwd, "ls-files", "-s", "--", path).stdout
@@ -591,7 +595,7 @@ def classify_retry_kind(reason: str) -> str | None:
 def _coerce_float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         out = float(value)
         return out if math.isfinite(out) else None
     if isinstance(value, str):
@@ -668,7 +672,9 @@ def retry_status_message(*, result: ProcessResult, attempt: int, delay_seconds: 
 
 
 def should_notify_retry_wait(*, delay_seconds: float, looper: LooperConfig) -> bool:
-    return looper.retry_notify_after_seconds > 0 and delay_seconds >= looper.retry_notify_after_seconds
+    return (
+        looper.retry_notify_after_seconds > 0 and delay_seconds >= looper.retry_notify_after_seconds
+    )
 
 
 def retry_notification_message(retry_status: str) -> str:
@@ -680,7 +686,9 @@ def transient_retry_limit_message(*, result: ProcessResult, max_retries: int) ->
     return f"transient retry limit reached after {max_retries} attempts: {reason}"
 
 
-def transient_retry_limit_reached(*, result: ProcessResult, retry_count: int, looper: LooperConfig) -> bool:
+def transient_retry_limit_reached(
+    *, result: ProcessResult, retry_count: int, looper: LooperConfig
+) -> bool:
     if looper.max_transient_retries <= 0:
         return False
     retry_kind = result.retry_kind or classify_retry_kind(result.stop_reason or "")
@@ -1123,7 +1131,11 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
     print(f"logs: {run_dir}")
     print(
         "session mode: "
-        + ("fresh session per loop" if looper.fresh_session_per_loop else "one session reused across loops")
+        + (
+            "fresh session per loop"
+            if looper.fresh_session_per_loop
+            else "one session reused across loops"
+        )
     )
 
     loop_number = 0
@@ -1142,7 +1154,9 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
         loop_completion_detected = False
         progress_before = None
         session_name = (
-            f"{label}-loop-{loop_number:04d}" if looper.fresh_session_per_loop else persistent_session_name
+            f"{label}-loop-{loop_number:04d}"
+            if looper.fresh_session_per_loop
+            else persistent_session_name
         )
         session_id = "" if looper.fresh_session_per_loop else persistent_session_id
         first_prompt_in_session = looper.fresh_session_per_loop or loop_number == 1
@@ -1150,7 +1164,9 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
         print(f"\n===== loop {loop_number} / session {session_name} =====")
 
         if looper.cb_no_progress:
-            progress_before = git_workspace_fingerprint(agent.cwd, ignored_paths=fingerprint_ignored_paths)
+            progress_before = git_workspace_fingerprint(
+                agent.cwd, ignored_paths=fingerprint_ignored_paths
+            )
             if progress_before is None:
                 raise ConfigError("cb_no_progress requires an agent cwd inside a git work tree")
 
@@ -1311,7 +1327,9 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
                 completion_streak_count = 0
 
         if looper.cb_no_progress:
-            progress_after = git_workspace_fingerprint(agent.cwd, ignored_paths=fingerprint_ignored_paths)
+            progress_after = git_workspace_fingerprint(
+                agent.cwd, ignored_paths=fingerprint_ignored_paths
+            )
             if progress_after is None:
                 raise ConfigError("cb_no_progress requires an agent cwd inside a git work tree")
             if progress_after == progress_before:
@@ -1327,7 +1345,10 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
                 no_progress_count = 0
 
         if looper.cb_output_decline:
-            if previous_loop_output_bytes is not None and loop_output_bytes < previous_loop_output_bytes:
+            if (
+                previous_loop_output_bytes is not None
+                and loop_output_bytes < previous_loop_output_bytes
+            ):
                 output_decline_count += 1
                 print(
                     "output declined "
@@ -1593,7 +1614,7 @@ def _as_int(value: Any, key: str, default: int, *, minimum: int) -> int:
 def _as_float(value: Any, key: str, default: float, *, minimum: float, inclusive: bool) -> float:
     if value is None:
         value = default
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f"{key} must be a number")
     out = float(value)
     if not math.isfinite(out):
@@ -1746,7 +1767,9 @@ def load_config(path: Path, *, preset_paths: list[Path] | None = None) -> Loaded
         mode_explicit="mode" in raw_looper,
         prompt_file=_path(raw_looper.get("prompt_file"), default_looper.prompt_file),
         prompt_file_explicit="prompt_file" in raw_looper,
-        separator=_as_str(raw_looper.get("separator"), "looper.separator", default_looper.separator),
+        separator=_as_str(
+            raw_looper.get("separator"), "looper.separator", default_looper.separator
+        ),
         timeout_seconds=_as_float(
             raw_looper.get("timeout_seconds"),
             "looper.timeout_seconds",
@@ -1838,7 +1861,9 @@ def load_config(path: Path, *, preset_paths: list[Path] | None = None) -> Loaded
         if not isinstance(value, dict):
             raise ConfigError(f"[agents.{name}] must be a TOML table")
         base = agents.get(name)
-        kind = _as_str(value.get("kind"), f"agents.{name}.kind", base.kind if base else name, nonempty=True)
+        kind = _as_str(
+            value.get("kind"), f"agents.{name}.kind", base.kind if base else name, nonempty=True
+        )
         if kind not in {"claude", "codex", "generic"}:
             raise ConfigError(f"agents.{name}.kind must be claude, codex, or generic")
         agents[name] = AgentConfig(
@@ -1859,7 +1884,10 @@ def load_config(path: Path, *, preset_paths: list[Path] | None = None) -> Loaded
                 _as_str_list(value.get("resume_command"), f"agents.{name}.resume_command")
                 or (base.resume_command if base else None)
             ),
-            env={**(base.env if base else {}), **_as_str_dict(value.get("env"), f"agents.{name}.env")},
+            env={
+                **(base.env if base else {}),
+                **_as_str_dict(value.get("env"), f"agents.{name}.env"),
+            },
             scan_stdout_for_stop_patterns=_as_bool(
                 value.get("scan_stdout_for_stop_patterns"),
                 f"agents.{name}.scan_stdout_for_stop_patterns",
@@ -1982,7 +2010,9 @@ def write_starter_files(
     return written
 
 
-def guidance_lines(*, initialized: bool, prompt_path: Path = DEFAULT_SINGLE_PROMPT_FILE) -> list[str]:
+def guidance_lines(
+    *, initialized: bool, prompt_path: Path = DEFAULT_SINGLE_PROMPT_FILE
+) -> list[str]:
     heading = (
         "Initialized Agent Looper starter files."
         if initialized
@@ -2186,7 +2216,9 @@ def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | No
     env["CODEX_CMD"] = executable
     inner_args = clean_farm_args(original_argv)
     layout_arg_present = _argv_has_option(inner_args, "--tmux-layout")
-    propagated_layout = options.tmux_layout if options.tmux_layout != "auto" or layout_arg_present else "split"
+    propagated_layout = (
+        options.tmux_layout if options.tmux_layout != "auto" or layout_arg_present else "split"
+    )
     env["CODEX_LOOPER_LAYOUT"] = env.get("CODEX_LOOPER_LAYOUT") or propagated_layout
     if not layout_arg_present:
         inner_args.extend(["--tmux-layout", propagated_layout])
@@ -2221,7 +2253,9 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
     parser.add_argument("--preset", help="preset name or TOML path to layer over project config")
     parser.add_argument("--mode", choices=("single", "sequence"), help="prompt loading mode")
     parser.add_argument("-p", "--prompt-file", help="prompt file")
-    parser.add_argument("-l", "--label", help="human-readable run/session/log label; does not rename tmux windows")
+    parser.add_argument(
+        "-l", "--label", help="human-readable run/session/log label; does not rename tmux windows"
+    )
     parser.add_argument(
         "--tmux-layout",
         choices=("auto", "single", "split"),
@@ -2256,9 +2290,13 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
         "--plan-file",
         help="markdown checklist gate; completion requires no unchecked - [ ] tasks",
     )
-    parser.add_argument("--backup", dest="backup_enabled", action="store_true", help="create git backup branches")
+    parser.add_argument(
+        "--backup", dest="backup_enabled", action="store_true", help="create git backup branches"
+    )
     parser.add_argument("--backup-prefix", help="git branch prefix for backup branches")
-    parser.add_argument("--backup-keep", type=nonnegative_int, help="number of newest backup branches to keep")
+    parser.add_argument(
+        "--backup-keep", type=nonnegative_int, help="number of newest backup branches to keep"
+    )
     parser.add_argument(
         "--cb-no-progress",
         type=nonnegative_int,
@@ -2285,18 +2323,33 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
         help="reuse one agent session across all loops",
     )
     parser.add_argument("--cwd", help="working directory for the agent command")
-    parser.add_argument("--dry-run", action="store_true", help="print commands without running them")
-    parser.add_argument("--ignore-nonzero", action="store_true", default=None, help="do not stop on nonzero exit")
-    parser.add_argument("--stop-on-nonzero", dest="ignore_nonzero", action="store_false", help="stop on nonzero exit")
-    parser.add_argument("--hold-on-stop", action="store_true", help="wait for Enter before exiting after a stop")
-    parser.add_argument("--local", action="store_true", help="run in this terminal instead of the default farm")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="print commands without running them"
+    )
+    parser.add_argument(
+        "--ignore-nonzero", action="store_true", default=None, help="do not stop on nonzero exit"
+    )
+    parser.add_argument(
+        "--stop-on-nonzero",
+        dest="ignore_nonzero",
+        action="store_false",
+        help="stop on nonzero exit",
+    )
+    parser.add_argument(
+        "--hold-on-stop", action="store_true", help="wait for Enter before exiting after a stop"
+    )
+    parser.add_argument(
+        "--local", action="store_true", help="run in this terminal instead of the default farm"
+    )
     parser.add_argument(
         "--farm-session",
         nargs="?",
         const="",
         help="launch this looper in a Codex CLI Farm tmux session; omit NAME to use the default",
     )
-    parser.add_argument("--farm-attach", action="store_true", help="attach after launching with --farm-session")
+    parser.add_argument(
+        "--farm-attach", action="store_true", help="attach after launching with --farm-session"
+    )
     parser.add_argument("--farm-add-bin", default="codex-add", help="codex-add-compatible launcher")
     parser.add_argument("--version", action="version", version=f"codex-looper {VERSION}")
     parser.epilog = (
@@ -2318,7 +2371,9 @@ def resolve_agent_name(
     return looper.default_agent or invocation_default or default_agent_from_invocation()
 
 
-def parse_run_options(args: argparse.Namespace, *, agent_args: list[str] | None = None) -> RunOptions:
+def parse_run_options(
+    args: argparse.Namespace, *, agent_args: list[str] | None = None
+) -> RunOptions:
     return RunOptions(
         agent_name=args.agent,
         config_path=Path(args.config),
@@ -2409,9 +2464,13 @@ def run_command_main(argv: list[str] | None = None, *, default_agent: str | None
 
 
 def init_main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog=f"{display_name()} init", description="Create starter config and prompt files.")
+    parser = argparse.ArgumentParser(
+        prog=f"{display_name()} init", description="Create starter config and prompt files."
+    )
     parser.add_argument("--force", action="store_true", help="overwrite existing files")
-    parser.add_argument("-i", "--interactive", action="store_true", help="ask for defaults and prompt text")
+    parser.add_argument(
+        "-i", "--interactive", action="store_true", help="ask for defaults and prompt text"
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     config_text = EXAMPLE_CONFIG
@@ -2433,8 +2492,12 @@ def init_main(argv: list[str] | None = None) -> int:
 
 
 def doctor_main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog=f"{display_name()} doctor", description="Check local agent CLI availability.")
-    parser.add_argument("-a", "--agent", default=default_agent_from_invocation(), help="agent executable to check")
+    parser = argparse.ArgumentParser(
+        prog=f"{display_name()} doctor", description="Check local agent CLI availability."
+    )
+    parser.add_argument(
+        "-a", "--agent", default=default_agent_from_invocation(), help="agent executable to check"
+    )
     parser.add_argument("--local", action="store_true", help="skip tmux and farm launcher checks")
     parser.add_argument("--farm-add-bin", default="codex-add", help="farm launcher to check")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)

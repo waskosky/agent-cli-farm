@@ -1,7 +1,6 @@
-from pathlib import Path
 import stat
 import unittest
-
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BIN_DIR = REPO_ROOT / "bin"
@@ -33,11 +32,13 @@ class ToolWrappersExistenceTests(unittest.TestCase):
                 if not (mode & stat.S_IXUSR):
                     non_exec.append(name)
         self.assertEqual(
-            missing, [],
+            missing,
+            [],
             f"Missing tool wrapper scripts: {missing}",
         )
         self.assertEqual(
-            non_exec, [],
+            non_exec,
+            [],
             f"Non-executable tool wrapper scripts: {non_exec}",
         )
 

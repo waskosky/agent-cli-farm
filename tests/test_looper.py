@@ -1,7 +1,7 @@
 import asyncio
 import contextlib
-import io
 import importlib.util
+import io
 import os
 import shlex
 import stat
@@ -11,7 +11,6 @@ import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOOPER_PATH = REPO_ROOT / "bin" / "codex-looper.py"
@@ -326,7 +325,7 @@ class LooperCoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "agent-looper.toml"
             path.write_text(
-                r'''
+                r"""
 [looper]
 default_agent = "claude"
 prompt_file = "custom-prompts.md"
@@ -355,7 +354,7 @@ kind = "generic"
 first_command = ["gemini", "-p", "{prompt}"]
 resume_command = ["gemini", "-p", "{prompt}"]
 scan_stdout_for_stop_patterns = true
-''',
+""",
                 encoding="utf-8",
             )
 
@@ -575,7 +574,11 @@ fresh_session_per_loop = "false"
                     scan_stdout=False,
                     kill_on_stop_pattern=True,
                 )
-                return result, log_path.read_text(encoding="utf-8"), len(first_line) + len(second_line)
+                return (
+                    result,
+                    log_path.read_text(encoding="utf-8"),
+                    len(first_line) + len(second_line),
+                )
 
         result, log_text, expected_bytes = asyncio.run(exercise())
 
@@ -646,7 +649,9 @@ fresh_session_per_loop = "false"
 
         self.assertEqual(result.returncode, -15)
         self.assertFalse(result.timed_out)
-        self.assertEqual(result.stop_reason, "local stdout reader failed: RuntimeError: stream exploded")
+        self.assertEqual(
+            result.stop_reason, "local stdout reader failed: RuntimeError: stream exploded"
+        )
         self.assertIn("stdout_reader_error", log_text)
 
     def test_run_command_reports_missing_executable_cleanly(self) -> None:
@@ -887,7 +892,9 @@ fresh_session_per_loop = "false"
         result, tmux_commands, run_command_calls, pointer_text = asyncio.run(exercise())
 
         self.assertEqual(result, 0)
-        split_commands = [command for command in tmux_commands if command[:2] == ["tmux", "split-window"]]
+        split_commands = [
+            command for command in tmux_commands if command[:2] == ["tmux", "split-window"]
+        ]
         self.assertEqual(len(split_commands), 1, tmux_commands)
         self.assertIn("-d", split_commands[0])
         self.assertIn("current-log.path", split_commands[0][-1])
@@ -1508,9 +1515,7 @@ fresh_session_per_loop = "false"
         self.assertEqual(sleeps, [0.25, 0.25, 0.25])
 
     def test_markdown_plan_has_unchecked_tasks(self) -> None:
-        self.assertTrue(
-            self.looper.markdown_plan_has_unchecked_tasks("notes\n- [ ] finish this\n")
-        )
+        self.assertTrue(self.looper.markdown_plan_has_unchecked_tasks("notes\n- [ ] finish this\n"))
         self.assertTrue(self.looper.markdown_plan_has_unchecked_tasks("  - [ ] indented\n"))
         self.assertFalse(
             self.looper.markdown_plan_has_unchecked_tasks("- [x] done\n- [X] done too\n")
@@ -1757,7 +1762,9 @@ fresh_session_per_loop = "false"
 
     def test_format_loop_metrics_includes_loop_duration_and_output(self) -> None:
         self.assertEqual(
-            self.looper.format_loop_metrics(loop_number=3, duration_seconds=1.25, output_bytes=1536),
+            self.looper.format_loop_metrics(
+                loop_number=3, duration_seconds=1.25, output_bytes=1536
+            ),
             "loop metrics: loop=3 duration=1.25s output=1.5KiB",
         )
 

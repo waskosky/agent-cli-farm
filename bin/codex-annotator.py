@@ -3,6 +3,7 @@
 Background tmux status annotator for Codex sessions.
 Classifies managed tmux windows as RUN/READY/ERR and prefixes the window title.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -14,13 +15,9 @@ import re
 import subprocess
 import sys
 import time
-from typing import List, Optional
-
 
 DEFAULT_SESSION_PATTERN = os.environ.get("CODEX_ANNOTATOR_SESSION_REGEX", r"^codex")
-DEFAULT_RUNNING_PATTERN = os.environ.get(
-    "CODEX_ANNOTATOR_RUNNING_REGEX", r"(codex|node|ssh)"
-)
+DEFAULT_RUNNING_PATTERN = os.environ.get("CODEX_ANNOTATOR_RUNNING_REGEX", r"(codex|node|ssh)")
 DEFAULT_ENABLED = os.environ.get("CODEX_ANNOTATOR_ENABLED", "1").lower() not in {
     "0",
     "false",
@@ -105,7 +102,7 @@ class SessionInfo:
     sid: str
     current_name: str
     base_name: str
-    state: Optional[str] = None
+    state: str | None = None
 
 
 @dataclasses.dataclass
@@ -114,7 +111,7 @@ class WindowInfo:
     wid: str
     current_name: str
     base_name: str
-    state: Optional[str] = None
+    state: str | None = None
 
 
 @dataclasses.dataclass
@@ -146,7 +143,7 @@ def memory_flag_prefix(name: str) -> str:
     return match.group(0) if match else ""
 
 
-def run_tmux(cmd: List[str], *, verbose: bool) -> Optional[str]:
+def run_tmux(cmd: list[str], *, verbose: bool) -> str | None:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError:
@@ -162,12 +159,12 @@ def run_tmux(cmd: List[str], *, verbose: bool) -> Optional[str]:
     return result.stdout
 
 
-def list_sessions(verbose: bool) -> List[SessionInfo]:
+def list_sessions(verbose: bool) -> list[SessionInfo]:
     output = run_tmux(
         ["tmux", "list-sessions", "-F", "#{session_id}\t#{session_name}"],
         verbose=verbose,
     )
-    sessions: List[SessionInfo] = []
+    sessions: list[SessionInfo] = []
     if not output:
         return sessions
     for line in output.splitlines():
@@ -185,12 +182,12 @@ def list_sessions(verbose: bool) -> List[SessionInfo]:
     return sessions
 
 
-def list_windows(session: SessionInfo, *, verbose: bool) -> List[WindowInfo]:
+def list_windows(session: SessionInfo, *, verbose: bool) -> list[WindowInfo]:
     output = run_tmux(
         ["tmux", "list-windows", "-t", session.sid, "-F", "#{window_id}\t#{window_name}"],
         verbose=verbose,
     )
-    windows: List[WindowInfo] = []
+    windows: list[WindowInfo] = []
     if not output:
         return windows
     for line in output.splitlines():
@@ -209,7 +206,7 @@ def list_windows(session: SessionInfo, *, verbose: bool) -> List[WindowInfo]:
     return windows
 
 
-def window_pane_states(wid: str, *, verbose: bool) -> Optional[List[PaneInfo]]:
+def window_pane_states(wid: str, *, verbose: bool) -> list[PaneInfo] | None:
     output = run_tmux(
         [
             "tmux",
@@ -223,7 +220,7 @@ def window_pane_states(wid: str, *, verbose: bool) -> Optional[List[PaneInfo]]:
     )
     if not output:
         return None
-    panes: List[PaneInfo] = []
+    panes: list[PaneInfo] = []
     for line in output.splitlines():
         if line.count("\t") < 2:
             continue
@@ -257,7 +254,7 @@ def non_empty_tail_lines(text: str, lines: int = 8) -> str:
     return "\n".join(recent[-lines:])
 
 
-def capture_pane_output(pane_id: str, *, verbose: bool) -> Optional[str]:
+def capture_pane_output(pane_id: str, *, verbose: bool) -> str | None:
     return run_tmux(
         ["tmux", "capture-pane", "-t", pane_id, "-e", "-p", "-S", f"-{CAPTURE_LINES}"],
         verbose=verbose,
@@ -282,7 +279,7 @@ def is_looper_command(cmd: str) -> bool:
     )
 
 
-def classify_codex_output(output: Optional[str]) -> str:
+def classify_codex_output(output: str | None) -> str:
     if not output:
         return "ERR"
     clean = strip_ansi(output)
@@ -329,7 +326,7 @@ def classify_codex_output(output: Optional[str]) -> str:
     return "READY"
 
 
-def classify_claude_output(output: Optional[str]) -> str:
+def classify_claude_output(output: str | None) -> str:
     if not output:
         return "ERR"
     clean = strip_ansi(output)
@@ -343,7 +340,7 @@ def classify_claude_output(output: Optional[str]) -> str:
     return "READY"
 
 
-def aggregate_window_state(states: List[str]) -> str:
+def aggregate_window_state(states: list[str]) -> str:
     if not states:
         return "ERR"
     if "RUN" in states:
@@ -358,7 +355,7 @@ def classify_pane(
     running_regex: re.Pattern,
     *,
     verbose: bool,
-) -> Optional[str]:
+) -> str | None:
     if pane.dead:
         return None
     command_context = f"{pane.current_command} {pane.start_command}".strip()
@@ -386,7 +383,7 @@ def classify_window(
         window.state = "ERR"
         return window
 
-    pane_states: List[str] = []
+    pane_states: list[str] = []
     for pane in panes:
         state = classify_pane(pane, running_regex, verbose=verbose)
         if state is not None:
@@ -410,9 +407,17 @@ def rename_window(window: WindowInfo, *, verbose: bool) -> None:
     run_tmux(["tmux", "rename-window", "-t", window.wid, new_name], verbose=verbose)
 
 
-def set_window_status(window: WindowInfo, *, ready_at: Optional[float], verbose: bool) -> None:
+def set_window_status(window: WindowInfo, *, ready_at: float | None, verbose: bool) -> None:
     run_tmux(
-        ["tmux", "set-window-option", "-q", "-t", window.wid, TMUX_STATE_OPTION, window.state or ""],
+        [
+            "tmux",
+            "set-window-option",
+            "-q",
+            "-t",
+            window.wid,
+            TMUX_STATE_OPTION,
+            window.state or "",
+        ],
         verbose=verbose,
     )
     if ready_at is not None:
@@ -475,11 +480,11 @@ def annotate_once(
     session_pattern: re.Pattern,
     running_pattern: re.Pattern,
     *,
-    state_cache: Optional[dict[str, str]] = None,
+    state_cache: dict[str, str] | None = None,
     update_titles: bool = DEFAULT_UPDATE_TITLES,
     notify_on_ready: bool = DEFAULT_NOTIFY_READY,
     ready_message: str = DEFAULT_READY_MESSAGE,
-    now: Optional[float] = None,
+    now: float | None = None,
     verbose: bool,
 ) -> None:
     sessions = list_sessions(verbose=verbose)

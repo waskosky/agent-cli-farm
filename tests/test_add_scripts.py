@@ -7,7 +7,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -153,9 +152,7 @@ esac
         remain_commands = [
             cmd
             for cmd in commands
-            if cmd
-            and cmd[0] == "set-window-option"
-            and "remain-on-exit" in cmd
+            if cmd and cmd[0] == "set-window-option" and "remain-on-exit" in cmd
         ]
         self.assertEqual(
             remain_commands,
@@ -446,8 +443,7 @@ class SaveScriptTests(unittest.TestCase):
             "rollout-2026-05-11T03-23-27-019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4.jsonl"
         )
         claude_session_path = (
-            "/home/test/.claude/projects/-tmp-project/"
-            "54f5b65c-a31c-4aa1-b91b-896b35e2a759.jsonl"
+            "/home/test/.claude/projects/-tmp-project/54f5b65c-a31c-4aa1-b91b-896b35e2a759.jsonl"
         )
         gemini_session_path = (
             self.tmpdir
@@ -620,12 +616,7 @@ esac
             env=env,
         )
 
-        manifest = (
-            Path(env["XDG_CONFIG_HOME"])
-            / "codexfarm"
-            / "manifests"
-            / "work.tsv"
-        )
+        manifest = Path(env["XDG_CONFIG_HOME"]) / "codexfarm" / "manifests" / "work.tsv"
         rows = manifest.read_text(encoding="utf-8").splitlines()
         self.assertEqual(rows[0], "name\tdir\tcmd\targs")
         self.assertIn(
@@ -668,8 +659,7 @@ esac
         registry.parent.mkdir(parents=True, exist_ok=True)
         work_manifest = self.tmpdir / "work.tsv"
         registry.write_text(
-            "session\tmanifest\n"
-            f"work\t{work_manifest}\n",
+            f"session\tmanifest\nwork\t{work_manifest}\n",
             encoding="utf-8",
         )
         env = self.env.copy()
@@ -753,9 +743,7 @@ exit 0
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(
             add_calls,
-            [
-                f"proj|codex|resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4|-d {self.project_dir}"
-            ],
+            [f"proj|codex|resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4|-d {self.project_dir}"],
         )
         self.assertFalse(
             any(cmd and cmd[0] == "send-keys" for cmd in self.read_tmux_commands()),
@@ -859,8 +847,7 @@ exit 0
     def test_codex_restore_falls_back_when_saved_directory_is_missing(self):
         missing_dir = self.tmpdir / "missing"
         self.manifest.write_text(
-            "name\tdir\tcmd\targs\n"
-            f"proj\t{missing_dir}\tcodex\tresume --last\n",
+            f"name\tdir\tcmd\targs\nproj\t{missing_dir}\tcodex\tresume --last\n",
             encoding="utf-8",
         )
 
@@ -883,8 +870,7 @@ exit 0
         registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm" / "farms.tsv"
         registry.parent.mkdir(parents=True, exist_ok=True)
         registry.write_text(
-            "session\tmanifest\n"
-            f"work\t{work_manifest}\n",
+            f"session\tmanifest\nwork\t{work_manifest}\n",
             encoding="utf-8",
         )
 

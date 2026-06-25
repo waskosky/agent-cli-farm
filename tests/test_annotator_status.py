@@ -1,8 +1,8 @@
 import importlib.util
-from importlib.machinery import SourceFileLoader
 import sys
-from pathlib import Path
 import unittest
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
 
 
 def load_annotator_module():

@@ -7,7 +7,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -40,9 +39,7 @@ class MemoryFlagTests(unittest.TestCase):
         self.assertNotIn("add_high_memory_warning.sh", result.stdout)
 
     def test_implementation_avoids_associative_arrays_and_runuser(self) -> None:
-        content = (REPO_ROOT / "bin" / "add_high_memory_warning.sh").read_text(
-            encoding="utf-8"
-        )
+        content = (REPO_ROOT / "bin" / "add_high_memory_warning.sh").read_text(encoding="utf-8")
 
         self.assertNotIn("declare -A", content)
         self.assertNotIn("runuser", content)
@@ -77,7 +74,18 @@ esac
 printf '100 1 300000\\n'
 """,
         )
-        for command in ["awk", "basename", "cat", "dirname", "grep", "id", "mktemp", "sed", "stat", "tr"]:
+        for command in [
+            "awk",
+            "basename",
+            "cat",
+            "dirname",
+            "grep",
+            "id",
+            "mktemp",
+            "sed",
+            "stat",
+            "tr",
+        ]:
             system_path = shutil.which(command)
             if not system_path:
                 raise RuntimeError(f"Missing required test command: {command}")
