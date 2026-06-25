@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -246,14 +248,14 @@ def display_name() -> str:
 
 def positive_float(value: str) -> float:
     out = float(value)
-    if out <= 0:
+    if not math.isfinite(out) or out <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return out
 
 
 def nonnegative_float(value: str) -> float:
     out = float(value)
-    if out < 0:
+    if not math.isfinite(out) or out < 0:
         raise argparse.ArgumentTypeError("must be zero or greater")
     return out
 
@@ -275,8 +277,14 @@ def positive_int(value: str) -> int:
 def load_prompts(path: Path, separator: str) -> list[str]:
     if not path.exists():
         raise PromptError(f"prompt file not found: {path}")
-    text = path.read_text(encoding="utf-8")
-    parts = [part.strip() for part in re.split(separator, text, flags=re.MULTILINE)]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PromptError(f"failed to read prompt file {path}: {exc}") from exc
+    try:
+        parts = [part.strip() for part in re.split(separator, text, flags=re.MULTILINE)]
+    except re.error as exc:
+        raise PromptError(f"invalid prompt separator regex {separator!r}: {exc}") from exc
     prompts = [part for part in parts if part]
     if not prompts:
         raise PromptError(f"no prompts found in {path}")
@@ -290,7 +298,10 @@ def load_prompts_for_mode(path: Path, separator: str, mode: LooperMode) -> list[
         raise ConfigError(f"unsupported looper mode: {mode}")
     if not path.exists():
         raise PromptError(f"prompt file not found: {path}")
-    prompt = path.read_text(encoding="utf-8").strip()
+    try:
+        prompt = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise PromptError(f"failed to read prompt file {path}: {exc}") from exc
     if not prompt:
         raise PromptError(f"no prompts found in {path}")
     return [prompt]
@@ -308,7 +319,7 @@ def resolve_prompt_defaults(looper: LooperConfig, *, cwd: Path) -> LooperConfig:
 
     if not looper.mode_explicit:
         if prompt_file_explicit:
-            mode = "single" if prompt_file == DEFAULT_SINGLE_PROMPT_FILE else "sequence"
+            mode = "sequence" if prompt_file == DEFAULT_SEQUENCE_PROMPT_FILE else "single"
         elif (
             not _path_exists_from(cwd, DEFAULT_SINGLE_PROMPT_FILE)
             and _path_exists_from(cwd, DEFAULT_SEQUENCE_PROMPT_FILE)
@@ -386,13 +397,22 @@ def build_command(
 
 
 def compile_stop_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
-    return [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
+    compiled: list[re.Pattern[str]] = []
+    for pattern in patterns:
+        try:
+            compiled.append(re.compile(pattern, re.IGNORECASE))
+        except re.error as exc:
+            raise ConfigError(f"invalid stop pattern {pattern!r}: {exc}") from exc
+    return compiled
 
 
 def compile_completion_marker(looper: LooperConfig) -> re.Pattern[str] | None:
     if not looper.completion_enabled:
         return None
-    return re.compile(looper.completion_marker)
+    try:
+        return re.compile(looper.completion_marker)
+    except re.error as exc:
+        raise ConfigError(f"invalid completion marker {looper.completion_marker!r}: {exc}") from exc
 
 
 UNCHECKED_MARKDOWN_TASK_PATTERN = re.compile(r"^\s*[-*]\s+\[\s\]", re.MULTILINE)
@@ -440,7 +460,10 @@ def create_backup_branch(
 def prune_backup_branches(cwd: Path, *, prefix: str, keep: int) -> list[str]:
     if keep <= 0:
         return []
-    ref_prefix = f"refs/heads/{prefix.rstrip('/')}"
+    clean_prefix = prefix.rstrip("/")
+    if not clean_prefix:
+        raise ConfigError("backup_prefix must not be empty")
+    ref_prefix = f"refs/heads/{clean_prefix}/"
     try:
         result = _run_git(cwd, "for-each-ref", "--format=%(refname:short)", ref_prefix)
     except subprocess.CalledProcessError as exc:
@@ -457,17 +480,15 @@ def prune_backup_branches(cwd: Path, *, prefix: str, keep: int) -> list[str]:
     return to_delete
 
 
-def _status_path_from_porcelain_line(line: str) -> str:
-    path = line[3:]
-    if " -> " in path:
-        path = path.rsplit(" -> ", 1)[1]
-    return path.strip().strip('"')
-
-
 def git_workspace_fingerprint(cwd: Path, ignored_paths: list[Path] | None = None) -> str | None:
     try:
         head = _run_git(cwd, "rev-parse", "HEAD").stdout.strip()
-        status = _run_git(cwd, "status", "--porcelain=v1", "--untracked-files=all").stdout
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=cwd,
+            capture_output=True,
+            check=True,
+        )
     except subprocess.CalledProcessError:
         return None
 
@@ -481,13 +502,63 @@ def git_workspace_fingerprint(cwd: Path, ignored_paths: list[Path] | None = None
         if normalized:
             ignored_prefixes.append(normalized)
 
-    lines = []
-    for line in status.splitlines():
-        status_path = _status_path_from_porcelain_line(line)
+    digest = hashlib.sha256()
+    digest.update(f"HEAD {head}\0".encode("utf-8"))
+    records = status_result.stdout.split(b"\0")
+    index = 0
+    while index < len(records):
+        raw = records[index]
+        index += 1
+        if not raw:
+            continue
+        entry = raw.decode("utf-8", errors="surrogateescape")
+        code = entry[:2]
+        status_path = entry[3:]
+        stable_entry = entry
+        if code[:1] in {"R", "C"} or code[1:2] in {"R", "C"}:
+            if index < len(records):
+                old_path = records[index].decode("utf-8", errors="surrogateescape")
+                index += 1
+                stable_entry = f"{entry}\0{old_path}"
+        path = status_path
         if any(status_path == prefix or status_path.startswith(f"{prefix}/") for prefix in ignored_prefixes):
             continue
-        lines.append(line)
-    return head + "\n" + "\n".join(lines)
+        digest.update(stable_entry.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+
+        full_path = cwd / path
+        try:
+            stat_result = full_path.lstat()
+        except OSError as exc:
+            digest.update(f"missing:{type(exc).__name__}".encode("utf-8"))
+        else:
+            if full_path.is_symlink():
+                try:
+                    digest.update(f"symlink:{os.readlink(full_path)}".encode("utf-8"))
+                except OSError as exc:
+                    digest.update(f"symlink-error:{type(exc).__name__}".encode("utf-8"))
+            elif full_path.is_file():
+                digest.update(f"file:{stat_result.st_mode}:{stat_result.st_size}:".encode("utf-8"))
+                try:
+                    with full_path.open("rb") as fh:
+                        while True:
+                            chunk = fh.read(64 * 1024)
+                            if not chunk:
+                                break
+                            digest.update(chunk)
+                except OSError as exc:
+                    digest.update(f"file-error:{type(exc).__name__}".encode("utf-8"))
+            else:
+                digest.update(f"other:{stat_result.st_mode}".encode("utf-8"))
+
+        try:
+            index_entry = _run_git(cwd, "ls-files", "-s", "--", path).stdout
+        except subprocess.CalledProcessError:
+            index_entry = ""
+        digest.update(b"\0index\0")
+        digest.update(index_entry.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _json_blob(value: Any) -> str:
@@ -521,15 +592,17 @@ def _coerce_float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        out = float(value)
+        return out if math.isfinite(out) else None
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:
             return None
         try:
-            return float(stripped)
+            out = float(stripped)
         except ValueError:
             return None
+        return out if math.isfinite(out) else None
     return None
 
 
@@ -762,14 +835,19 @@ async def run_command(
     merged_env = os.environ.copy()
     merged_env.update(env)
 
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=str(cwd),
-        env=merged_env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=(os.name == "posix"),
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(cwd),
+            env=merged_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=(os.name == "posix"),
+        )
+    except FileNotFoundError as exc:
+        raise ConfigError(f"executable not found: {command[0]}") from exc
+    except PermissionError as exc:
+        raise ConfigError(f"executable is not runnable: {command[0]}") from exc
 
     result = ProcessResult(returncode=None)
     stop_event = asyncio.Event()
@@ -884,6 +962,19 @@ def current_log_pointer_path(run_dir: Path) -> Path:
     return run_dir / CURRENT_LOG_POINTER_FILENAME
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def tmux_log_tail_command(*, pointer_path: Path, supervisor_pid: int) -> str:
     pointer = shlex.quote(str(pointer_path))
     supervisor = shlex.quote(str(supervisor_pid))
@@ -922,9 +1013,9 @@ def start_tmux_log_pane(run_dir: Path, options: RunOptions) -> bool:
         return False
 
     pointer_path = current_log_pointer_path(run_dir)
-    pointer_path.write_text("", encoding="utf-8")
+    _atomic_write_text(pointer_path, "")
     set_tmux_window_option("remain-on-exit", "on")
-    subprocess.run(
+    result = subprocess.run(
         [
             tmux,
             "split-window",
@@ -936,13 +1027,13 @@ def start_tmux_log_pane(run_dir: Path, options: RunOptions) -> bool:
         ],
         check=False,
     )
-    return True
+    return result.returncode == 0
 
 
 def update_current_log_pointer(*, run_dir: Path, log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.touch(exist_ok=True)
-    current_log_pointer_path(run_dir).write_text(f"{log_path}\n", encoding="utf-8")
+    _atomic_write_text(current_log_pointer_path(run_dir), f"{log_path}\n")
 
 
 def make_label(label: str | None, agent_name: str) -> str:
@@ -953,8 +1044,8 @@ def make_label(label: str | None, agent_name: str) -> str:
 
 def make_run_dir(log_dir: Path, label: str) -> Path:
     safe_label = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in label).strip("-")
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return log_dir / f"{stamp}__{safe_label or 'agent'}"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    return log_dir / f"{stamp}__{safe_label or 'agent'}__{secrets.token_hex(3)}"
 
 
 def apply_run_options(config: LooperConfig, options: RunOptions) -> LooperConfig:
@@ -1469,6 +1560,52 @@ def _as_str_dict(value: Any, key: str) -> dict[str, str]:
     return out
 
 
+def _as_str(value: Any, key: str, default: str, *, nonempty: bool = False) -> str:
+    if value is None:
+        value = default
+    if not isinstance(value, str):
+        raise ConfigError(f"{key} must be a string")
+    if nonempty and not value:
+        raise ConfigError(f"{key} must not be empty")
+    return value
+
+
+def _as_bool(value: Any, key: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ConfigError(f"{key} must be a boolean")
+    return value
+
+
+def _as_int(value: Any, key: str, default: int, *, minimum: int) -> int:
+    if value is None:
+        value = default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{key} must be an integer")
+    if value < minimum:
+        if minimum == 1:
+            raise ConfigError(f"{key} must be greater than zero")
+        raise ConfigError(f"{key} must be zero or greater")
+    return value
+
+
+def _as_float(value: Any, key: str, default: float, *, minimum: float, inclusive: bool) -> float:
+    if value is None:
+        value = default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{key} must be a number")
+    out = float(value)
+    if not math.isfinite(out):
+        raise ConfigError(f"{key} must be finite")
+    if inclusive:
+        if out < minimum:
+            raise ConfigError(f"{key} must be {minimum:g} or greater")
+    elif out <= minimum:
+        raise ConfigError(f"{key} must be greater than {minimum:g}")
+    return out
+
+
 def _path(value: Any, default: Path) -> Path:
     if value is None:
         return default
@@ -1478,7 +1615,7 @@ def _path(value: Any, default: Path) -> Path:
 
 
 def _optional_path(value: Any, key: str) -> Path | None:
-    if value in {None, ""}:
+    if value is None or value == "":
         return None
     if not isinstance(value, str):
         raise ConfigError(f"{key} must be a string path")
@@ -1486,7 +1623,7 @@ def _optional_path(value: Any, key: str) -> Path | None:
 
 
 def _optional_str(value: Any, key: str) -> str | None:
-    if value in {None, ""}:
+    if value is None or value == "":
         return None
     if not isinstance(value, str):
         raise ConfigError(f"{key} must be a string")
@@ -1509,11 +1646,18 @@ def default_agents() -> dict[str, AgentConfig]:
 
 def read_config_raw(path: Path) -> dict[str, Any]:
     if path.exists():
-        if tomllib is None:
-            return parse_basic_toml(path.read_text(encoding="utf-8"))
-        else:
-            with path.open("rb") as fh:
-                return tomllib.load(fh)
+        try:
+            if tomllib is None:
+                return parse_basic_toml(path.read_text(encoding="utf-8"))
+            else:
+                with path.open("rb") as fh:
+                    return tomllib.load(fh)
+        except OSError as exc:
+            raise ConfigError(f"failed to read config {path}: {exc}") from exc
+        except Exception as exc:
+            if exc.__class__.__name__ == "TOMLDecodeError":
+                raise ConfigError(f"invalid TOML in {path}: {exc}") from exc
+            raise
     return {}
 
 
@@ -1540,8 +1684,9 @@ def resolve_preset_path(spec: str) -> Path:
         raise ConfigError(f"preset not found: {spec}")
 
     name = f"{spec}.toml"
+    xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
     candidates = [
-        Path.home() / ".config" / "codexfarm" / "presets" / name,
+        xdg_config_home / "codexfarm" / "presets" / name,
         repo_root() / "examples" / "presets" / name,
     ]
     for candidate in candidates:
@@ -1563,65 +1708,120 @@ def load_config(path: Path, *, preset_paths: list[Path] | None = None) -> Loaded
         raise ConfigError("[looper] must be a TOML table")
 
     default_looper = LooperConfig()
-    raw_mode = str(raw_looper.get("mode", default_looper.mode))
+    raw_mode = _as_str(raw_looper.get("mode"), "looper.mode", default_looper.mode, nonempty=True)
     if raw_mode not in {"single", "sequence"}:
         raise ConfigError("looper.mode must be single or sequence")
-    completion_streak = int(raw_looper.get("completion_streak", default_looper.completion_streak))
-    if completion_streak <= 0:
-        raise ConfigError("looper.completion_streak must be greater than zero")
-    backup_keep = int(raw_looper.get("backup_keep", default_looper.backup_keep))
-    if backup_keep < 0:
-        raise ConfigError("looper.backup_keep must be zero or greater")
-    cb_no_progress = int(raw_looper.get("cb_no_progress", default_looper.cb_no_progress))
-    if cb_no_progress < 0:
-        raise ConfigError("looper.cb_no_progress must be zero or greater")
-    cb_output_decline = int(
-        raw_looper.get("cb_output_decline", default_looper.cb_output_decline)
+    completion_streak = _as_int(
+        raw_looper.get("completion_streak"),
+        "looper.completion_streak",
+        default_looper.completion_streak,
+        minimum=1,
     )
-    if cb_output_decline < 0:
-        raise ConfigError("looper.cb_output_decline must be zero or greater")
+    backup_keep = _as_int(
+        raw_looper.get("backup_keep"),
+        "looper.backup_keep",
+        default_looper.backup_keep,
+        minimum=0,
+    )
+    cb_no_progress = _as_int(
+        raw_looper.get("cb_no_progress"),
+        "looper.cb_no_progress",
+        default_looper.cb_no_progress,
+        minimum=0,
+    )
+    cb_output_decline = _as_int(
+        raw_looper.get("cb_output_decline"),
+        "looper.cb_output_decline",
+        default_looper.cb_output_decline,
+        minimum=0,
+    )
     looper = LooperConfig(
-        default_agent=str(raw_looper.get("default_agent", default_looper.default_agent)),
+        default_agent=_as_str(
+            raw_looper.get("default_agent"),
+            "looper.default_agent",
+            default_looper.default_agent,
+            nonempty=True,
+        ),
         mode=raw_mode,  # type: ignore[arg-type]
         mode_explicit="mode" in raw_looper,
         prompt_file=_path(raw_looper.get("prompt_file"), default_looper.prompt_file),
         prompt_file_explicit="prompt_file" in raw_looper,
-        separator=str(raw_looper.get("separator", default_looper.separator)),
-        timeout_seconds=float(raw_looper.get("timeout_seconds", default_looper.timeout_seconds)),
-        sleep_seconds=float(raw_looper.get("sleep_seconds", default_looper.sleep_seconds)),
-        fresh_session_per_loop=bool(
-            raw_looper.get("fresh_session_per_loop", default_looper.fresh_session_per_loop)
+        separator=_as_str(raw_looper.get("separator"), "looper.separator", default_looper.separator),
+        timeout_seconds=_as_float(
+            raw_looper.get("timeout_seconds"),
+            "looper.timeout_seconds",
+            default_looper.timeout_seconds,
+            minimum=0,
+            inclusive=False,
         ),
-        max_loops=int(raw_looper.get("max_loops", default_looper.max_loops)),
-        max_transient_retries=int(
-            raw_looper.get("max_transient_retries", default_looper.max_transient_retries)
+        sleep_seconds=_as_float(
+            raw_looper.get("sleep_seconds"),
+            "looper.sleep_seconds",
+            default_looper.sleep_seconds,
+            minimum=0,
+            inclusive=False,
         ),
-        retry_notify_after_seconds=float(
-            raw_looper.get("retry_notify_after_seconds", default_looper.retry_notify_after_seconds)
+        fresh_session_per_loop=_as_bool(
+            raw_looper.get("fresh_session_per_loop"),
+            "looper.fresh_session_per_loop",
+            default_looper.fresh_session_per_loop,
+        ),
+        max_loops=_as_int(
+            raw_looper.get("max_loops"), "looper.max_loops", default_looper.max_loops, minimum=0
+        ),
+        max_transient_retries=_as_int(
+            raw_looper.get("max_transient_retries"),
+            "looper.max_transient_retries",
+            default_looper.max_transient_retries,
+            minimum=0,
+        ),
+        retry_notify_after_seconds=_as_float(
+            raw_looper.get("retry_notify_after_seconds"),
+            "looper.retry_notify_after_seconds",
+            default_looper.retry_notify_after_seconds,
+            minimum=0,
+            inclusive=True,
         ),
         log_dir=_path(raw_looper.get("log_dir"), default_looper.log_dir),
         stop_patterns=_as_str_list(raw_looper.get("stop_patterns"), "looper.stop_patterns")
         or list(default_looper.stop_patterns),
-        kill_on_stop_pattern=bool(
-            raw_looper.get("kill_on_stop_pattern", default_looper.kill_on_stop_pattern)
+        kill_on_stop_pattern=_as_bool(
+            raw_looper.get("kill_on_stop_pattern"),
+            "looper.kill_on_stop_pattern",
+            default_looper.kill_on_stop_pattern,
         ),
-        ignore_nonzero=bool(raw_looper.get("ignore_nonzero", default_looper.ignore_nonzero)),
-        scan_stdout_for_stop_patterns=bool(
+        ignore_nonzero=_as_bool(
+            raw_looper.get("ignore_nonzero"), "looper.ignore_nonzero", default_looper.ignore_nonzero
+        ),
+        scan_stdout_for_stop_patterns=_as_bool(
             raw_looper.get(
                 "scan_stdout_for_stop_patterns",
-                default_looper.scan_stdout_for_stop_patterns,
-            )
+            ),
+            "looper.scan_stdout_for_stop_patterns",
+            default_looper.scan_stdout_for_stop_patterns,
         ),
-        completion_enabled=bool(
-            raw_looper.get("completion_enabled", default_looper.completion_enabled)
+        completion_enabled=_as_bool(
+            raw_looper.get("completion_enabled"),
+            "looper.completion_enabled",
+            default_looper.completion_enabled,
         ),
-        completion_marker=str(
-            raw_looper.get("completion_marker", default_looper.completion_marker)
+        completion_marker=_as_str(
+            raw_looper.get("completion_marker"),
+            "looper.completion_marker",
+            default_looper.completion_marker,
+            nonempty=True,
         ),
         completion_streak=completion_streak,
         plan_file=_optional_path(raw_looper.get("plan_file"), "looper.plan_file"),
-        backup_enabled=bool(raw_looper.get("backup_enabled", default_looper.backup_enabled)),
-        backup_prefix=str(raw_looper.get("backup_prefix", default_looper.backup_prefix)),
+        backup_enabled=_as_bool(
+            raw_looper.get("backup_enabled"), "looper.backup_enabled", default_looper.backup_enabled
+        ),
+        backup_prefix=_as_str(
+            raw_looper.get("backup_prefix"),
+            "looper.backup_prefix",
+            default_looper.backup_prefix,
+            nonempty=True,
+        ),
         backup_keep=backup_keep,
         cb_no_progress=cb_no_progress,
         cb_output_decline=cb_output_decline,
@@ -1638,7 +1838,7 @@ def load_config(path: Path, *, preset_paths: list[Path] | None = None) -> Loaded
         if not isinstance(value, dict):
             raise ConfigError(f"[agents.{name}] must be a TOML table")
         base = agents.get(name)
-        kind = str(value.get("kind", base.kind if base else name))
+        kind = _as_str(value.get("kind"), f"agents.{name}.kind", base.kind if base else name, nonempty=True)
         if kind not in {"claude", "codex", "generic"}:
             raise ConfigError(f"agents.{name}.kind must be claude, codex, or generic")
         agents[name] = AgentConfig(
@@ -1660,11 +1860,10 @@ def load_config(path: Path, *, preset_paths: list[Path] | None = None) -> Loaded
                 or (base.resume_command if base else None)
             ),
             env={**(base.env if base else {}), **_as_str_dict(value.get("env"), f"agents.{name}.env")},
-            scan_stdout_for_stop_patterns=bool(
-                value.get(
-                    "scan_stdout_for_stop_patterns",
-                    base.scan_stdout_for_stop_patterns if base else False,
-                )
+            scan_stdout_for_stop_patterns=_as_bool(
+                value.get("scan_stdout_for_stop_patterns"),
+                f"agents.{name}.scan_stdout_for_stop_patterns",
+                base.scan_stdout_for_stop_patterns if base else False,
             ),
         )
 
@@ -1976,6 +2175,9 @@ def resolve_self_executable() -> str:
 def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | None:
     if options.local or options.farm_session is None:
         return None
+    launcher = shutil.which(options.farm_add_bin)
+    if launcher is None:
+        raise ConfigError(f"farm launcher not found: {options.farm_add_bin}")
 
     executable = resolve_self_executable()
     cwd = options.cwd or Path.cwd()
@@ -1994,13 +2196,16 @@ def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | No
         inner_args.extend(["--label", options.label])
     env["CODEX_ARGS"] = shlex.join(inner_args)
 
-    command = [options.farm_add_bin]
+    command = [launcher]
     if not options.farm_attach:
         command.append("-d")
     if options.farm_session:
         command.append(options.farm_session)
     command.append(str(cwd))
-    return subprocess.run(command, env=env, check=False).returncode
+    try:
+        return subprocess.run(command, env=env, check=False).returncode
+    except PermissionError as exc:
+        raise ConfigError(f"farm launcher is not runnable: {options.farm_add_bin}") from exc
 
 
 def split_agent_args(argv: list[str]) -> tuple[list[str], list[str]]:
@@ -2173,11 +2378,11 @@ def run_command_main(argv: list[str] | None = None, *, default_agent: str | None
     if options.farm_session is None and not options.local and not options.dry_run:
         options = replace(options, farm_session="")
 
-    farm_result = maybe_launch_farm(options, real_argv)
-    if farm_result is not None:
-        return farm_result
-
     try:
+        farm_result = maybe_launch_farm(options, real_argv)
+        if farm_result is not None:
+            return farm_result
+
         preset_paths = [resolve_preset_path(options.preset)] if options.preset else []
         loaded = load_config(options.config_path, preset_paths=preset_paths)
         agent_name = resolve_agent_name(
@@ -2229,16 +2434,15 @@ def init_main(argv: list[str] | None = None) -> int:
 
 def doctor_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=f"{display_name()} doctor", description="Check local agent CLI availability.")
-    parser.parse_args(sys.argv[1:] if argv is None else argv)
+    parser.add_argument("-a", "--agent", default=default_agent_from_invocation(), help="agent executable to check")
+    parser.add_argument("--local", action="store_true", help="skip tmux and farm launcher checks")
+    parser.add_argument("--farm-add-bin", default="codex-add", help="farm launcher to check")
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     status = 0
-    checks = [
-        ("codex", "agent"),
-        ("claude", "agent"),
-        ("gemini", "agent"),
-        ("tmux", "farm"),
-        ("codex-add", "farm launcher"),
-    ]
+    checks = [(args.agent, "agent")]
+    if not args.local:
+        checks.extend([("tmux", "farm"), (args.farm_add_bin, "farm launcher")])
     for name, role in checks:
         path = shutil.which(name)
         if path:
@@ -2262,7 +2466,13 @@ def main(argv: list[str] | None = None) -> int:
             return run_command_main([], default_agent=default_agent)
         return first_run_main()
     if real_argv[0] in {"-h", "--help"}:
-        parser = argparse.ArgumentParser(prog=display_name(), description="Tiny coding-agent looper utility.")
+        parser = argparse.ArgumentParser(
+            prog=display_name(),
+            description=(
+                "Tiny coding-agent looper utility. The run subcommand is optional; "
+                "initialized directories run when no subcommand is given."
+            ),
+        )
         subparsers = parser.add_subparsers(dest="command")
         run_parser = subparsers.add_parser("run", help="run a prompt sequence loop")
         add_run_arguments(run_parser, default_agent=default_agent)

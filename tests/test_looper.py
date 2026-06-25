@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import io
 import importlib.util
 import os
 import shlex
@@ -106,6 +108,35 @@ class LooperCoreTests(unittest.TestCase):
 
         self.assertEqual(resolved.mode, "sequence")
         self.assertEqual(resolved.prompt_file, Path("prompts.md"))
+
+    def test_custom_prompt_file_defaults_to_single_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            resolved = self.looper.resolve_prompt_defaults(
+                self.looper.LooperConfig(
+                    prompt_file=Path("custom.md"),
+                    prompt_file_explicit=True,
+                ),
+                cwd=Path(td),
+            )
+
+        self.assertEqual(resolved.mode, "single")
+        self.assertEqual(resolved.prompt_file, Path("custom.md"))
+
+    def test_float_argument_types_reject_nonfinite_values(self) -> None:
+        for parser_type in [self.looper.positive_float, self.looper.nonnegative_float]:
+            for value in ["nan", "inf", "-inf"]:
+                with self.subTest(parser_type=parser_type.__name__, value=value):
+                    with self.assertRaises(self.looper.argparse.ArgumentTypeError):
+                        parser_type(value)
+
+    def test_invalid_runtime_regexes_raise_config_errors(self) -> None:
+        with self.assertRaisesRegex(self.looper.ConfigError, "invalid stop pattern"):
+            self.looper.compile_stop_patterns(["["])
+
+        with self.assertRaisesRegex(self.looper.ConfigError, "invalid completion marker"):
+            self.looper.compile_completion_marker(
+                self.looper.LooperConfig(completion_enabled=True, completion_marker="[")
+            )
 
     def test_builds_codex_first_and_resume_commands(self) -> None:
         agent = self.looper.AgentConfig(
@@ -350,6 +381,22 @@ scan_stdout_for_stop_patterns = true
         self.assertEqual(loaded.agents["codex"].env["CODEX_HOME"], ".codex")
         self.assertEqual(loaded.agents["gemini"].first_command, ["gemini", "-p", "{prompt}"])
         self.assertTrue(loaded.agents["gemini"].scan_stdout_for_stop_patterns)
+
+    def test_load_config_rejects_wrong_scalar_types_and_nonfinite_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "agent-looper.toml"
+            path.write_text(
+                """
+[looper]
+max_loops = "3"
+timeout_seconds = inf
+fresh_session_per_loop = "false"
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(self.looper.ConfigError):
+                self.looper.load_config(path)
 
     def test_stop_signal_parsing_ignores_normal_stdout(self) -> None:
         patterns = self.looper.compile_stop_patterns([r"rate\s*limit"])
@@ -602,6 +649,24 @@ scan_stdout_for_stop_patterns = true
         self.assertEqual(result.stop_reason, "local stdout reader failed: RuntimeError: stream exploded")
         self.assertIn("stdout_reader_error", log_text)
 
+    def test_run_command_reports_missing_executable_cleanly(self) -> None:
+        async def exercise() -> None:
+            with tempfile.TemporaryDirectory() as td:
+                await self.looper.run_command(
+                    command=["/no/such/looper-agent"],
+                    cwd=Path(td),
+                    env={},
+                    timeout_seconds=1.0,
+                    log_path=Path(td) / "run.log",
+                    agent_kind="generic",
+                    patterns=[],
+                    scan_stdout=False,
+                    kill_on_stop_pattern=True,
+                )
+
+        with self.assertRaisesRegex(self.looper.ConfigError, "executable not found"):
+            asyncio.run(exercise())
+
     def test_run_loop_retries_current_prompt_after_rate_limit_stop(self) -> None:
         async def exercise() -> tuple[int, list[list[str]], list[float], list[tuple[str, str]]]:
             calls: list[list[str]] = []
@@ -831,6 +896,174 @@ scan_stdout_for_stop_patterns = true
         self.assertEqual(len(run_command_calls), 1)
         self.assertIn("stream_output", run_command_calls[0])
         self.assertFalse(run_command_calls[0]["stream_output"])
+
+    def test_run_loop_streams_in_supervisor_when_split_pane_fails(self) -> None:
+        async def exercise() -> list[dict[str, object]]:
+            run_command_calls: list[dict[str, object]] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+            original_subprocess_run = self.looper.subprocess.run
+            original_shutil_which = self.looper.shutil.which
+            original_tmux = self.looper.os.environ.get("TMUX")
+
+            async def fake_run_command(**kwargs: object) -> object:
+                run_command_calls.append(kwargs)
+                return self.looper.ProcessResult(returncode=0)
+
+            async def fake_sleep(seconds: float) -> None:
+                return None
+
+            def fake_which(name: str):
+                if name == "tmux":
+                    return "tmux"
+                return original_shutil_which(name)
+
+            def fake_subprocess_run(command: list[str], **kwargs: object) -> object:
+                if command and command[0] == "tmux" and command[1] == "split-window":
+                    return self.looper.subprocess.CompletedProcess(command, 1)
+                return self.looper.subprocess.CompletedProcess(command, 0)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            self.looper.shutil.which = fake_which
+            self.looper.subprocess.run = fake_subprocess_run
+            self.looper.os.environ["TMUX"] = "tmux-session"
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        prompt_file=prompt_file,
+                        log_dir=root / "runs",
+                        max_loops=1,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="split-fail-smoke",
+                        tmux_layout="split",
+                    )
+                    await self.looper.run_loop(agent=agent, looper=looper, options=options)
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+                self.looper.shutil.which = original_shutil_which
+                self.looper.subprocess.run = original_subprocess_run
+                if original_tmux is None:
+                    self.looper.os.environ.pop("TMUX", None)
+                else:
+                    self.looper.os.environ["TMUX"] = original_tmux
+
+            return run_command_calls
+
+        calls = asyncio.run(exercise())
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["stream_output"])
+
+    def test_prune_backup_branches_does_not_cross_prefix_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            run_git(repo, "branch", "looper-backup/old")
+            run_git(repo, "branch", "looper-backup/new")
+            run_git(repo, "branch", "looper-backup-old/keep")
+
+            pruned = self.looper.prune_backup_branches(repo, prefix="looper-backup", keep=1)
+
+            branches = run_git(repo, "branch", "--format=%(refname:short)").stdout.splitlines()
+        self.assertEqual(pruned, ["looper-backup/new"])
+        self.assertIn("looper-backup-old/keep", branches)
+
+    def test_git_workspace_fingerprint_detects_repeated_edits_to_dirty_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            tracked = repo / "tracked.txt"
+            tracked.write_text("first dirty edit\n", encoding="utf-8")
+            first = self.looper.git_workspace_fingerprint(repo)
+            tracked.write_text("second dirty edit\n", encoding="utf-8")
+            second = self.looper.git_workspace_fingerprint(repo)
+
+        self.assertNotEqual(first, second)
+
+    def test_make_run_dir_is_unique_for_same_label(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            log_dir = Path(td)
+            first = self.looper.make_run_dir(log_dir, "same-label")
+            second = self.looper.make_run_dir(log_dir, "same-label")
+
+        self.assertNotEqual(first, second)
+
+    def test_doctor_checks_only_selected_agent_in_local_mode(self) -> None:
+        calls: list[str] = []
+        original_which = self.looper.shutil.which
+
+        def fake_which(name: str) -> str | None:
+            calls.append(name)
+            if name == "claude":
+                return f"/fake/{name}"
+            return None
+
+        self.looper.shutil.which = fake_which
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = self.looper.doctor_main(["--agent", "claude", "--local"])
+        finally:
+            self.looper.shutil.which = original_which
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, ["claude"])
+
+    def test_top_level_help_explains_optional_run_subcommand(self) -> None:
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            result = self.looper.main(["--help"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("run subcommand is optional", stdout.getvalue())
+
+    def test_missing_farm_launcher_has_clean_error(self) -> None:
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as td, contextlib.redirect_stderr(stderr):
+            result = self.looper.run_command_main(
+                [
+                    "--farm-session",
+                    "work",
+                    "--farm-add-bin",
+                    str(Path(td) / "missing-codex-add"),
+                    "--cwd",
+                    td,
+                ]
+            )
+
+        self.assertEqual(result, 2)
+        self.assertIn("looper error: farm launcher not found", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_named_preset_honors_xdg_config_home(self) -> None:
+        original_xdg = os.environ.get("XDG_CONFIG_HOME")
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                preset = Path(td) / "codexfarm" / "presets" / "custom.toml"
+                preset.parent.mkdir(parents=True)
+                preset.write_text("[looper]\nmax_loops = 1\n", encoding="utf-8")
+                os.environ["XDG_CONFIG_HOME"] = td
+
+                self.assertEqual(self.looper.resolve_preset_path("custom"), preset)
+        finally:
+            if original_xdg is None:
+                os.environ.pop("XDG_CONFIG_HOME", None)
+            else:
+                os.environ["XDG_CONFIG_HOME"] = original_xdg
 
     def test_run_loop_notifies_for_long_retry_delay(self) -> None:
         async def exercise() -> list[str]:
