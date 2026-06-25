@@ -74,10 +74,13 @@ require_output() {
     local description="$1"
     local pattern="$2"
     shift 2
-    if "$@" 2>&1 | grep -q "$pattern"; then
+    local output
+    output="$("$@" 2>&1)"
+    if grep -q "$pattern" <<< "$output"; then
         echo "[OK] $description"
     else
         echo "[FAIL] $description" >&2
+        printf '%s\n' "$output" >&2
         return 1
     fi
 }
@@ -91,7 +94,7 @@ require_failure_output() {
     output="$("$@" 2>&1)"
     status=$?
     set -e
-    if [ "$status" -ne 0 ] && printf '%s\n' "$output" | grep -q "$pattern"; then
+    if [ "$status" -ne 0 ] && grep -q "$pattern" <<< "$output"; then
         echo "[OK] $description"
     else
         echo "[FAIL] $description" >&2
