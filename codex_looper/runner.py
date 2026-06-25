@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import secrets
 import shlex
@@ -44,6 +45,7 @@ from .retry import (
     transient_retry_limit_message,
     transient_retry_limit_reached,
 )
+from .state import LooperStateRecorder
 from .tmux import (
     display_tmux_message,
     set_tmux_window_option,
@@ -214,6 +216,42 @@ async def run_loop(
     if options.agent_args:
         agent = replace(agent, extra_args=[*agent.extra_args, *options.agent_args])
 
+    state = LooperStateRecorder(
+        run_dir,
+        {
+            "run_id": run_dir.name,
+            "run_dir": str(run_dir),
+            "label": label,
+            "agent_name": agent.name,
+            "agent_kind": agent.kind,
+            "agent_cwd": str(agent.cwd),
+            "config_path": str(options.config_path),
+            "prompt_file": str(looper.prompt_file),
+            "mode": looper.mode,
+            "pid": os.getpid(),
+            "status": "running",
+            "total_prompts": len(prompts),
+            "current_loop": 0,
+            "current_prompt_index": 0,
+            "current_session": "",
+            "current_session_id": "",
+            "last_log": None,
+            "last_output_bytes": 0,
+            "stop_reason": None,
+            "exit_code": None,
+        },
+    )
+    state.record("run_started", status="running")
+
+    def stop_run(*, reason: str, exit_code: int, status: str = "stopped") -> int:
+        state.record(
+            "run_stopped",
+            status=status,
+            stop_reason=reason,
+            exit_code=exit_code,
+        )
+        return exit_code
+
     tail_pane_active = start_tmux_log_pane_fn(run_dir, options)
     set_tmux_window_option_fn(TMUX_STATE_OPTION, "RUN")
     set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, "")
@@ -239,7 +277,7 @@ async def run_loop(
     previous_loop_output_bytes: int | None = None
     persistent_session_name = label
     persistent_session_id = ""
-    fingerprint_ignored_paths = [run_dir.resolve()]
+    fingerprint_ignored_paths = [looper.log_dir.resolve(), run_dir.resolve()]
 
     while True:
         loop_number += 1
@@ -256,6 +294,15 @@ async def run_loop(
         first_prompt_in_session = looper.fresh_session_per_loop or loop_number == 1
 
         print(f"\n===== loop {loop_number} / session {session_name} =====")
+        state.record(
+            "loop_started",
+            status="running",
+            current_loop=loop_number,
+            current_prompt_index=0,
+            current_session=session_name,
+            current_session_id=session_id,
+            stop_reason=None,
+        )
 
         if looper.cb_no_progress:
             progress_before = git_workspace_fingerprint(
@@ -287,6 +334,17 @@ async def run_loop(
                 update_current_log_pointer_fn(run_dir=run_dir, log_path=log_path)
 
             while True:
+                state.record(
+                    "prompt_started",
+                    status="running",
+                    current_loop=loop_number,
+                    current_prompt_index=prompt_index,
+                    current_session=session_name,
+                    current_session_id=session_id,
+                    last_log=str(log_path),
+                    retry_count=retry_count,
+                    stop_reason=None,
+                )
                 context = CommandContext(
                     prompt=prompt,
                     session=session_name,
@@ -308,6 +366,14 @@ async def run_loop(
                 print(f"$ {shlex.join(command)}")
 
                 if options.dry_run:
+                    state.record(
+                        "prompt_completed",
+                        status="running",
+                        current_session_id=session_id,
+                        returncode=0,
+                        last_output_bytes=0,
+                        dry_run=True,
+                    )
                     break
 
                 result = await run_command_fn(
@@ -335,6 +401,18 @@ async def run_loop(
                     if not looper.fresh_session_per_loop:
                         persistent_session_id = session_id
 
+                state.record(
+                    "prompt_completed",
+                    status="running",
+                    current_session_id=session_id,
+                    returncode=result.returncode,
+                    last_output_bytes=result.output_bytes,
+                    completion_detected=result.completion_detected,
+                    stop_reason=result.stop_reason,
+                    retry_kind=result.retry_kind,
+                    retry_after_seconds=result.retry_after_seconds,
+                )
+
                 if result.stop_reason:
                     if is_retryable_stop_reason(result.stop_reason):
                         retry_count += 1
@@ -351,7 +429,7 @@ async def run_loop(
                             print(f"last log: {log_path}")
                             set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
                             set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, limit_reason[:250])
-                            return 0
+                            return stop_run(reason=limit_reason, exit_code=0)
                         if result.session_id or agent.kind == "claude":
                             attempt_first_prompt_in_session = False
                         delay_seconds = retry_delay_seconds(result, looper)
@@ -364,6 +442,17 @@ async def run_loop(
                         set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, retry_status[:250])
                         if should_notify_retry_wait(delay_seconds=delay_seconds, looper=looper):
                             display_tmux_message_fn(retry_notification_message(retry_status))
+                        state.record(
+                            "retry_wait",
+                            status="retrying",
+                            stop_reason=result.stop_reason,
+                            retry_status=retry_status,
+                            retry_count=retry_count,
+                            retry_kind=result.retry_kind,
+                            retry_after_seconds=delay_seconds,
+                            current_session_id=session_id,
+                            last_log=str(log_path),
+                        )
                         print(f"\nRETRY: {result.stop_reason}")
                         print(f"last log: {log_path}")
                         print(f"sleeping {format_duration(delay_seconds)} before retry")
@@ -374,14 +463,19 @@ async def run_loop(
                     print(f"last log: {log_path}")
                     set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
                     set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, result.stop_reason[:250])
-                    return 0
+                    return stop_run(reason=result.stop_reason, exit_code=0)
 
                 if result.returncode not in (0, None) and not looper.ignore_nonzero:
-                    print(f"\nSTOP: command exited with code {result.returncode}")
+                    reason = f"command exited with code {result.returncode}"
+                    print(f"\nSTOP: {reason}")
                     print(f"last log: {log_path}")
                     set_tmux_window_option_fn(TMUX_STATE_OPTION, "ERR")
                     set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, f"exit {result.returncode}")
-                    return int(result.returncode or 1)
+                    return stop_run(
+                        reason=reason,
+                        exit_code=int(result.returncode or 1),
+                        status="error",
+                    )
 
                 set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, "")
                 break
@@ -394,6 +488,15 @@ async def run_loop(
                 duration_seconds=loop_duration_seconds,
                 output_bytes=loop_output_bytes,
             )
+        )
+        state.record(
+            "loop_completed",
+            status="running",
+            current_loop=loop_number,
+            current_prompt_index=len(prompts),
+            loop_duration_seconds=loop_duration_seconds,
+            last_output_bytes=loop_output_bytes,
+            completion_detected=loop_completion_detected,
         )
 
         if looper.completion_enabled:
@@ -414,7 +517,7 @@ async def run_loop(
                         print("completion streak reached; stopping")
                         set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
                         set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, "completion marker")
-                        return 0
+                        return stop_run(reason="completion marker", exit_code=0)
             else:
                 if completion_streak_count:
                     print("completion marker missing; resetting completion streak")
@@ -434,7 +537,7 @@ async def run_loop(
                     print(f"STOP: {reason}")
                     set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
                     set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, reason[:250])
-                    return 0
+                    return stop_run(reason=reason, exit_code=0)
             else:
                 no_progress_count = 0
 
@@ -455,7 +558,7 @@ async def run_loop(
                     print(f"STOP: {reason}")
                     set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
                     set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, reason[:250])
-                    return 0
+                    return stop_run(reason=reason, exit_code=0)
             else:
                 output_decline_count = 0
             previous_loop_output_bytes = loop_output_bytes
@@ -463,12 +566,13 @@ async def run_loop(
         if options.dry_run:
             print("dry run complete")
             set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
-            return 0
+            return stop_run(reason="dry run complete", exit_code=0)
 
         if looper.max_loops and loop_number >= looper.max_loops:
-            print(f"max loops reached: {looper.max_loops}")
+            reason = f"max loops reached: {looper.max_loops}"
+            print(reason)
             set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
-            return 0
+            return stop_run(reason=reason, exit_code=0)
 
         await sleep_fn(looper.sleep_seconds)
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # List and manage Codex CLI farm sessions
-# Usage: codex-status [--session SESSION] [sessions|windows|activity|logs]
+# Usage: codex-status [--session SESSION] [sessions|windows|activity|logs|loopers]
 
 DEFAULT_SESSION="codexfarm"
 
@@ -31,7 +31,7 @@ while (( "$#" )); do
             session_set=1
             shift 2
             ;;
-        sessions|windows|activity|logs)
+        sessions|windows|activity|logs|loopers)
             ACTION="$1"
             action_set=1
             shift
@@ -74,7 +74,7 @@ case "$ACTIVITY_LINES" in
 esac
 
 case "$ACTION" in
-    help|logs) ;;
+    help|logs|loopers) ;;
     *)
         if ! command -v tmux >/dev/null; then
             echo "tmux not found" >&2
@@ -186,13 +186,71 @@ case "$ACTION" in
             echo "Log directory doesn't exist: $LOGDIR"
         fi
         ;;
+
+    loopers)
+        python3 - <<'PY'
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+
+def text(value: Any, default: str = "-") -> str:
+    if value is None or value == "":
+        return default
+    return str(value)
+
+
+root = Path(os.environ.get("CODEX_LOOPER_STATE_ROOT") or Path.cwd() / ".agent-looper" / "runs")
+print("=== Looper Runs ===")
+if not root.exists():
+    print(f"No looper runs found at {root}")
+    raise SystemExit(0)
+
+states: list[tuple[str, Path, dict[str, Any]]] = []
+for state_path in root.glob("*/state.json"):
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        states.append(("", state_path, {"label": state_path.parent.name, "status": f"unreadable: {exc}"}))
+        continue
+    updated_at = text(state.get("updated_at"), "")
+    states.append((updated_at, state_path, state))
+
+if not states:
+    print(f"No looper state files found at {root}")
+    raise SystemExit(0)
+
+for _, state_path, state in sorted(states, reverse=True):
+    label = text(state.get("label") or state_path.parent.name)
+    status = text(state.get("status"), "unknown")
+    agent_name = text(state.get("agent_name"), "unknown")
+    agent_kind = text(state.get("agent_kind"), "unknown")
+    loop = text(state.get("current_loop"))
+    prompt = text(state.get("current_prompt_index"))
+    session = text(state.get("current_session_id") or state.get("current_session"))
+    print(f"{label}: [{status}] {agent_name}/{agent_kind} loop={loop} prompt={prompt} session={session}")
+    if state.get("updated_at"):
+        print(f"    updated: {state['updated_at']}")
+    print(f"    run: {text(state.get('run_dir') or state_path.parent)}")
+    if state.get("stop_reason"):
+        print(f"    stop: {state['stop_reason']}")
+    if state.get("last_log"):
+        print(f"    log: {state['last_log']}")
+    if state.get("exit_code") is not None:
+        print(f"    exit: {state['exit_code']}")
+PY
+        ;;
     
     help|*)
-        echo "Usage: $(basename "$0") [--session SESSION] [sessions|windows|activity|logs]"
+        echo "Usage: $(basename "$0") [--session SESSION] [sessions|windows|activity|logs|loopers]"
         echo "  sessions - Show tmux sessions status"
         echo "  windows  - Show Codex windows in main session"
         echo "  activity - Show window status, command, and recent pane output"
         echo "  logs     - Show log files"
+        echo "  loopers  - Show durable looper run state from .agent-looper/runs"
         if [ "$ACTION" = "help" ]; then
             exit 0
         fi

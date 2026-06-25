@@ -1,4 +1,5 @@
 import os
+import json
 import stat
 import subprocess
 import tempfile
@@ -66,6 +67,50 @@ esac
         self.assertIn("recent:", result.stdout)
         self.assertIn("===== loop 3 / session cleanup-loop-0003 =====", result.stdout)
         self.assertIn("--- prompt 2/3 ---", result.stdout)
+
+    def test_loopers_reads_durable_looper_state_without_tmux(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="status-script-test-") as td:
+            project = Path(td)
+            run_dir = project / ".agent-looper" / "runs" / "20260625T000000Z__state-smoke__abc123"
+            run_dir.mkdir(parents=True)
+            state = {
+                "schema_version": 1,
+                "status": "stopped",
+                "label": "state-smoke",
+                "agent_name": "generic",
+                "agent_kind": "generic",
+                "run_dir": str(run_dir),
+                "current_loop": 2,
+                "current_prompt_index": 1,
+                "current_session_id": "session-abc",
+                "updated_at": "2026-06-25T00:00:05Z",
+                "stop_reason": "completion marker",
+                "last_log": str(run_dir / "loop-0002__prompt-001.log"),
+                "exit_code": 0,
+            }
+            (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+            bin_dir = project / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "python3").symlink_to("/usr/local/bin/python3.12")
+            env = os.environ.copy()
+            env["PATH"] = str(bin_dir)
+
+            result = subprocess.run(
+                ["/bin/bash", str(REPO_ROOT / "bin" / "codex-status"), "loopers"],
+                cwd=project,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("=== Looper Runs ===", result.stdout)
+        self.assertIn("state-smoke: [stopped] generic/generic", result.stdout)
+        self.assertIn("loop=2 prompt=1", result.stdout)
+        self.assertIn("session=session-abc", result.stdout)
+        self.assertIn("stop: completion marker", result.stdout)
+        self.assertIn("loop-0002__prompt-001.log", result.stdout)
 
 
 if __name__ == "__main__":

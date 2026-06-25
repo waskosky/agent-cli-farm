@@ -284,6 +284,13 @@ The looper stops when it sees:
 
 Logs are written under `.agent-looper/runs/<timestamp>__<label>__<random>/`. Run directory names use UTC time with subsecond precision plus a random suffix to avoid collisions. The `.agent-looper/current-log` pointer is updated atomically so the split tmux tail pane either sees the previous complete pointer or the next complete pointer.
 
+Each run directory also contains durable machine-readable status:
+
+- `state.json`: latest snapshot with schema version, pid, label, agent, cwd, current loop/prompt, current session, status, stop reason, exit code, and last log path.
+- `events.jsonl`: append-only lifecycle history for run start, loop start/end, prompt start/end, retry waits, and final stop.
+
+Use `codex-status loopers` from a project root to read `.agent-looper/runs/*/state.json` without attaching to tmux. Set `CODEX_LOOPER_STATE_ROOT=/path/to/runs` to point it at an aggregated or remote-synced run directory.
+
 ## Farm Integration
 
 Normal non-dry-run looper commands call `codex-add` so existing farm behavior still owns session creation, board linking, pipe-pane logging, and annotator startup. Use `--local` to run in the current terminal. Use `--farm-session NAME` for a separate farm.
@@ -303,6 +310,7 @@ While a looper is running in the farm, inspect recent pane output without attach
 
 ```bash
 codex-status activity
+codex-status loopers
 ```
 
 ## Current Limits

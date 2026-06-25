@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import shlex
 import stat
@@ -986,6 +987,88 @@ fresh_session_per_loop = "false"
         self.assertIn("stream_output", run_command_calls[0])
         self.assertFalse(run_command_calls[0]["stream_output"])
 
+    def test_run_loop_writes_durable_state_and_event_history(self) -> None:
+        async def exercise() -> tuple[int, dict[str, object], list[dict[str, object]]]:
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+
+            async def fake_run_command(**kwargs: object) -> object:
+                return self.looper.ProcessResult(
+                    returncode=0,
+                    session_id="session-abc",
+                    output_bytes=123,
+                )
+
+            async def fake_sleep(seconds: float) -> None:
+                return None
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        prompt_file=prompt_file,
+                        log_dir=root / ".agent-looper" / "runs",
+                        max_loops=1,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="state-smoke",
+                    )
+
+                    result = await self.looper.run_loop(agent=agent, looper=looper, options=options)
+                    run_dir = next((root / ".agent-looper" / "runs").glob("*state-smoke*"))
+                    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+                    events = [
+                        json.loads(line)
+                        for line in (
+                            run_dir / "events.jsonl"
+                        ).read_text(encoding="utf-8").splitlines()
+                    ]
+                    return result, state, events
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+
+        result, state, events = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(state["schema_version"], 1)
+        self.assertEqual(state["status"], "stopped")
+        self.assertEqual(state["label"], "state-smoke")
+        self.assertEqual(state["agent_name"], "generic")
+        self.assertEqual(state["agent_kind"], "generic")
+        self.assertEqual(state["current_loop"], 1)
+        self.assertEqual(state["current_prompt_index"], 1)
+        self.assertEqual(state["current_session_id"], "session-abc")
+        self.assertEqual(state["last_output_bytes"], 123)
+        self.assertEqual(state["exit_code"], 0)
+        self.assertEqual(state["stop_reason"], "max loops reached: 1")
+        self.assertTrue(str(state["last_log"]).endswith("loop-0001__prompt-001.log"))
+        self.assertEqual(
+            [event["event"] for event in events],
+            [
+                "run_started",
+                "loop_started",
+                "prompt_started",
+                "prompt_completed",
+                "loop_completed",
+                "run_stopped",
+            ],
+        )
+        self.assertEqual(events[-1]["status"], "stopped")
+        self.assertEqual(events[-1]["stop_reason"], "max loops reached: 1")
+
     def test_run_loop_streams_in_supervisor_when_split_pane_fails(self) -> None:
         async def exercise() -> list[dict[str, object]]:
             run_command_calls: list[dict[str, object]] = []
@@ -1784,6 +1867,22 @@ fresh_session_per_loop = "false"
         self.assertNotEqual(clean, dirty)
         self.assertNotEqual(dirty, committed)
         self.assertNotEqual(clean, committed)
+
+    def test_git_workspace_fingerprint_ignores_absolute_resolved_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            init_git_repo(repo)
+            log_dir = repo / "runs"
+            run_dir = log_dir / "abc"
+            run_dir.mkdir(parents=True)
+            ignored = [log_dir.resolve(), run_dir.resolve()]
+
+            before = self.looper.git_workspace_fingerprint(repo, ignored_paths=ignored)
+            (run_dir / "state.json").write_text("{}\n", encoding="utf-8")
+            (run_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+            after = self.looper.git_workspace_fingerprint(repo, ignored_paths=ignored)
+
+        self.assertEqual(before, after)
 
     def test_run_loop_stops_after_configured_no_progress_loops(self) -> None:
         async def exercise() -> tuple[int, int, list[float]]:

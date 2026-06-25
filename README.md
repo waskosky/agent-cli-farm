@@ -110,6 +110,7 @@ Farm-launched loopers use a two-pane tmux layout by default: the main pane shows
 Inspect a running looper or agent without attaching:
 ```bash
 codex-status activity
+codex-status loopers
 ```
 
 See [Agent Looper Reference](docs/looper.md) for prompt format, CLI parameters, config defaults, stop conditions, farm integration, and current backend limits.
@@ -121,6 +122,7 @@ Looper defaults and limits:
 - Backup branches point to committed `HEAD` only; they are not dirty-worktree snapshots. Pruning stays inside the exact configured prefix namespace.
 - The no-progress circuit breaker fingerprints committed `HEAD`, status entries, tracked metadata, and file contents while ignoring the looper run directory.
 - Run directories include a high-resolution timestamp and random suffix; the current-log pointer is updated atomically. In split mode, if tmux cannot create the tail pane, live transcript streaming falls back to the supervisor pane.
+- Every looper run writes durable machine-readable state to `state.json` and append-only lifecycle history to `events.jsonl` in its run directory. `codex-status loopers` reads those files, so stop reasons survive pane exits and can be scraped without tmux.
 
 ### 4. Watch All Instances
 
@@ -230,7 +232,7 @@ Tuning and controls:
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-looper [init|doctor|run]`** - Run a single prompt or prompt sequence repeatedly with logs and stop detection; see [looper reference](docs/looper.md)
-- **`codex-status [--session SESSION] [sessions|windows|activity|logs]`** - Show status information
+- **`codex-status [--session SESSION] [sessions|windows|activity|logs|loopers]`** - Show status information
 - **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
 - **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
 - **`codex-save [manifest]`** - Snapshot current windows to a manifest (TSV)
@@ -254,6 +256,7 @@ Common:
 - **`CODEX_REMAIN_ON_EXIT`** - keep tmux windows visible after the pane command exits (default `1`; set to `0` to close windows on exit)
 - **`CODEX_WATCH_MODE`** - `auto` (default), `tail`, or `multitail` to control codex-watch display
 - **`CODEX_STATUS_ACTIVITY_LINES`** - recent pane lines shown by `codex-status activity` (default `8`)
+- **`CODEX_LOOPER_STATE_ROOT`** - run-state directory for `codex-status loopers` (default: `.agent-looper/runs` in the current directory)
 - **`CODEX_AUTOSERVICE_CHOICE`** - `yes` or `no` to persist autoservice choice
 - **`CODEX_ANNOTATOR_AUTOSTART`** - set to `0` to skip starting the annotator
 - **`CODEX_LOOPER_PYTHON_BIN`** - Python 3.10+ interpreter for `codex-looper` (default searches `python3`, then versioned `python3.14` through `python3.10`)

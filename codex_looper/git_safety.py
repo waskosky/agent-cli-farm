@@ -77,10 +77,11 @@ def git_workspace_fingerprint(cwd: Path, ignored_paths: list[Path] | None = None
     except subprocess.CalledProcessError:
         return None
 
+    cwd_resolved = cwd.resolve()
     ignored_prefixes: list[str] = []
     for path in ignored_paths or []:
         try:
-            relative = path if not path.is_absolute() else path.relative_to(cwd)
+            relative = path if not path.is_absolute() else path.resolve().relative_to(cwd_resolved)
         except ValueError:
             continue
         normalized = str(relative).strip("/")
