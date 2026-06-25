@@ -10,7 +10,6 @@ import re
 import secrets
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -18,7 +17,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from string import Formatter
-from typing import Any, TextIO
+from typing import Any
 
 REPO_ROOT_FOR_IMPORTS = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT_FOR_IMPORTS) not in sys.path:
@@ -62,6 +61,12 @@ from codex_looper.prompts import (
     load_prompts_for_mode,
     resolve_prompt_defaults,
 )
+from codex_looper.process import (
+    _close_subprocess_transport,
+    _safe_stream_write,
+    _terminate_process_group,
+    run_command as _run_command_impl,
+)
 from codex_looper.retry import (
     format_byte_count,
     format_duration,
@@ -83,6 +88,58 @@ from codex_looper.tmux import (
     tmux_log_tail_command,
     update_current_log_pointer,
 )
+
+__all__ = [
+    "CURRENT_LOG_POINTER_FILENAME",
+    "DEFAULT_COMPLETION_MARKER",
+    "DEFAULT_MAX_LOOPS",
+    "DEFAULT_MAX_TRANSIENT_RETRIES",
+    "DEFAULT_RETRY_NOTIFY_AFTER_SECONDS",
+    "DEFAULT_SEQUENCE_PROMPT_FILE",
+    "DEFAULT_SINGLE_PROMPT_FILE",
+    "DEFAULT_STOP_PATTERNS",
+    "DEFAULT_TIMEOUT_SECONDS",
+    "STREAM_READ_CHUNK_BYTES",
+    "TMUX_STATE_OPTION",
+    "TMUX_STOP_REASON_OPTION",
+    "VERSION",
+    "AgentConfig",
+    "CommandContext",
+    "CommandTemplateError",
+    "ConfigError",
+    "LoadedConfig",
+    "LooperConfig",
+    "LooperMode",
+    "ParsedLine",
+    "ProcessResult",
+    "PromptError",
+    "RunOptions",
+    "TmuxLayout",
+    "_close_subprocess_transport",
+    "_run_git",
+    "_safe_stream_write",
+    "_terminate_process_group",
+    "create_backup_branch",
+    "current_log_pointer_path",
+    "display_tmux_message",
+    "format_byte_count",
+    "format_duration",
+    "format_loop_metrics",
+    "git_workspace_fingerprint",
+    "is_retryable_stop_reason",
+    "load_config",
+    "load_prompts",
+    "load_prompts_for_mode",
+    "parse_output_line",
+    "prune_backup_branches",
+    "resolve_prompt_defaults",
+    "run_command",
+    "run_command_main",
+    "set_tmux_window_option",
+    "start_tmux_log_pane",
+    "tmux_log_tail_command",
+    "update_current_log_pointer",
+]
 
 try:
     import tomllib
@@ -231,54 +288,6 @@ def plan_file_all_tasks_checked(path: Path) -> bool:
     return not markdown_plan_has_unchecked_tasks(path.read_text(encoding="utf-8"))
 
 
-def _safe_stream_write(stream: TextIO, text: str) -> None:
-    try:
-        stream.write(text)
-        stream.flush()
-    except BrokenPipeError:
-        pass
-
-
-async def _terminate_process_group(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGTERM)
-        else:
-            process.terminate()
-    except ProcessLookupError:
-        return
-    except Exception:
-        process.terminate()
-
-    try:
-        await asyncio.wait_for(process.wait(), timeout=10)
-        return
-    except asyncio.TimeoutError:
-        pass
-
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-    except ProcessLookupError:
-        return
-    except Exception:
-        process.kill()
-    await process.wait()
-
-
-async def _close_subprocess_transport(process: asyncio.subprocess.Process) -> None:
-    transport = getattr(process, "_transport", None)
-    close = getattr(transport, "close", None)
-    if not callable(close):
-        return
-    close()
-    await asyncio.sleep(0)
-
-
 async def run_command(
     *,
     command: list[str],
@@ -293,113 +302,22 @@ async def run_command(
     completion_pattern: re.Pattern[str] | None = None,
     stream_output: bool = True,
 ) -> ProcessResult:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    merged_env = os.environ.copy()
-    merged_env.update(env)
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=str(cwd),
-            env=merged_env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=(os.name == "posix"),
-        )
-    except FileNotFoundError as exc:
-        raise ConfigError(f"executable not found: {command[0]}") from exc
-    except PermissionError as exc:
-        raise ConfigError(f"executable is not runnable: {command[0]}") from exc
-
-    result = ProcessResult(returncode=None)
-    stop_event = asyncio.Event()
-
-    async def read_stream(reader: asyncio.StreamReader | None, stream_name: str) -> None:
-        if reader is None:
-            return
-        output_stream = sys.stdout if stream_name == "stdout" else sys.stderr
-
-        def handle_line(raw_line: bytes, log_file: TextIO) -> None:
-            text = raw_line.decode("utf-8", errors="replace")
-            result.output_bytes += len(raw_line)
-            if stream_output:
-                _safe_stream_write(output_stream, text)
-            log_file.write(f"[{utc_stamp()}] {stream_name}: {text}")
-            log_file.flush()
-
-            if completion_pattern and completion_pattern.search(text):
-                result.completion_detected = True
-
-            parsed = parse_output_line(
-                line=text,
-                stream=stream_name,
-                agent_kind=agent_kind,
-                patterns=patterns,
-                scan_stdout=scan_stdout,
-            )
-            if parsed.session_id and not result.session_id:
-                result.session_id = parsed.session_id
-            if parsed.stop_reason and not result.stop_reason:
-                result.stop_reason = parsed.stop_reason
-                result.retry_after_seconds = parsed.retry_after_seconds
-                result.retry_kind = parsed.retry_kind
-                stop_event.set()
-
-        with log_path.open("a", encoding="utf-8") as log_file:
-            pending = bytearray()
-            try:
-                while True:
-                    chunk = await reader.read(STREAM_READ_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    pending.extend(chunk)
-                    while True:
-                        newline_index = pending.find(b"\n")
-                        if newline_index < 0:
-                            break
-                        raw_line = bytes(pending[: newline_index + 1])
-                        del pending[: newline_index + 1]
-                        handle_line(raw_line, log_file)
-                if pending:
-                    handle_line(bytes(pending), log_file)
-            except Exception as exc:
-                message = f"local {stream_name} reader failed: {type(exc).__name__}: {exc}"
-                if not result.stop_reason:
-                    result.stop_reason = message
-                log_file.write(f"[{utc_stamp()}] {stream_name}_reader_error: {message}\n")
-                log_file.flush()
-                stop_event.set()
-                await _terminate_process_group(process)
-
-    async def wait_for_stop() -> None:
-        await stop_event.wait()
-        if kill_on_stop_pattern:
-            await _terminate_process_group(process)
-
-    stdout_task = asyncio.create_task(read_stream(process.stdout, "stdout"))
-    stderr_task = asyncio.create_task(read_stream(process.stderr, "stderr"))
-    stop_task = asyncio.create_task(wait_for_stop())
-
-    try:
-        await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
-    except asyncio.TimeoutError:
-        result.timed_out = True
-        if not result.stop_reason:
-            result.stop_reason = f"local timeout after {timeout_seconds:g} seconds"
-        await _terminate_process_group(process)
-    finally:
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-        if not stop_task.done():
-            stop_task.cancel()
-            await asyncio.gather(stop_task, return_exceptions=True)
-        await _close_subprocess_transport(process)
-
-    result.returncode = process.returncode
-    with log_path.open("a", encoding="utf-8") as log_file:
-        log_file.write(f"[{utc_stamp()}] returncode: {result.returncode}\n")
-        if result.stop_reason:
-            log_file.write(f"[{utc_stamp()}] stop_reason: {result.stop_reason}\n")
-    return result
+    return await _run_command_impl(
+        command=command,
+        cwd=cwd,
+        env=env,
+        timeout_seconds=timeout_seconds,
+        log_path=log_path,
+        agent_kind=agent_kind,
+        patterns=patterns,
+        scan_stdout=scan_stdout,
+        kill_on_stop_pattern=kill_on_stop_pattern,
+        completion_pattern=completion_pattern,
+        stream_output=stream_output,
+        terminate_process_group=_terminate_process_group,
+        close_subprocess_transport=_close_subprocess_transport,
+        utc_stamp_fn=utc_stamp,
+    )
 
 
 def make_label(label: str | None, agent_name: str) -> str:

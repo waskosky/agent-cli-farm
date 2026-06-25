@@ -36,6 +36,7 @@ from .models import (
 )
 from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
 from .prompts import load_prompts, load_prompts_for_mode, resolve_prompt_defaults
+from .process import run_command
 from .retry import (
     format_byte_count,
     format_duration,
@@ -124,6 +125,7 @@ __all__ = [
     "retry_notification_message",
     "retry_status_message",
     "resolve_prompt_defaults",
+    "run_command",
     "run_command_main",
     "set_tmux_window_option",
     "should_notify_retry_wait",
