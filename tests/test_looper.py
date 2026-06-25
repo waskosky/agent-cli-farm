@@ -65,6 +65,13 @@ class LooperCoreTests(unittest.TestCase):
                 ["one", "two", "three"],
             )
 
+    def test_looper_package_exports_core_symbols(self) -> None:
+        import codex_looper
+
+        self.assertEqual(codex_looper.LooperConfig().default_agent, "codex")
+        self.assertTrue(callable(codex_looper.load_config))
+        self.assertTrue(callable(codex_looper.run_command_main))
+
     def test_single_mode_keeps_prompt_file_as_one_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "PROMPT.md"

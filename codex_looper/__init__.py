@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+from functools import lru_cache
+from pathlib import Path
+from types import ModuleType
+
+from .models import (
+    CURRENT_LOG_POINTER_FILENAME,
+    DEFAULT_COMPLETION_MARKER,
+    DEFAULT_MAX_LOOPS,
+    DEFAULT_MAX_TRANSIENT_RETRIES,
+    DEFAULT_RETRY_NOTIFY_AFTER_SECONDS,
+    DEFAULT_SEQUENCE_PROMPT_FILE,
+    DEFAULT_SINGLE_PROMPT_FILE,
+    DEFAULT_STOP_PATTERNS,
+    DEFAULT_TIMEOUT_SECONDS,
+    STREAM_READ_CHUNK_BYTES,
+    TMUX_STATE_OPTION,
+    TMUX_STOP_REASON_OPTION,
+    VERSION,
+    AgentConfig,
+    AgentKind,
+    CommandContext,
+    CommandTemplateError,
+    ConfigError,
+    LoadedConfig,
+    LooperConfig,
+    LooperMode,
+    ParsedLine,
+    ProcessResult,
+    PromptError,
+    RunOptions,
+    TmuxLayout,
+)
+from .prompts import load_prompts, load_prompts_for_mode, resolve_prompt_defaults
+
+
+@lru_cache(maxsize=1)
+def _cli_module() -> ModuleType:
+    repo_root = Path(__file__).resolve().parent.parent
+    looper_path = repo_root / "bin" / "codex-looper.py"
+    spec = importlib.util.spec_from_file_location("_codex_looper_cli", looper_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load looper CLI module from {looper_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_config(*args: object, **kwargs: object) -> object:
+    return _cli_module().load_config(*args, **kwargs)
+
+
+def run_command_main(*args: object, **kwargs: object) -> int:
+    return _cli_module().run_command_main(*args, **kwargs)
+
+
+__all__ = [
+    "CURRENT_LOG_POINTER_FILENAME",
+    "DEFAULT_COMPLETION_MARKER",
+    "DEFAULT_MAX_LOOPS",
+    "DEFAULT_MAX_TRANSIENT_RETRIES",
+    "DEFAULT_RETRY_NOTIFY_AFTER_SECONDS",
+    "DEFAULT_SEQUENCE_PROMPT_FILE",
+    "DEFAULT_SINGLE_PROMPT_FILE",
+    "DEFAULT_STOP_PATTERNS",
+    "DEFAULT_TIMEOUT_SECONDS",
+    "STREAM_READ_CHUNK_BYTES",
+    "TMUX_STATE_OPTION",
+    "TMUX_STOP_REASON_OPTION",
+    "VERSION",
+    "AgentConfig",
+    "AgentKind",
+    "CommandContext",
+    "CommandTemplateError",
+    "ConfigError",
+    "LoadedConfig",
+    "LooperConfig",
+    "LooperMode",
+    "ParsedLine",
+    "ProcessResult",
+    "PromptError",
+    "RunOptions",
+    "TmuxLayout",
+    "load_config",
+    "load_prompts",
+    "load_prompts_for_mode",
+    "resolve_prompt_defaults",
+    "run_command_main",
+]
