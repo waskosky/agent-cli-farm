@@ -34,6 +34,7 @@ from .models import (
     RunOptions,
     TmuxLayout,
 )
+from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
 from .prompts import load_prompts, load_prompts_for_mode, resolve_prompt_defaults
 from .retry import (
     format_byte_count,
@@ -90,6 +91,7 @@ __all__ = [
     "CommandContext",
     "CommandTemplateError",
     "ConfigError",
+    "create_backup_branch",
     "LoadedConfig",
     "LooperConfig",
     "LooperMode",
@@ -104,8 +106,10 @@ __all__ = [
     "format_byte_count",
     "format_duration",
     "format_loop_metrics",
+    "git_workspace_fingerprint",
     "is_retryable_stop_reason",
     "parse_output_line",
+    "prune_backup_branches",
     "retry_delay_seconds",
     "retry_notification_message",
     "retry_status_message",
