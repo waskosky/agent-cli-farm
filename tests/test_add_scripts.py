@@ -1,4 +1,5 @@
 import os
+import socket
 import stat
 import subprocess
 import tempfile
@@ -368,6 +369,31 @@ exit 0
             ],
         )
 
+    def test_codex_memoryflag_handles_first_tmux_socket_under_nounset(self):
+        env = self.env.copy()
+        env["TMUX_TMPDIR"] = str(self.tmpdir / "tmux-tmp")
+        env.pop("TMUX", None)
+        socket_dir = Path(env["TMUX_TMPDIR"]) / "tmux-501"
+        socket_dir.mkdir(parents=True)
+        socket_path = socket_dir / "default"
+
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(sock.close)
+        sock.bind(str(socket_path))
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-memoryflag", "--dry-run"],
+            check=True,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(
+            result.stdout,
+            "Dry run complete: 0 windows scanned, threshold 200 MiB, 0 sockets skipped.\n",
+        )
+
 
 class SaveScriptTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -422,6 +448,8 @@ case "$1" in
       *:1.0'|#{pane_start_command}')
         if [ "${WRAPPED_CODEX_START:-0}" = "1" ]; then
           printf 'tmux set-window-option -q remain-on-exit on >/dev/null 2>&1 || true; exec codex\\n'
+        elif [ "${QUOTED_CODEX_START:-0}" = "1" ]; then
+          printf '"codex "\\n'
         else
           printf 'codex\\n'
         fi
@@ -458,6 +486,9 @@ fi
 set -euo pipefail
 case "$3" in
   101)
+    if [ "${{NO_CODEX_SESSION:-0}}" = "1" ]; then
+      exit 0
+    fi
     printf 'p101\\n'
     printf 'n{codex_session_path}\\n'
     ;;
@@ -541,6 +572,20 @@ esac
             "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
             rows,
         )
+
+    def test_codex_save_trims_quoted_command_with_trailing_space(self):
+        env = self.env.copy()
+        env["QUOTED_CODEX_START"] = "1"
+        env["NO_CODEX_SESSION"] = "1"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        rows = self.manifest.read_text(encoding="utf-8").splitlines()
+        self.assertIn("proj\t/tmp/project\tcodex\tresume --last", rows)
 
     def test_codex_save_all_registered_writes_each_registered_manifest(self):
         registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm" / "farms.tsv"

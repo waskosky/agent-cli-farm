@@ -190,9 +190,11 @@ add_socket() {
   local socket="$1"
   local existing
   [ -S "$socket" ] || return 0
-  for existing in "${sockets[@]}"; do
-    [ "$existing" = "$socket" ] && return 0
-  done
+  if [ "${#sockets[@]}" -gt 0 ]; then
+    for existing in "${sockets[@]}"; do
+      [ "$existing" = "$socket" ] && return 0
+    done
+  fi
   sockets+=("$socket")
 }
 
@@ -216,15 +218,30 @@ ps_file="$(mktemp)"
 trap 'rm -f "$ps_file"' EXIT
 ps -eo pid=,ppid=,rss= > "$ps_file"
 
-declare -A window_owner=()
-declare -A window_socket=()
-declare -A window_session=()
-declare -A window_id_by_key=()
-declare -A window_index=()
-declare -A window_name=()
-declare -A window_pids=()
 window_keys=()
+window_owner=()
+window_socket=()
+window_session=()
+window_id_by_key=()
+window_index=()
+window_name=()
+window_pids=()
 skipped_sockets=0
+
+find_window_slot() {
+  local wanted="$1"
+  local i=0
+
+  while [ "$i" -lt "${#window_keys[@]}" ]; do
+    if [ "${window_keys[$i]}" = "$wanted" ]; then
+      printf '%s\n' "$i"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+
+  return 1
+}
 
 for socket in "${sockets[@]}"; do
   owner="$(socket_owner "$socket")"
@@ -236,18 +253,19 @@ for socket in "${sockets[@]}"; do
   while IFS=$'\t' read -r session window_id index name pane_pid; do
     [ -n "${window_id:-}" ] || continue
     key="${owner}|${socket}|${window_id}"
-    if [ -z "${window_name[$key]+x}" ]; then
+    if ! slot="$(find_window_slot "$key")"; then
+      slot="${#window_keys[@]}"
       window_keys+=("$key")
-      window_owner[$key]="$owner"
-      window_socket[$key]="$socket"
-      window_session[$key]="$session"
-      window_id_by_key[$key]="$window_id"
-      window_index[$key]="$index"
-      window_name[$key]="$name"
-      window_pids[$key]=""
+      window_owner+=("$owner")
+      window_socket+=("$socket")
+      window_session+=("$session")
+      window_id_by_key+=("$window_id")
+      window_index+=("$index")
+      window_name+=("$name")
+      window_pids+=("")
     fi
     if [[ "${pane_pid:-}" =~ ^[0-9]+$ ]]; then
-      window_pids[$key]="${window_pids[$key]} $pane_pid"
+      window_pids[$slot]="${window_pids[$slot]} $pane_pid"
     fi
   done <<< "$output"
 done
@@ -257,18 +275,20 @@ cleared=0
 unchanged=0
 rename_failed=0
 
-for key in "${window_keys[@]}"; do
-  rss_kb="$(rss_for_roots "${window_pids[$key]}")"
+i=0
+while [ "$i" -lt "${#window_keys[@]}" ]; do
+  rss_kb="$(rss_for_roots "${window_pids[$i]}")"
   should_mark=0
   if [ "$rss_kb" -ge "$threshold_kb" ]; then
     should_mark=1
   fi
 
-  old_name="${window_name[$key]}"
+  old_name="${window_name[$i]}"
   new_name="$(normalize_title "$old_name" "$should_mark")"
 
   if [ "$old_name" = "$new_name" ]; then
     unchanged=$((unchanged + 1))
+    i=$((i + 1))
     continue
   fi
 
@@ -279,22 +299,23 @@ for key in "${window_keys[@]}"; do
 
   printf '%s\t%s\t%s:%s\t%.1f MiB\t%s -> %s\n' \
     "$action" \
-    "${window_owner[$key]}" \
-    "${window_session[$key]}" \
-    "${window_index[$key]}" \
+    "${window_owner[$i]}" \
+    "${window_session[$i]}" \
+    "${window_index[$i]}" \
     "$(awk -v kb="$rss_kb" 'BEGIN { printf "%.1f", kb / 1024 }')" \
     "$old_name" \
     "$new_name"
 
   if [ "$dry_run" -eq 1 ]; then
+    i=$((i + 1))
     continue
   fi
 
-  window_target="${window_id_by_key[$key]}"
-  run_tmux "${window_owner[$key]}" "${window_socket[$key]}" set-window-option -t "$window_target" automatic-rename off >/dev/null 2>&1 || true
-  run_tmux "${window_owner[$key]}" "${window_socket[$key]}" set-window-option -t "$window_target" allow-rename off >/dev/null 2>&1 || true
+  window_target="${window_id_by_key[$i]}"
+  run_tmux "${window_owner[$i]}" "${window_socket[$i]}" set-window-option -t "$window_target" automatic-rename off >/dev/null 2>&1 || true
+  run_tmux "${window_owner[$i]}" "${window_socket[$i]}" set-window-option -t "$window_target" allow-rename off >/dev/null 2>&1 || true
 
-  if run_tmux "${window_owner[$key]}" "${window_socket[$key]}" rename-window -t "$window_target" "$new_name" >/dev/null 2>&1; then
+  if run_tmux "${window_owner[$i]}" "${window_socket[$i]}" rename-window -t "$window_target" "$new_name" >/dev/null 2>&1; then
     if [ "$should_mark" -eq 1 ]; then
       marked=$((marked + 1))
     else
@@ -303,6 +324,7 @@ for key in "${window_keys[@]}"; do
   else
     rename_failed=$((rename_failed + 1))
   fi
+  i=$((i + 1))
 done
 
 if [ "$dry_run" -eq 1 ]; then
