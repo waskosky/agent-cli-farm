@@ -35,6 +35,19 @@ from .models import (
     TmuxLayout,
 )
 from .prompts import load_prompts, load_prompts_for_mode, resolve_prompt_defaults
+from .retry import (
+    format_byte_count,
+    format_duration,
+    format_loop_metrics,
+    is_retryable_stop_reason,
+    parse_output_line,
+    retry_delay_seconds,
+    retry_notification_message,
+    retry_status_message,
+    should_notify_retry_wait,
+    transient_retry_limit_message,
+    transient_retry_limit_reached,
+)
 
 
 @lru_cache(maxsize=1)
@@ -88,6 +101,17 @@ __all__ = [
     "load_config",
     "load_prompts",
     "load_prompts_for_mode",
+    "format_byte_count",
+    "format_duration",
+    "format_loop_metrics",
+    "is_retryable_stop_reason",
+    "parse_output_line",
+    "retry_delay_seconds",
+    "retry_notification_message",
+    "retry_status_message",
     "resolve_prompt_defaults",
     "run_command_main",
+    "should_notify_retry_wait",
+    "transient_retry_limit_message",
+    "transient_retry_limit_reached",
 ]
