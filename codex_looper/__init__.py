@@ -49,6 +49,14 @@ from .retry import (
     transient_retry_limit_message,
     transient_retry_limit_reached,
 )
+from .tmux import (
+    current_log_pointer_path,
+    display_tmux_message,
+    set_tmux_window_option,
+    start_tmux_log_pane,
+    tmux_log_tail_command,
+    update_current_log_pointer,
+)
 
 
 @lru_cache(maxsize=1)
@@ -92,6 +100,8 @@ __all__ = [
     "CommandTemplateError",
     "ConfigError",
     "create_backup_branch",
+    "current_log_pointer_path",
+    "display_tmux_message",
     "LoadedConfig",
     "LooperConfig",
     "LooperMode",
@@ -115,7 +125,11 @@ __all__ = [
     "retry_status_message",
     "resolve_prompt_defaults",
     "run_command_main",
+    "set_tmux_window_option",
     "should_notify_retry_wait",
+    "start_tmux_log_pane",
+    "tmux_log_tail_command",
     "transient_retry_limit_message",
     "transient_retry_limit_reached",
+    "update_current_log_pointer",
 ]
