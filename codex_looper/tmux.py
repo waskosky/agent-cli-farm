@@ -5,6 +5,7 @@ import secrets
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from .models import CURRENT_LOG_POINTER_FILENAME, RunOptions
@@ -32,6 +33,10 @@ def current_log_pointer_path(run_dir: Path) -> Path:
     return run_dir / CURRENT_LOG_POINTER_FILENAME
 
 
+def transcript_renderer_command() -> str:
+    return shlex.join([sys.executable, "-u", str(Path(sys.argv[0]).resolve()), "transcript-log"])
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
@@ -48,6 +53,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
 def tmux_log_tail_command(*, pointer_path: Path, supervisor_pid: int) -> str:
     pointer = shlex.quote(str(pointer_path))
     supervisor = shlex.quote(str(supervisor_pid))
+    renderer = transcript_renderer_command()
     return (
         "export CODEX_LOOPER_TAIL_PANE=1; "
         f"pointer={pointer}; supervisor={supervisor}; "
@@ -61,7 +67,7 @@ def tmux_log_tail_command(*, pointer_path: Path, supervisor_pid: int) -> str:
         'wait "$tail_pid" 2>/dev/null || true; '
         "fi; "
         'printf "\\n==> %s <==\\n" "$next"; '
-        'tail -n +1 -F "$next" & tail_pid=$!; last="$next"; '
+        f'tail -n +1 -F "$next" | {renderer} & tail_pid=$!; last="$next"; '
         "fi; "
         "sleep 1; "
         "done; "

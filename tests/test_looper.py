@@ -503,6 +503,67 @@ fresh_session_per_loop = "false"
         self.assertEqual(thread.session_id, "thread-abc")
         self.assertIsNotNone(stopped.stop_reason)
 
+    def test_format_agent_log_line_renders_claude_text_event(self) -> None:
+        line = (
+            '[20260625T052249Z] stdout: {"type":"assistant","message":{"role":"assistant",'
+            '"content":[{"type":"text","text":"Exactly my 5 files staged."}]}}\n'
+        )
+
+        self.assertEqual(
+            self.looper.format_agent_log_line(line),
+            "Exactly my 5 files staged.",
+        )
+
+    def test_format_agent_log_line_summarizes_tool_use_and_result(self) -> None:
+        tool_use = (
+            '[20260625T052302Z] stdout: {"type":"assistant","message":{"content":['
+            '{"type":"tool_use","name":"Bash","input":{"command":"git status",'
+            '"description":"Check status"}}]}}\n'
+        )
+        tool_result = (
+            '[20260625T052302Z] stdout: {"type":"user","message":{"content":['
+            '{"type":"tool_result","content":"On branch main","is_error":false}]}}\n'
+        )
+
+        self.assertEqual(
+            self.looper.format_agent_log_line(tool_use),
+            "tool: Bash - Check status\n$ git status",
+        )
+        self.assertEqual(
+            self.looper.format_agent_log_line(tool_result),
+            "tool result:\nOn branch main",
+        )
+
+    def test_format_agent_log_line_skips_opaque_thinking_events(self) -> None:
+        system_line = (
+            '[20260625T052405Z] stdout: {"type":"system","subtype":"thinking_tokens",'
+            '"estimated_tokens":350}\n'
+        )
+        assistant_thinking = (
+            '[20260625T052249Z] stdout: {"type":"assistant","message":{"content":['
+            '{"type":"thinking","thinking":"","signature":"opaque"}]}}\n'
+        )
+
+        self.assertIsNone(self.looper.format_agent_log_line(system_line))
+        self.assertIsNone(self.looper.format_agent_log_line(assistant_thinking))
+
+    def test_transcript_log_cli_renders_human_readable_stdin(self) -> None:
+        line = (
+            '[20260625T052249Z] stdout: {"type":"assistant","message":{"role":"assistant",'
+            '"content":[{"type":"text","text":"Readable note"}]}}\n'
+        )
+
+        result = subprocess.run(
+            [sys.executable, str(LOOPER_PATH), "transcript-log"],
+            input=line,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "Readable note\n")
+
     def test_timeout_closes_subprocess_transport(self) -> None:
         async def exercise() -> tuple[object, object]:
             stdout = asyncio.StreamReader()
@@ -919,6 +980,7 @@ fresh_session_per_loop = "false"
         self.assertIn("-d", split_commands[0])
         self.assertIn("current-log.path", split_commands[0][-1])
         self.assertIn("tail -n +1 -F", split_commands[0][-1])
+        self.assertIn("transcript-log", split_commands[0][-1])
         self.assertIn("loop-0001__prompt-001.log", pointer_text)
         self.assertEqual(len(run_command_calls), 1)
         self.assertIn("stream_output", run_command_calls[0])

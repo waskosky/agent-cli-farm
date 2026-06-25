@@ -75,8 +75,10 @@ from .tmux import (
     set_tmux_window_option,
     start_tmux_log_pane,
     tmux_log_tail_command,
+    transcript_renderer_command,
     update_current_log_pointer,
 )
+from .transcript import format_agent_log_line, split_logged_line, transcript_log_main
 
 __all__ = [
     "CURRENT_LOG_POINTER_FILENAME",
@@ -118,6 +120,7 @@ __all__ = [
     "current_log_pointer_path",
     "default_agents",
     "display_tmux_message",
+    "format_agent_log_line",
     "format_byte_count",
     "format_duration",
     "format_loop_metrics",
@@ -149,8 +152,11 @@ __all__ = [
     "run_loop_sync",
     "set_tmux_window_option",
     "should_notify_retry_wait",
+    "split_logged_line",
     "start_tmux_log_pane",
     "tmux_log_tail_command",
+    "transcript_log_main",
+    "transcript_renderer_command",
     "transient_retry_limit_message",
     "transient_retry_limit_reached",
     "update_current_log_pointer",

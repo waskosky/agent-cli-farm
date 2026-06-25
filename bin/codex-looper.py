@@ -141,8 +141,10 @@ from codex_looper.tmux import (
     set_tmux_window_option,
     start_tmux_log_pane,
     tmux_log_tail_command,
+    transcript_renderer_command,
     update_current_log_pointer,
 )
+from codex_looper.transcript import format_agent_log_line, split_logged_line, transcript_log_main
 
 __all__ = [
     "CURRENT_LOG_POINTER_FILENAME",
@@ -197,6 +199,7 @@ __all__ = [
     "display_tmux_message",
     "doctor_main",
     "first_run_main",
+    "format_agent_log_line",
     "format_byte_count",
     "format_duration",
     "format_loop_metrics",
@@ -242,8 +245,11 @@ __all__ = [
     "set_tmux_window_option",
     "should_notify_retry_wait",
     "split_agent_args",
+    "split_logged_line",
     "start_tmux_log_pane",
     "tmux_log_tail_command",
+    "transcript_log_main",
+    "transcript_renderer_command",
     "transient_retry_limit_message",
     "transient_retry_limit_reached",
     "update_current_log_pointer",
@@ -352,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
         add_run_arguments(run_parser, default_agent=default_agent)
         subparsers.add_parser("init", help="create starter files")
         subparsers.add_parser("doctor", help="check local dependencies")
+        subparsers.add_parser("transcript-log", help="render raw looper JSONL logs")
         parser.print_help()
         return 0
 
@@ -363,6 +370,8 @@ def main(argv: list[str] | None = None) -> int:
         return init_main(rest)
     if command == "doctor":
         return doctor_main(rest)
+    if command == "transcript-log":
+        return transcript_log_main(rest, prog=f"{display_name()} transcript-log")
 
     return run_command_main(real_argv, default_agent=default_agent)
 
