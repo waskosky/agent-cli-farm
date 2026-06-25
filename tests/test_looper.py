@@ -751,8 +751,9 @@ scan_stdout_for_stop_patterns = true
         )
 
     def test_run_loop_split_layout_opens_tail_pane_and_tracks_current_log(self) -> None:
-        async def exercise() -> tuple[int, list[list[str]], str]:
+        async def exercise() -> tuple[int, list[list[str]], list[dict[str, object]], str]:
             tmux_commands: list[list[str]] = []
+            run_command_calls: list[dict[str, object]] = []
             original_run_command = self.looper.run_command
             original_sleep = self.looper.asyncio.sleep
             original_subprocess_run = self.looper.subprocess.run
@@ -760,6 +761,7 @@ scan_stdout_for_stop_patterns = true
             original_tmux = self.looper.os.environ.get("TMUX")
 
             async def fake_run_command(**kwargs: object) -> object:
+                run_command_calls.append(kwargs)
                 return self.looper.ProcessResult(returncode=0)
 
             async def fake_sleep(seconds: float) -> None:
@@ -806,7 +808,7 @@ scan_stdout_for_stop_patterns = true
                     result = await self.looper.run_loop(agent=agent, looper=looper, options=options)
                     pointer_path = next((root / "runs").glob("*/current-log.path"))
                     pointer_text = pointer_path.read_text(encoding="utf-8")
-                    return result, tmux_commands, pointer_text
+                    return result, tmux_commands, run_command_calls, pointer_text
             finally:
                 self.looper.run_command = original_run_command
                 self.looper.asyncio.sleep = original_sleep
@@ -817,7 +819,7 @@ scan_stdout_for_stop_patterns = true
                 else:
                     self.looper.os.environ["TMUX"] = original_tmux
 
-        result, tmux_commands, pointer_text = asyncio.run(exercise())
+        result, tmux_commands, run_command_calls, pointer_text = asyncio.run(exercise())
 
         self.assertEqual(result, 0)
         split_commands = [command for command in tmux_commands if command[:2] == ["tmux", "split-window"]]
@@ -826,6 +828,9 @@ scan_stdout_for_stop_patterns = true
         self.assertIn("current-log.path", split_commands[0][-1])
         self.assertIn("tail -n +1 -F", split_commands[0][-1])
         self.assertIn("loop-0001__prompt-001.log", pointer_text)
+        self.assertEqual(len(run_command_calls), 1)
+        self.assertIn("stream_output", run_command_calls[0])
+        self.assertFalse(run_command_calls[0]["stream_output"])
 
     def test_run_loop_notifies_for_long_retry_delay(self) -> None:
         async def exercise() -> list[str]:

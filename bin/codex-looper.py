@@ -756,6 +756,7 @@ async def run_command(
     scan_stdout: bool,
     kill_on_stop_pattern: bool,
     completion_pattern: re.Pattern[str] | None = None,
+    stream_output: bool = True,
 ) -> ProcessResult:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     merged_env = os.environ.copy()
@@ -781,7 +782,8 @@ async def run_command(
         def handle_line(raw_line: bytes, log_file: TextIO) -> None:
             text = raw_line.decode("utf-8", errors="replace")
             result.output_bytes += len(raw_line)
-            _safe_stream_write(output_stream, text)
+            if stream_output:
+                _safe_stream_write(output_stream, text)
             log_file.write(f"[{utc_stamp()}] {stream_name}: {text}")
             log_file.flush()
 
@@ -1120,6 +1122,7 @@ async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOpti
                     ),
                     kill_on_stop_pattern=looper.kill_on_stop_pattern,
                     completion_pattern=completion_pattern,
+                    stream_output=not tail_pane_active,
                 )
 
                 if result.completion_detected:
