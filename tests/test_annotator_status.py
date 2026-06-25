@@ -68,6 +68,34 @@ class AnnotatorStatusTests(unittest.TestCase):
             "RUN",
         )
 
+    def test_node_launched_codex_uses_prompt_classification(self):
+        pane = self.mod.PaneInfo(
+            pid="%1",
+            current_command="node",
+            start_command="/usr/local/bin/codex",
+            dead=False,
+        )
+        self.mod.capture_pane_output = lambda pane_id, *, verbose: "work complete\n\u276f\n"
+
+        self.assertEqual(
+            self.mod.classify_pane(pane, self.mod.re.compile(r"node"), verbose=False),
+            "READY",
+        )
+
+    def test_node_launched_claude_uses_prompt_classification(self):
+        pane = self.mod.PaneInfo(
+            pid="%1",
+            current_command="node",
+            start_command="/usr/local/bin/claude",
+            dead=False,
+        )
+        self.mod.capture_pane_output = lambda pane_id, *, verbose: "result\n> "
+
+        self.assertEqual(
+            self.mod.classify_pane(pane, self.mod.re.compile(r"node"), verbose=False),
+            "READY",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

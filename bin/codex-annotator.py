@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import fcntl
+import math
 import os
 import re
 import subprocess
@@ -20,7 +21,6 @@ DEFAULT_SESSION_PATTERN = os.environ.get("CODEX_ANNOTATOR_SESSION_REGEX", r"^cod
 DEFAULT_RUNNING_PATTERN = os.environ.get(
     "CODEX_ANNOTATOR_RUNNING_REGEX", r"(codex|node|ssh)"
 )
-DEFAULT_INTERVAL = float(os.environ.get("CODEX_ANNOTATOR_INTERVAL", "1.0"))
 DEFAULT_ENABLED = os.environ.get("CODEX_ANNOTATOR_ENABLED", "1").lower() not in {
     "0",
     "false",
@@ -68,6 +68,26 @@ CLAUDE_WAITING_PROMPT_PATTERN = r"\u276f.*\d+\."
 CLAUDE_PROCESSING_PATTERN = (
     r"[\u2736\u2722\u273d\u273b\u00b7\u2733].*\u2026.*\(esc to interrupt.*\)"
 )
+
+
+def parse_positive_interval(value: str) -> float:
+    try:
+        interval = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("interval must be a positive finite number") from exc
+    if not math.isfinite(interval) or interval <= 0:
+        raise argparse.ArgumentTypeError("interval must be a positive finite number")
+    return interval
+
+
+def default_interval_from_env(value: str) -> float:
+    try:
+        return parse_positive_interval(value)
+    except argparse.ArgumentTypeError:
+        return 1.0
+
+
+DEFAULT_INTERVAL = default_interval_from_env(os.environ.get("CODEX_ANNOTATOR_INTERVAL", "1.0"))
 
 
 def parse_capture_lines(value: str) -> int:
@@ -128,16 +148,18 @@ def memory_flag_prefix(name: str) -> str:
 
 def run_tmux(cmd: List[str], *, verbose: bool) -> Optional[str]:
     try:
-        return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         log("tmux not found; annotator exiting", verbose=verbose)
         return None
-    except subprocess.CalledProcessError as exc:
-        log(
-            f"tmux command failed ({' '.join(cmd)})",
-            verbose=verbose,
-        )
+    if result.returncode != 0:
+        detail = result.stderr.strip()
+        if detail:
+            log(f"tmux command failed ({' '.join(cmd)}): {detail}", verbose=verbose)
+        else:
+            log(f"tmux command failed ({' '.join(cmd)})", verbose=verbose)
         return None
+    return result.stdout
 
 
 def list_sessions(verbose: bool) -> List[SessionInfo]:
@@ -339,15 +361,16 @@ def classify_pane(
 ) -> Optional[str]:
     if pane.dead:
         return None
-    if is_looper_command(pane.current_command) or is_looper_command(pane.start_command):
+    command_context = f"{pane.current_command} {pane.start_command}".strip()
+    if is_looper_command(command_context):
         return "RUN"
-    if is_codex_command(pane.current_command):
+    if is_codex_command(command_context):
         output = capture_pane_output(pane.pid, verbose=verbose)
         return classify_codex_output(output)
-    if is_claude_command(pane.current_command):
+    if is_claude_command(command_context):
         output = capture_pane_output(pane.pid, verbose=verbose)
         return classify_claude_output(output)
-    if running_regex.search(pane.current_command):
+    if running_regex.search(command_context):
         return "RUN"
     return "READY"
 
@@ -408,7 +431,10 @@ def set_window_status(window: WindowInfo, *, ready_at: Optional[float], verbose:
 
 
 def notify_ready(window: WindowInfo, message_template: str, *, verbose: bool) -> None:
-    message = message_template.format(name=window.base_name, state=window.state or "")
+    try:
+        message = message_template.format(name=window.base_name, state=window.state or "")
+    except (IndexError, KeyError, ValueError):
+        message = f"READY: {window.base_name}"
     run_tmux(["tmux", "display-message", "-t", window.wid, message], verbose=verbose)
 
 
@@ -482,6 +508,10 @@ def annotate_once(
                 rename_window(window, verbose=verbose)
             if state_cache is not None:
                 state_cache[window.wid] = window.state
+    if state_cache is not None:
+        for wid in list(state_cache):
+            if wid not in seen_windows:
+                del state_cache[wid]
 
 
 def parse_args() -> argparse.Namespace:
@@ -490,7 +520,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--interval",
-        type=float,
+        type=parse_positive_interval,
         default=DEFAULT_INTERVAL,
         help="Polling interval in seconds (default: %(default)s)",
     )
@@ -535,17 +565,27 @@ def main() -> int:
         return 0
 
     args = parse_args()
+    try:
+        session_pattern = re.compile(args.session_regex)
+        running_pattern = re.compile(args.running_regex)
+    except re.error as exc:
+        print(f"Invalid regular expression: {exc}", file=sys.stderr)
+        return 2
 
-    os.makedirs(os.path.dirname(LOCKFILE), exist_ok=True)
-    with open(LOCKFILE, "w") as lock:
+    lock_dir = os.path.dirname(LOCKFILE)
+    if lock_dir:
+        os.makedirs(lock_dir, exist_ok=True)
+    with open(LOCKFILE, "w", encoding="utf-8") as lock:
+        try:
+            os.chmod(LOCKFILE, 0o600)
+        except OSError:
+            pass
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             log("Annotator already running; exiting.", verbose=args.verbose)
             return 0
 
-        session_pattern = re.compile(args.session_regex)
-        running_pattern = re.compile(args.running_regex)
         state_cache: dict[str, str] = {}
 
         while True:
@@ -563,7 +603,7 @@ def main() -> int:
                 log(f"Annotator loop error: {exc}", verbose=args.verbose)
             if args.once:
                 break
-            time.sleep(max(args.interval, 0.1))
+            time.sleep(args.interval)
     return 0
 
 

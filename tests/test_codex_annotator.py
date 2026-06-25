@@ -1,5 +1,8 @@
+import argparse
 import importlib.machinery
 import importlib.util
+import os
+import subprocess
 import sys
 import re
 import tempfile
@@ -224,6 +227,74 @@ class AnnotatorWindowTests(unittest.TestCase):
 
         self.assertEqual(item.base_name, "alpha")
         self.assertEqual(annotator.desired_name(item), "*512+MB** *READY* alpha")
+
+    def test_invalid_ready_template_falls_back_safely(self):
+        annotator = load_annotator_module()
+        stub = RunTmuxStub()
+        annotator.run_tmux = stub  # type: ignore[assignment]
+        state_cache = {"@2": "RUN"}
+
+        annotator.annotate_once(
+            re.compile(r"^codex"),
+            re.compile(r"python"),
+            state_cache=state_cache,
+            update_titles=False,
+            notify_on_ready=True,
+            ready_message="{missing",
+            now=1234,
+            verbose=False,
+        )
+
+        self.assertIn(["tmux", "display-message", "-t", "@2", "READY: beta"], stub.commands)
+
+    def test_annotation_prunes_stale_cached_windows(self):
+        annotator = load_annotator_module()
+        stub = RunTmuxStub()
+        annotator.run_tmux = stub  # type: ignore[assignment]
+        state_cache = {"@1": "RUN", "@gone": "RUN"}
+
+        annotator.annotate_once(
+            re.compile(r"^codex"),
+            re.compile(r"python"),
+            state_cache=state_cache,
+            update_titles=False,
+            notify_on_ready=False,
+            verbose=False,
+        )
+
+        self.assertNotIn("@gone", state_cache)
+
+    def test_interval_validation_rejects_non_finite_values(self):
+        annotator = load_annotator_module()
+
+        for value in ["0", "-1", "nan", "inf", "-inf"]:
+            with self.subTest(value=value):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    annotator.parse_positive_interval(value)
+
+    def test_cli_handles_lockfile_without_directory_and_invalid_regex(self):
+        annotator_path = Path(__file__).resolve().parent.parent / "bin" / "codex-annotator.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env["CODEX_ANNOTATOR_LOCKFILE"] = "annotator.lock"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(annotator_path),
+                    "--once",
+                    "--session-regex",
+                    "[",
+                ],
+                cwd=tmp,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Invalid regular expression", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":

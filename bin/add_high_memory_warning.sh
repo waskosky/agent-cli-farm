@@ -2,11 +2,12 @@
 set -euo pipefail
 
 DEFAULT_THRESHOLD_MB=200
+PROGRAM_NAME="${CODEX_MEMORYFLAG_PROGRAM_NAME:-$(basename "$0")}"
 
 usage() {
-  cat <<'EOF'
-Usage: add_high_memory_warning.sh [THRESHOLD_MB]
-       add_high_memory_warning.sh --threshold THRESHOLD_MB [--dry-run]
+  cat <<EOF
+Usage: $PROGRAM_NAME [THRESHOLD_MB]
+       $PROGRAM_NAME --threshold THRESHOLD_MB [--dry-run]
 
 Prefix tmux window titles whose pane process trees use at least the threshold RSS.
 The default threshold is 200 MiB, which adds a marker like *200+MB**.
@@ -19,7 +20,7 @@ EOF
 }
 
 die() {
-  echo "add_high_memory_warning.sh: $*" >&2
+  echo "$PROGRAM_NAME: $*" >&2
   exit 1
 }
 
@@ -81,11 +82,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-command -v tmux >/dev/null 2>&1 || die "tmux is required"
-command -v awk >/dev/null 2>&1 || die "awk is required"
-command -v ps >/dev/null 2>&1 || die "ps is required"
-command -v sed >/dev/null 2>&1 || die "sed is required"
-command -v stat >/dev/null 2>&1 || die "stat is required"
+for required_command in tmux awk ps sed stat id; do
+  command -v "$required_command" >/dev/null 2>&1 || die "$required_command is required"
+done
 
 threshold_mb="$(parse_threshold_mb "$threshold_arg")"
 threshold_kb=$((threshold_mb * 1024))
@@ -94,19 +93,20 @@ current_user="$(id -un)"
 current_uid="$(id -u)"
 
 run_tmux() {
-  local owner="$1"
-  local socket="$2"
-  shift 2
+  local socket="$1"
+  shift
 
-  if [ "$current_uid" -eq 0 ] && [ "$owner" != "$current_user" ] && command -v runuser >/dev/null 2>&1; then
-    runuser -u "$owner" -- tmux -S "$socket" "$@"
-  else
-    tmux -S "$socket" "$@"
-  fi
+  tmux -S "$socket" "$@"
 }
 
-socket_owner() {
-  stat -c '%U' "$1" 2>/dev/null || printf '%s\n' "$current_user"
+socket_uid() {
+  if stat -c '%u' "$1" >/dev/null 2>&1; then
+    stat -c '%u' "$1"
+  elif stat -f '%u' "$1" >/dev/null 2>&1; then
+    stat -f '%u' "$1"
+  else
+    return 1
+  fi
 }
 
 trim_spaces() {
@@ -188,8 +188,10 @@ shopt -s nullglob
 sockets=()
 add_socket() {
   local socket="$1"
-  local existing
+  local existing uid
   [ -S "$socket" ] || return 0
+  uid="$(socket_uid "$socket" || true)"
+  [ "$uid" = "$current_uid" ] || return 0
   if [ "${#sockets[@]}" -gt 0 ]; then
     for existing in "${sockets[@]}"; do
       [ "$existing" = "$socket" ] && return 0
@@ -210,7 +212,7 @@ for tmux_dir in "${TMUX_TMPDIR:-/tmp}"/tmux-*; do
 done
 
 if [ "${#sockets[@]}" -eq 0 ]; then
-  echo "No tmux sockets found."
+  echo "No current-user tmux sockets found."
   exit 0
 fi
 
@@ -244,8 +246,8 @@ find_window_slot() {
 }
 
 for socket in "${sockets[@]}"; do
-  owner="$(socket_owner "$socket")"
-  if ! output="$(run_tmux "$owner" "$socket" list-panes -a -F '#{session_name}	#{window_id}	#{window_index}	#{window_name}	#{pane_pid}' 2>/dev/null)"; then
+  owner="$current_user"
+  if ! output="$(run_tmux "$socket" list-panes -a -F '#{session_name}	#{window_id}	#{window_index}	#{window_name}	#{pane_pid}' 2>/dev/null)"; then
     skipped_sockets=$((skipped_sockets + 1))
     continue
   fi
@@ -312,10 +314,10 @@ while [ "$i" -lt "${#window_keys[@]}" ]; do
   fi
 
   window_target="${window_id_by_key[$i]}"
-  run_tmux "${window_owner[$i]}" "${window_socket[$i]}" set-window-option -t "$window_target" automatic-rename off >/dev/null 2>&1 || true
-  run_tmux "${window_owner[$i]}" "${window_socket[$i]}" set-window-option -t "$window_target" allow-rename off >/dev/null 2>&1 || true
+  run_tmux "${window_socket[$i]}" set-window-option -t "$window_target" automatic-rename off >/dev/null 2>&1 || true
+  run_tmux "${window_socket[$i]}" set-window-option -t "$window_target" allow-rename off >/dev/null 2>&1 || true
 
-  if run_tmux "${window_owner[$i]}" "${window_socket[$i]}" rename-window -t "$window_target" "$new_name" >/dev/null 2>&1; then
+  if run_tmux "${window_socket[$i]}" rename-window -t "$window_target" "$new_name" >/dev/null 2>&1; then
     if [ "$should_mark" -eq 1 ]; then
       marked=$((marked + 1))
     else
