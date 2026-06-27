@@ -37,6 +37,12 @@ RELATIVE_RETRY_DELAY_KEYS = (
     "resetAfter",
 )
 ABSOLUTE_RETRY_RESET_KEYS = ("resetsAt", "reset_at", "resetAt")
+INFORMATIONAL_SYSTEM_SUBTYPES = {
+    "task_notification",
+    "task_started",
+    "task_updated",
+    "thinking_tokens",
+}
 
 
 def _json_blob(value: Any) -> str:
@@ -220,6 +226,9 @@ def parse_output_line(
             and data.get("is_error") is not True
             and data.get("api_error_status") in {None, ""}
         ):
+            return parsed
+
+        if event_type == "system" and subtype in INFORMATIONAL_SYSTEM_SUBTYPES:
             return parsed
 
         error_like = (

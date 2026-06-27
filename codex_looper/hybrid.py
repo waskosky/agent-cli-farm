@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-
 UUID_PATTERN = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
@@ -164,7 +163,9 @@ def assess_claude_hybrid_signals(
     assistant_event_seen = any(
         event.role == "assistant" or event.event_type == "assistant" for event in tail.events
     )
-    user_event_seen = any(event.role == "user" or event.event_type == "user" for event in tail.events)
+    user_event_seen = any(
+        event.role == "user" or event.event_type == "user" for event in tail.events
+    )
 
     normalized_state = pane_state.upper()
     if normalized_state == "ERR":
