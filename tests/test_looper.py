@@ -448,6 +448,39 @@ fresh_session_per_loop = "false"
 
         self.assertIsNone(parsed.stop_reason)
 
+    def test_stop_signal_parsing_ignores_claude_task_metadata_timeout_text(self) -> None:
+        patterns = self.looper.compile_stop_patterns(self.looper.DEFAULT_STOP_PATTERNS)
+        lines = [
+            {
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "abc123",
+                "tool_use_id": "toolu_123",
+                "description": "Run focused tests with timeout",
+                "task_type": "local_bash",
+            },
+            {
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": "abc123",
+                "tool_use_id": "toolu_123",
+                "status": "stopped",
+                "summary": "Run focused tests with timeout",
+            },
+        ]
+
+        for line in lines:
+            with self.subTest(subtype=line["subtype"]):
+                parsed = self.looper.parse_output_line(
+                    line=json.dumps(line),
+                    stream="stdout",
+                    agent_kind="claude",
+                    patterns=patterns,
+                    scan_stdout=False,
+                )
+
+                self.assertIsNone(parsed.stop_reason)
+
     def test_stop_signal_parsing_ignores_allowed_rate_limit_event(self) -> None:
         patterns = self.looper.compile_stop_patterns([r"rate[\s_-]*limit"])
 
