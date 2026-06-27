@@ -1064,9 +1064,9 @@ fresh_session_per_loop = "false"
                     state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
                     events = [
                         json.loads(line)
-                        for line in (
-                            run_dir / "events.jsonl"
-                        ).read_text(encoding="utf-8").splitlines()
+                        for line in (run_dir / "events.jsonl")
+                        .read_text(encoding="utf-8")
+                        .splitlines()
                     ]
                     return result, state, events
             finally:
