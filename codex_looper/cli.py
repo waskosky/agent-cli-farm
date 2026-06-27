@@ -99,6 +99,11 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
         "-l", "--label", help="human-readable run/session/log label; does not rename tmux windows"
     )
     parser.add_argument(
+        "--interface",
+        choices=("json", "hybrid"),
+        help="agent interface override; Claude defaults to hybrid, json keeps the non-interactive stream-json path",
+    )
+    parser.add_argument(
         "--tmux-layout",
         choices=("auto", "single", "split"),
         default=default_tmux_layout_from_env(),
@@ -222,6 +227,7 @@ def parse_run_options(
         mode=args.mode,
         prompt_file=Path(args.prompt_file) if args.prompt_file else None,
         agent_args=list(agent_args or []),
+        agent_interface=args.interface,
         label=args.label,
         timeout_seconds=args.timeout,
         sleep_seconds=args.sleep,
@@ -300,6 +306,8 @@ def run_command_main(
             raise ConfigError(f"unknown agent {agent_name!r}; available: {available}")
         looper = apply_run_options(loaded.looper, options)
         agent: AgentConfig = loaded.agents[agent_name]
+        if options.agent_interface is not None:
+            agent = replace(agent, interface=options.agent_interface)
         result = run_loop_sync_fn(agent=agent, looper=looper, options=options)
     except (ConfigError, PromptError, CommandTemplateError) as exc:
         print(f"looper error: {exc}", file=sys.stderr)

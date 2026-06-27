@@ -93,6 +93,8 @@ claude-looper
 claude-looper -- --dangerously-skip-permissions
 ```
 
+`claude-looper` defaults to a hybrid interface: the real Claude TTY stays visible in a tmux pane while the looper tracks session JSONL files for turn completion. Use `claude-looper --interface json` when you specifically need the older noninteractive stream-json mode.
+
 For bounded smoke runs, legacy prompt sequences, completion-gated loops, or named farms:
 ```bash
 codex-looper --once --label repo-smoke
@@ -278,7 +280,7 @@ Annotator-specific:
 
 Tool-specific:
 - `claude-add` and `gemini-add` honor `CLAUDE_*` or `GEMINI_*` versions of the common launch variables. For save/restore/resume/status/watch/board commands, select the farm with `CODEX_SESSION` or the command's positional/`--session` argument where supported.
-- `codex-looper` and `claude-looper` pass native agent flags after `--`, for example `claude-looper --once -- --dangerously-skip-permissions`. Built-in Codex and Claude agents can also set `model` and `effort` in `[agents.*]` config. The Claude flag is spelled `--dangerously-skip-permissions` and should only be used in isolated workspaces where unattended edits are acceptable.
+- `codex-looper` and `claude-looper` pass native agent flags after `--`, for example `claude-looper --once -- --dangerously-skip-permissions`. Built-in Codex and Claude agents can also set `model` and `effort` in `[agents.*]` config. Claude uses `interface = "hybrid"` by default; set `--interface json` or `[agents.claude].interface = "json"` for the older stream-json path. The Claude flag is spelled `--dangerously-skip-permissions` and should only be used in isolated workspaces where unattended edits are acceptable.
 
 Example:
 ```bash

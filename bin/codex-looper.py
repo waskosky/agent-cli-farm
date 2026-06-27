@@ -60,6 +60,12 @@ from codex_looper.git_safety import (
     git_workspace_fingerprint,
     prune_backup_branches,
 )
+from codex_looper.hybrid import (
+    ClaudeHybridController,
+    TmuxCommandResult,
+    build_claude_hybrid_command,
+    tmux_split_window_command,
+)
 from codex_looper.init import (
     EXAMPLE_CONFIG,
     EXAMPLE_PROMPTS,
@@ -89,6 +95,7 @@ from codex_looper.models import (
     TMUX_STOP_REASON_OPTION,
     VERSION,
     AgentConfig,
+    AgentInterface,
     CommandContext,
     CommandTemplateError,
     ConfigError,
@@ -101,6 +108,7 @@ from codex_looper.models import (
     RunOptions,
     TmuxLayout,
 )
+from codex_looper.pane_status import classify_claude_output, classify_codex_output
 from codex_looper.process import (
     _close_subprocess_transport,
     _safe_stream_write,
@@ -165,6 +173,8 @@ __all__ = [
     "TMUX_STOP_REASON_OPTION",
     "VERSION",
     "AgentConfig",
+    "AgentInterface",
+    "ClaudeHybridController",
     "CommandContext",
     "CommandTemplateError",
     "ConfigError",
@@ -176,6 +186,7 @@ __all__ = [
     "PromptError",
     "RunOptions",
     "TmuxLayout",
+    "TmuxCommandResult",
     "_ask",
     "_ask_nonnegative_int",
     "_ask_nonnegative_number",
@@ -188,8 +199,11 @@ __all__ = [
     "agent_extra_args",
     "apply_run_options",
     "build_command",
+    "build_claude_hybrid_command",
     "build_example_config",
     "clean_farm_args",
+    "classify_claude_output",
+    "classify_codex_output",
     "compile_completion_marker",
     "compile_stop_patterns",
     "create_backup_branch",
@@ -250,6 +264,7 @@ __all__ = [
     "split_logged_line",
     "start_tmux_log_pane",
     "tmux_log_tail_command",
+    "tmux_split_window_command",
     "transcript_log_main",
     "transcript_renderer_command",
     "transient_retry_limit_message",
@@ -296,17 +311,30 @@ async def run_command(
     )
 
 
-async def run_loop(*, agent: AgentConfig, looper: LooperConfig, options: RunOptions) -> int:
+async def run_loop(
+    *,
+    agent: AgentConfig,
+    looper: LooperConfig,
+    options: RunOptions,
+    run_command_fn: Any | None = None,
+    run_claude_hybrid_turn_fn: Any | None = None,
+    set_tmux_window_option_fn: Any | None = None,
+    display_tmux_message_fn: Any | None = None,
+    start_tmux_log_pane_fn: Any | None = None,
+    update_current_log_pointer_fn: Any | None = None,
+    sleep_fn: Any | None = None,
+) -> int:
     return await _runner.run_loop(
         agent=agent,
         looper=looper,
         options=options,
-        run_command_fn=run_command,
-        set_tmux_window_option_fn=set_tmux_window_option,
-        display_tmux_message_fn=display_tmux_message,
-        start_tmux_log_pane_fn=start_tmux_log_pane,
-        update_current_log_pointer_fn=update_current_log_pointer,
-        sleep_fn=asyncio.sleep,
+        run_command_fn=run_command_fn or run_command,
+        run_claude_hybrid_turn_fn=run_claude_hybrid_turn_fn or _runner.run_claude_hybrid_turn,
+        set_tmux_window_option_fn=set_tmux_window_option_fn or set_tmux_window_option,
+        display_tmux_message_fn=display_tmux_message_fn or display_tmux_message,
+        start_tmux_log_pane_fn=start_tmux_log_pane_fn or start_tmux_log_pane,
+        update_current_log_pointer_fn=update_current_log_pointer_fn or update_current_log_pointer,
+        sleep_fn=sleep_fn or asyncio.sleep,
     )
 
 
@@ -326,13 +354,20 @@ def maybe_launch_farm(options: RunOptions, original_argv: list[str]) -> int | No
     return _farm.maybe_launch_farm(options, original_argv)
 
 
-def run_command_main(argv: list[str] | None = None, *, default_agent: str | None = None) -> int:
+def run_command_main(
+    argv: list[str] | None = None,
+    *,
+    default_agent: str | None = None,
+    load_config_fn: Any | None = None,
+    run_loop_sync_fn: Any | None = None,
+    maybe_launch_farm_fn: Any | None = None,
+) -> int:
     return _cli.run_command_main(
         argv,
         default_agent=default_agent,
-        load_config_fn=load_config,
-        run_loop_sync_fn=run_loop_sync,
-        maybe_launch_farm_fn=maybe_launch_farm,
+        load_config_fn=load_config_fn or load_config,
+        run_loop_sync_fn=run_loop_sync_fn or run_loop_sync,
+        maybe_launch_farm_fn=maybe_launch_farm_fn or maybe_launch_farm,
     )
 
 

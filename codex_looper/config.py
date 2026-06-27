@@ -283,9 +283,16 @@ def _optional_str(value: Any, key: str) -> str | None:
     return value
 
 
+def _agent_interface(value: Any, key: str, default: str) -> str:
+    interface = _as_str(value, key, default, nonempty=True)
+    if interface not in {"json", "hybrid"}:
+        raise ConfigError(f"{key} must be json or hybrid")
+    return interface
+
+
 def default_agents() -> dict[str, AgentConfig]:
     return {
-        "claude": AgentConfig(name="claude", kind="claude"),
+        "claude": AgentConfig(name="claude", kind="claude", interface="hybrid"),
         "codex": AgentConfig(name="codex", kind="codex"),
         "gemini": AgentConfig(
             name="gemini",
@@ -502,9 +509,17 @@ def load_config(
         )
         if kind not in {"claude", "codex", "generic"}:
             raise ConfigError(f"agents.{name}.kind must be claude, codex, or generic")
+        interface = _agent_interface(
+            value.get("interface"),
+            f"agents.{name}.interface",
+            base.interface if base else "json",
+        )
+        if interface == "hybrid" and kind != "claude":
+            raise ConfigError(f"agents.{name}.interface hybrid is currently only supported for claude")
         agents[name] = AgentConfig(
             name=name,
             kind=kind,  # type: ignore[arg-type]
+            interface=interface,  # type: ignore[arg-type]
             cwd=_path(value.get("cwd"), base.cwd if base else Path(".")),
             extra_args=_as_str_list(value.get("extra_args"), f"agents.{name}.extra_args")
             or (base.extra_args if base else []),
@@ -512,6 +527,10 @@ def load_config(
             or (base.model if base else None),
             effort=_optional_str(value.get("effort"), f"agents.{name}.effort")
             or (base.effort if base else None),
+            interactive_command=(
+                _as_str_list(value.get("interactive_command"), f"agents.{name}.interactive_command")
+                or (base.interactive_command if base else None)
+            ),
             first_command=(
                 _as_str_list(value.get("first_command"), f"agents.{name}.first_command")
                 or (base.first_command if base else None)

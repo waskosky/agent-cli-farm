@@ -15,6 +15,7 @@ from typing import Any
 
 from .agents import build_command
 from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
+from .hybrid import ClaudeHybridController, build_claude_hybrid_command
 from .models import (
     TMUX_STATE_OPTION,
     TMUX_STOP_REASON_OPTION,
@@ -54,6 +55,7 @@ from .tmux import (
 )
 
 RunCommandFn = Callable[..., Awaitable[ProcessResult]]
+RunClaudeHybridTurnFn = Callable[..., Awaitable[ProcessResult]]
 SetTmuxWindowOptionFn = Callable[[str, str], None]
 DisplayTmuxMessageFn = Callable[[str], None]
 StartTmuxLogPaneFn = Callable[[Path, RunOptions], bool]
@@ -129,6 +131,28 @@ async def run_command(
     )
 
 
+async def run_claude_hybrid_turn(
+    *,
+    controller: ClaudeHybridController,
+    prompt: str,
+    timeout_seconds: float,
+    log_path: Path,
+    patterns: list[re.Pattern[str]],
+    completion_pattern: re.Pattern[str] | None,
+    session_name: str,
+    session_id: str,
+) -> ProcessResult:
+    del session_name, session_id
+    return await asyncio.to_thread(
+        controller.run_turn,
+        prompt=prompt,
+        timeout_seconds=timeout_seconds,
+        log_path=log_path,
+        completion_pattern=completion_pattern,
+        stop_patterns=patterns,
+    )
+
+
 def make_label(label: str | None, agent_name: str) -> str:
     if label:
         return label
@@ -191,6 +215,7 @@ async def run_loop(
     looper: LooperConfig,
     options: RunOptions,
     run_command_fn: RunCommandFn = run_command,
+    run_claude_hybrid_turn_fn: RunClaudeHybridTurnFn = run_claude_hybrid_turn,
     set_tmux_window_option_fn: SetTmuxWindowOptionFn = set_tmux_window_option,
     display_tmux_message_fn: DisplayTmuxMessageFn = display_tmux_message,
     start_tmux_log_pane_fn: StartTmuxLogPaneFn = start_tmux_log_pane,
@@ -216,6 +241,19 @@ async def run_loop(
     if options.agent_args:
         agent = replace(agent, extra_args=[*agent.extra_args, *options.agent_args])
 
+    use_claude_hybrid = agent.interface == "hybrid"
+    if use_claude_hybrid and agent.kind != "claude":
+        raise ConfigError("hybrid interface is currently only supported for claude agents")
+    claude_hybrid_controller = (
+        ClaudeHybridController(
+            command=build_claude_hybrid_command(agent),
+            cwd=agent.cwd,
+            env=agent.env,
+        )
+        if use_claude_hybrid
+        else None
+    )
+
     state = LooperStateRecorder(
         run_dir,
         {
@@ -224,6 +262,7 @@ async def run_loop(
             "label": label,
             "agent_name": agent.name,
             "agent_kind": agent.kind,
+            "agent_interface": agent.interface,
             "agent_cwd": str(agent.cwd),
             "config_path": str(options.config_path),
             "prompt_file": str(looper.prompt_file),
@@ -252,11 +291,12 @@ async def run_loop(
         )
         return exit_code
 
-    tail_pane_active = start_tmux_log_pane_fn(run_dir, options)
+    tail_pane_active = False if use_claude_hybrid else start_tmux_log_pane_fn(run_dir, options)
     set_tmux_window_option_fn(TMUX_STATE_OPTION, "RUN")
     set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, "")
 
     print(f"agent: {agent.name} ({agent.kind})")
+    print(f"interface: {agent.interface}")
     print(f"label: {label}")
     print(f"mode: {looper.mode}")
     print(f"prompts: {len(prompts)} from {looper.prompt_file}")
@@ -354,11 +394,14 @@ async def run_loop(
                     label=label,
                     run_dir=run_dir,
                 )
-                command = build_command(
-                    agent=agent,
-                    context=context,
-                    is_first_prompt_in_session=attempt_first_prompt_in_session,
-                )
+                if use_claude_hybrid:
+                    command = build_claude_hybrid_command(agent)
+                else:
+                    command = build_command(
+                        agent=agent,
+                        context=context,
+                        is_first_prompt_in_session=attempt_first_prompt_in_session,
+                    )
 
                 print(f"\n--- prompt {prompt_index}/{len(prompts)} ---")
                 if retry_count:
@@ -376,21 +419,36 @@ async def run_loop(
                     )
                     break
 
-                result = await run_command_fn(
-                    command=command,
-                    cwd=agent.cwd,
-                    env=agent.env,
-                    timeout_seconds=looper.timeout_seconds,
-                    log_path=log_path,
-                    agent_kind=agent.kind,
-                    patterns=patterns,
-                    scan_stdout=(
-                        looper.scan_stdout_for_stop_patterns or agent.scan_stdout_for_stop_patterns
-                    ),
-                    kill_on_stop_pattern=looper.kill_on_stop_pattern,
-                    completion_pattern=completion_pattern,
-                    stream_output=not tail_pane_active,
-                )
+                if use_claude_hybrid:
+                    if claude_hybrid_controller is None:
+                        raise ConfigError("Claude hybrid controller was not initialized")
+                    result = await run_claude_hybrid_turn_fn(
+                        controller=claude_hybrid_controller,
+                        prompt=prompt,
+                        timeout_seconds=looper.timeout_seconds,
+                        log_path=log_path,
+                        patterns=patterns,
+                        completion_pattern=completion_pattern,
+                        session_name=session_name,
+                        session_id=session_id,
+                    )
+                else:
+                    result = await run_command_fn(
+                        command=command,
+                        cwd=agent.cwd,
+                        env=agent.env,
+                        timeout_seconds=looper.timeout_seconds,
+                        log_path=log_path,
+                        agent_kind=agent.kind,
+                        patterns=patterns,
+                        scan_stdout=(
+                            looper.scan_stdout_for_stop_patterns
+                            or agent.scan_stdout_for_stop_patterns
+                        ),
+                        kill_on_stop_pattern=looper.kill_on_stop_pattern,
+                        completion_pattern=completion_pattern,
+                        stream_output=not tail_pane_active,
+                    )
 
                 if result.completion_detected:
                     loop_completion_detected = True

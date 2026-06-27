@@ -15,6 +15,23 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+SCRIPT_DIR_FOR_IMPORTS = Path(__file__).resolve().parent
+for import_root in (SCRIPT_DIR_FOR_IMPORTS.parent, SCRIPT_DIR_FOR_IMPORTS):
+    if (import_root / "codex_looper").is_dir():
+        sys.path.insert(0, str(import_root))
+        break
+
+from codex_looper.pane_status import (
+    ANSI_CODE_PATTERN,
+    aggregate_window_state,
+    classify_claude_output,
+    classify_codex_output,
+    is_claude_command,
+    is_codex_command,
+    strip_ansi,
+)
 
 DEFAULT_SESSION_PATTERN = os.environ.get("CODEX_ANNOTATOR_SESSION_REGEX", r"^codex")
 DEFAULT_RUNNING_PATTERN = os.environ.get("CODEX_ANNOTATOR_RUNNING_REGEX", r"(codex|node|ssh)")
@@ -49,23 +66,6 @@ IGNORE_PREFIX = os.environ.get("CODEX_ANNOTATOR_IGNORE_PREFIX", "!")
 MEMORY_FLAG_PATTERN = r"\*[0-9]+(?:\.[0-9]+)?\+MB\*\*"
 TMUX_STATE_OPTION = "@codex_state"
 TMUX_LAST_READY_OPTION = "@codex_last_ready"
-
-ANSI_CODE_PATTERN = r"\x1b\[[0-9;]*m"
-CODEX_IDLE_PROMPT_PATTERN = r"(?:\u276f|\u203a|codex>)"
-CODEX_IDLE_PROMPT_AT_END_PATTERN = rf"(?:^\s*{CODEX_IDLE_PROMPT_PATTERN}\s*$)\s*\Z"
-CODEX_WAITING_PROMPT_PATTERN = r"^(?:Approve|Allow)\b.*\b(?:y/n|yes/no|yes|no)\b"
-CODEX_ERROR_PATTERN = r"^(?:Error:|ERROR:|Traceback \(most recent call last\):|panic:)"
-CODEX_PROCESSING_PATTERN = r"\b(thinking|working|running|executing|processing|analyzing)\b"
-CODEX_USER_PREFIX_PATTERN = r"^You\b"
-CODEX_ASSISTANT_PREFIX_PATTERN = r"^(?:assistant|codex|agent)\s*:"
-
-CLAUDE_IDLE_PROMPT_PATTERN = r">(?:\s|\u00a0)"
-CLAUDE_IDLE_PROMPT_AT_END_PATTERN = rf"(?:^\s*{CLAUDE_IDLE_PROMPT_PATTERN}\s*$)\s*\Z"
-CLAUDE_WAITING_PROMPT_PATTERN = r"\u276f.*\d+\."
-CLAUDE_PROCESSING_PATTERN = (
-    r"[\u2736\u2722\u273d\u273b\u00b7\u2733].*\u2026.*\(esc to interrupt.*\)"
-)
-
 
 def parse_positive_interval(value: str) -> float:
     try:
@@ -241,32 +241,11 @@ def window_pane_states(wid: str, *, verbose: bool) -> list[PaneInfo] | None:
     return panes
 
 
-def strip_ansi(text: str) -> str:
-    return re.sub(ANSI_CODE_PATTERN, "", text)
-
-
-def tail_lines(text: str, lines: int = 50) -> str:
-    return "\n".join(text.splitlines()[-lines:])
-
-
-def non_empty_tail_lines(text: str, lines: int = 8) -> str:
-    recent = [line for line in text.splitlines() if line.strip()]
-    return "\n".join(recent[-lines:])
-
-
 def capture_pane_output(pane_id: str, *, verbose: bool) -> str | None:
     return run_tmux(
         ["tmux", "capture-pane", "-t", pane_id, "-e", "-p", "-S", f"-{CAPTURE_LINES}"],
         verbose=verbose,
     )
-
-
-def is_codex_command(cmd: str) -> bool:
-    return bool(re.search(r"\bcodex\b", cmd, re.IGNORECASE))
-
-
-def is_claude_command(cmd: str) -> bool:
-    return bool(re.search(r"\bclaude\b", cmd, re.IGNORECASE))
 
 
 def is_looper_command(cmd: str) -> bool:
@@ -277,77 +256,6 @@ def is_looper_command(cmd: str) -> bool:
             re.IGNORECASE,
         )
     )
-
-
-def classify_codex_output(output: str | None) -> str:
-    if not output:
-        return "ERR"
-    clean = strip_ansi(output)
-    tail_output = tail_lines(clean)
-    last_user = None
-    for match in re.finditer(CODEX_USER_PREFIX_PATTERN, clean, re.IGNORECASE | re.MULTILINE):
-        last_user = match
-
-    output_after_last_user = clean[last_user.start() :] if last_user else clean
-    assistant_after_last_user = bool(
-        last_user
-        and re.search(
-            CODEX_ASSISTANT_PREFIX_PATTERN,
-            output_after_last_user,
-            re.IGNORECASE | re.MULTILINE,
-        )
-    )
-
-    if last_user is not None:
-        if not assistant_after_last_user:
-            if re.search(
-                CODEX_WAITING_PROMPT_PATTERN,
-                output_after_last_user,
-                re.IGNORECASE | re.MULTILINE,
-            ):
-                return "READY"
-            if re.search(
-                CODEX_ERROR_PATTERN,
-                output_after_last_user,
-                re.IGNORECASE | re.MULTILINE,
-            ):
-                return "ERR"
-    else:
-        if re.search(CODEX_WAITING_PROMPT_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
-            return "READY"
-        if re.search(CODEX_ERROR_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
-            return "ERR"
-
-    if re.search(CODEX_IDLE_PROMPT_AT_END_PATTERN, tail_output, re.IGNORECASE | re.MULTILINE):
-        return "READY"
-
-    if re.search(CODEX_PROCESSING_PATTERN, non_empty_tail_lines(clean), re.IGNORECASE):
-        return "RUN"
-    return "READY"
-
-
-def classify_claude_output(output: str | None) -> str:
-    if not output:
-        return "ERR"
-    clean = strip_ansi(output)
-    tail_output = tail_lines(clean)
-    if re.search(CLAUDE_WAITING_PROMPT_PATTERN, tail_output, re.MULTILINE):
-        return "READY"
-    if re.search(CLAUDE_PROCESSING_PATTERN, tail_output, re.MULTILINE):
-        return "RUN"
-    if re.search(CLAUDE_IDLE_PROMPT_AT_END_PATTERN, tail_output, re.MULTILINE):
-        return "READY"
-    return "READY"
-
-
-def aggregate_window_state(states: list[str]) -> str:
-    if not states:
-        return "ERR"
-    if "RUN" in states:
-        return "RUN"
-    if "ERR" in states:
-        return "ERR"
-    return "READY"
 
 
 def classify_pane(

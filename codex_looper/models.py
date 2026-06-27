@@ -6,6 +6,7 @@ from typing import Literal
 
 VERSION = "0.3.1"
 AgentKind = Literal["claude", "codex", "generic"]
+AgentInterface = Literal["json", "hybrid"]
 LooperMode = Literal["single", "sequence"]
 TmuxLayout = Literal["auto", "single", "split"]
 TMUX_STATE_OPTION = "@codex_state"
@@ -51,10 +52,12 @@ class CommandTemplateError(ValueError):
 class AgentConfig:
     name: str
     kind: AgentKind
+    interface: AgentInterface = "json"
     cwd: Path = Path(".")
     extra_args: list[str] = field(default_factory=list)
     model: str | None = None
     effort: str | None = None
+    interactive_command: list[str] | None = None
     first_command: list[str] | None = None
     resume_command: list[str] | None = None
     env: dict[str, str] = field(default_factory=dict)
@@ -104,6 +107,7 @@ class RunOptions:
     mode: LooperMode | None = None
     prompt_file: Path | None = None
     agent_args: list[str] = field(default_factory=list)
+    agent_interface: AgentInterface | None = None
     label: str | None = None
     timeout_seconds: float | None = None
     sleep_seconds: float | None = None

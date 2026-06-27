@@ -11,10 +11,13 @@ Prove that a future Claude hybrid looper can keep the real Claude Code TTY visib
 - The controller can tail session files by byte offset so each loop only considers new events.
 - Prompt injection can use tmux buffers and paste commands so prompt text is not shell-quoted into argv.
 
-## Current Scope
+## Implemented Rollout
 
-This is proof-of-concept support code and tests only. It does not add a user-facing `--interface hybrid` mode yet.
+Claude now defaults to `interface = "hybrid"` for built-in looper runs. The production path creates a visible Claude tmux pane, pastes prompts through tmux buffers, tails Claude session JSONL files by byte offset, and feeds the same looper `state.json` / `events.jsonl` lifecycle records as the JSON subprocess path. The older stream-json subprocess mode remains available with `--interface json` or `[agents.claude].interface = "json"`.
 
-## Next Implementation Step
+## Future Priorities
 
-Add a Claude TTY controller that creates or targets a Claude pane, pastes prompts into it, polls pane state plus `assess_claude_hybrid_signals()`, and writes the existing looper `state.json` / `events.jsonl` records from controller decisions.
+1. Add a live, opt-in smoke script that runs a disposable tmux/Claude hybrid session and verifies two consecutive prompts complete.
+2. Add richer diagnostics to `events.jsonl` for hybrid confidence transitions: pane state, session path discovery source, and last event type.
+3. Decide whether workspace trust prompts should support a documented manual recovery flow or a deliberately named opt-in automation flag.
+4. Evaluate a central dashboard for `.agent-looper/runs/*/state.json` aggregation across VMs.

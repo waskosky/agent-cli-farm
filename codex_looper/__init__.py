@@ -14,15 +14,19 @@ from .config import (
 from .farm import clean_farm_args, maybe_launch_farm
 from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
 from .hybrid import (
+    ClaudeHybridController,
     ClaudeHybridAssessment,
     ClaudeSessionEvent,
     ClaudeSessionTail,
+    TmuxCommandResult,
     assess_claude_hybrid_signals,
+    build_claude_hybrid_command,
     extract_session_id_from_claude_session,
     extract_uuid_from_session_path,
     parse_claude_session_line,
     read_new_claude_session_events,
     tmux_prompt_paste_commands,
+    tmux_split_window_command,
 )
 from .init import write_starter_files
 from .models import (
@@ -40,6 +44,7 @@ from .models import (
     TMUX_STOP_REASON_OPTION,
     VERSION,
     AgentConfig,
+    AgentInterface,
     AgentKind,
     CommandContext,
     CommandTemplateError,
@@ -54,6 +59,14 @@ from .models import (
     TmuxLayout,
 )
 from .process import _close_subprocess_transport, _safe_stream_write, _terminate_process_group
+from .pane_status import (
+    aggregate_window_state,
+    classify_claude_output,
+    classify_codex_output,
+    is_claude_command,
+    is_codex_command,
+    strip_ansi,
+)
 from .prompts import load_prompts, load_prompts_for_mode, resolve_prompt_defaults
 from .retry import (
     format_byte_count,
@@ -106,7 +119,9 @@ __all__ = [
     "TMUX_STOP_REASON_OPTION",
     "VERSION",
     "AgentConfig",
+    "AgentInterface",
     "AgentKind",
+    "ClaudeHybridController",
     "ClaudeHybridAssessment",
     "ClaudeSessionEvent",
     "ClaudeSessionTail",
@@ -121,13 +136,18 @@ __all__ = [
     "PromptError",
     "RunOptions",
     "TmuxLayout",
+    "TmuxCommandResult",
     "_close_subprocess_transport",
     "_safe_stream_write",
     "_terminate_process_group",
     "agent_extra_args",
+    "aggregate_window_state",
     "assess_claude_hybrid_signals",
     "apply_run_options",
     "build_command",
+    "build_claude_hybrid_command",
+    "classify_claude_output",
+    "classify_codex_output",
     "clean_farm_args",
     "compile_completion_marker",
     "compile_stop_patterns",
@@ -142,6 +162,8 @@ __all__ = [
     "format_duration",
     "format_loop_metrics",
     "git_workspace_fingerprint",
+    "is_claude_command",
+    "is_codex_command",
     "is_retryable_stop_reason",
     "load_config",
     "load_prompts",
@@ -173,8 +195,10 @@ __all__ = [
     "should_notify_retry_wait",
     "split_logged_line",
     "start_tmux_log_pane",
+    "strip_ansi",
     "tmux_log_tail_command",
     "tmux_prompt_paste_commands",
+    "tmux_split_window_command",
     "transcript_log_main",
     "transcript_renderer_command",
     "transient_retry_limit_message",

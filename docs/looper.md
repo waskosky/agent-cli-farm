@@ -82,13 +82,14 @@ Use `--once` or `--max-loops N` for bounded runs. Without either, the looper rep
 
 ## CLI Options
 
-Values are resolved in this order: built-in defaults, project config, preset config, environment layout defaults where documented, and finally CLI flags. Agent-native argv after `--` is appended to built-in Codex/Claude command templates for that invocation.
+Values are resolved in this order: built-in defaults, project config, preset config, environment layout defaults where documented, and finally CLI flags. Agent-native argv after `--` is appended to built-in Codex/Claude command templates for that invocation. For Claude's default hybrid interface, those argv tokens are appended to the visible interactive `claude` pane command.
 
 Numeric constraints are strict. Integer counters must be whole numbers and finite; values documented as nonnegative accept `0`; values documented as positive must be greater than `0`. Float seconds must be finite and nonnegative unless the row says positive.
 
 | Option | Default | Constraint | Purpose |
 | --- | --- | --- | --- |
 | `--agent NAME` | `[looper].default_agent` or wrapper default | nonempty string | Selects an agent config from `agent-looper.toml`. |
+| `--interface json\|hybrid` | agent config | enum | Override the selected agent interface for this run. `hybrid` is currently Claude-only. |
 | `--config PATH` | `agent-looper.toml` | path string | Project config file path. Missing config is allowed. |
 | `--preset NAME_OR_PATH` | unset | name or path string | Layer a preset TOML file over project config. Named presets resolve from `${XDG_CONFIG_HOME:-~/.config}/codexfarm/presets/` and repo `examples/presets/`. |
 | `--mode single\|sequence` | `single`, with legacy inference | enum | Select prompt loading mode. |
@@ -124,6 +125,8 @@ Numeric constraints are strict. Integer counters must be whole numbers and finit
 
 Use `--` for one-off agent-native flags. For Claude, the correct spelling is `--dangerously-skip-permissions`; local Claude help recommends it only for isolated sandboxes. To make it permanent for a project, put the same values in `[agents.claude].extra_args`.
 
+`claude-looper` defaults to `interface = "hybrid"`. The hybrid interface starts a visible Claude TTY pane, pastes prompts into that pane, reads Claude's session JSONL files for session identity and turn advancement, and keeps the supervisor pane focused on loop state. Use `--interface json` or `[agents.claude].interface = "json"` to force the older noninteractive `claude -p --output-format stream-json` path.
+
 ## Config Defaults
 
 Starter `agent-looper.toml` defaults:
@@ -156,7 +159,7 @@ Agent defaults:
 | Agent | Command behavior |
 | --- | --- |
 | `codex` | First prompt: `codex exec --json <prompt>`; later prompts resume by Codex thread ID when available, otherwise `resume --last`. |
-| `claude` | First prompt: `claude -p --output-format stream-json --verbose --name <session> <prompt>`; later prompts use `--resume <session>`. |
+| `claude` | Default hybrid: start a visible `claude` TTY pane once, paste each prompt, and detect turn completion from pane readiness plus Claude session JSONL advancement. With `interface = "json"`: first prompt uses `claude -p --output-format stream-json --verbose --name <session> <prompt>`; later prompts use `--resume <session>`. |
 | `gemini` | Generic default: `gemini -p <prompt>` for every prompt. Override this if your Gemini CLI supports a better noninteractive/resume mode. |
 
 Built-in Codex and Claude agents accept `model` and `effort` config sugar. These fields are appended after `extra_args` as `--model <value>` and `--effort <value>`:
@@ -170,11 +173,21 @@ extra_args = ["--sandbox", "workspace-write"]
 
 [agents.claude]
 kind = "claude"
+interface = "hybrid"
 model = "claude-opus-4-8"
 effort = "max"
 ```
 
-Custom `first_command` and `resume_command` templates fully control their argv, so include model or effort flags directly in those templates when using a custom command.
+Use `interactive_command` when Claude hybrid mode should launch a wrapper or profile command instead of the built-in `claude` executable:
+
+```toml
+[agents.claude]
+kind = "claude"
+interface = "hybrid"
+interactive_command = ["claude-wrapper", "--profile", "loop"]
+```
+
+Custom `first_command`, `resume_command`, and `interactive_command` values fully control their argv, so include model or effort flags directly in those values when using custom commands.
 
 Strict TOML typing is part of the contract:
 
@@ -184,8 +197,8 @@ Strict TOML typing is part of the contract:
 | `looper.timeout_seconds`, `sleep_seconds`, `retry_notify_after_seconds` | finite integer or float |
 | `looper.max_loops`, `max_transient_retries`, `completion_streak`, `backup_keep`, `cb_no_progress`, `cb_output_decline` | integer |
 | `looper.fresh_session_per_loop`, `completion_enabled`, `backup_enabled` | boolean |
-| `agents.<name>.kind`, `model`, `effort` | string |
-| `agents.<name>.extra_args`, `first_command`, `resume_command`, `stop_patterns` | array of strings |
+| `agents.<name>.kind`, `interface`, `model`, `effort` | string |
+| `agents.<name>.extra_args`, `interactive_command`, `first_command`, `resume_command`, `stop_patterns` | array of strings |
 | `agents.<name>.scan_stdout_for_stop_patterns` | boolean |
 
 Wrong scalar types, non-finite numbers, invalid regexes, and empty values for documented nonempty fields fail during configuration instead of being coerced silently.
@@ -318,6 +331,7 @@ codex-status loopers
 - It is a loop runner, not a scheduler, daemon, queue, or web UI.
 - It does not bypass authentication, permissions, sandboxing, or provider limits unless you explicitly pass agent-native flags that do so.
 - Provider status and stop detection are heuristic because Codex/Claude/Gemini CLIs do not expose a shared structured status protocol.
+- Claude hybrid mode requires tmux because the real Claude interface lives in a managed pane. Use `--interface json` for local non-tmux runs or scripted noninteractive behavior.
 - The Gemini backend is intentionally generic until a stable noninteractive resume interface is confirmed.
 - There is no per-worktree run lock. Starting multiple write-enabled loopers against the same checkout can race or overwrite work.
 - Backup branches protect committed `HEAD`, not dirty worktree state.

@@ -72,6 +72,7 @@ class LooperCoreTests(unittest.TestCase):
         self.assertEqual(codex_looper.LooperConfig().default_agent, "codex")
         self.assertTrue(callable(codex_looper.load_config))
         self.assertTrue(callable(codex_looper.run_command_main))
+        self.assertTrue(callable(codex_looper.classify_claude_output))
 
     def test_looper_package_exports_remaining_runtime_modules(self) -> None:
         import codex_looper.agents as agents
@@ -342,6 +343,44 @@ class LooperCoreTests(unittest.TestCase):
             ],
         )
 
+    def test_default_claude_agent_uses_hybrid_interface(self) -> None:
+        agents = self.looper.default_agents()
+
+        self.assertEqual(agents["claude"].interface, "hybrid")
+        self.assertEqual(agents["codex"].interface, "json")
+
+    def test_config_can_force_claude_json_interface(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "agent-looper.toml"
+            path.write_text(
+                """
+[agents.claude]
+kind = "claude"
+interface = "json"
+""",
+                encoding="utf-8",
+            )
+
+            loaded = self.looper.load_config(path)
+
+        self.assertEqual(loaded.agents["claude"].interface, "json")
+
+    def test_config_rejects_hybrid_for_non_claude_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "agent-looper.toml"
+            path.write_text(
+                """
+[agents.worker]
+kind = "generic"
+interface = "hybrid"
+first_command = ["agent", "{prompt}"]
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(self.looper.ConfigError, "hybrid.*claude"):
+                self.looper.load_config(path)
+
     def test_load_config_falls_back_when_tomllib_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "agent-looper.toml"
@@ -369,6 +408,11 @@ extra_args = ["--sandbox", "workspace-write"]
 model = "gpt-5.4"
 effort = "high"
 env = { CODEX_HOME = ".codex" }
+
+[agents.claude]
+kind = "claude"
+interface = "hybrid"
+interactive_command = ["claude-wrapper", "--profile", "loop"]
 
 [agents.gemini]
 kind = "generic"
@@ -399,6 +443,11 @@ scan_stdout_for_stop_patterns = true
         self.assertEqual(loaded.agents["codex"].model, "gpt-5.4")
         self.assertEqual(loaded.agents["codex"].effort, "high")
         self.assertEqual(loaded.agents["codex"].env["CODEX_HOME"], ".codex")
+        self.assertEqual(loaded.agents["claude"].interface, "hybrid")
+        self.assertEqual(
+            loaded.agents["claude"].interactive_command,
+            ["claude-wrapper", "--profile", "loop"],
+        )
         self.assertEqual(loaded.agents["gemini"].first_command, ["gemini", "-p", "{prompt}"])
         self.assertTrue(loaded.agents["gemini"].scan_stdout_for_stop_patterns)
 
@@ -1103,6 +1152,120 @@ fresh_session_per_loop = "false"
         self.assertEqual(events[-1]["status"], "stopped")
         self.assertEqual(events[-1]["stop_reason"], "max loops reached: 1")
 
+    def test_run_loop_uses_claude_hybrid_controller_for_hybrid_interface(self) -> None:
+        async def exercise() -> tuple[int, list[dict[str, object]], int]:
+            hybrid_calls: list[dict[str, object]] = []
+            command_calls = 0
+            original_sleep = self.looper.asyncio.sleep
+
+            async def fake_run_command(**kwargs: object) -> object:
+                nonlocal command_calls
+                command_calls += 1
+                return self.looper.ProcessResult(returncode=0)
+
+            async def fake_hybrid_turn(**kwargs: object) -> object:
+                hybrid_calls.append(kwargs)
+                return self.looper.ProcessResult(
+                    returncode=0,
+                    session_id="claude-session-1",
+                    completion_detected=True,
+                    output_bytes=321,
+                )
+
+            async def fake_sleep(seconds: float) -> None:
+                return None
+
+            self.looper.asyncio.sleep = fake_sleep
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="claude",
+                        kind="claude",
+                        interface="hybrid",
+                        cwd=root,
+                    )
+                    looper = self.looper.LooperConfig(
+                        prompt_file=prompt_file,
+                        log_dir=root / "runs",
+                        max_loops=1,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="claude",
+                        config_path=root / "agent-looper.toml",
+                        label="hybrid-smoke",
+                    )
+
+                    result = await self.looper.run_loop(
+                        agent=agent,
+                        looper=looper,
+                        options=options,
+                        run_command_fn=fake_run_command,
+                        run_claude_hybrid_turn_fn=fake_hybrid_turn,
+                    )
+                    return result, hybrid_calls, command_calls
+            finally:
+                self.looper.asyncio.sleep = original_sleep
+
+        result, hybrid_calls, command_calls = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(command_calls, 0)
+        self.assertEqual(len(hybrid_calls), 1)
+        self.assertEqual(hybrid_calls[0]["prompt"], "hello")
+        self.assertEqual(hybrid_calls[0]["session_name"], "hybrid-smoke-loop-0001")
+        self.assertTrue(str(hybrid_calls[0]["log_path"]).endswith("loop-0001__prompt-001.log"))
+
+    def test_run_loop_does_not_open_transcript_tail_for_claude_hybrid_interface(self) -> None:
+        async def exercise() -> tuple[int, int]:
+            start_tail_calls = 0
+
+            async def fake_hybrid_turn(**kwargs: object) -> object:
+                return self.looper.ProcessResult(returncode=0, output_bytes=1)
+
+            def fake_start_tail(run_dir: Path, options: object) -> bool:
+                nonlocal start_tail_calls
+                start_tail_calls += 1
+                return True
+
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                prompt_file = root / "PROMPT.md"
+                prompt_file.write_text("hello\n", encoding="utf-8")
+                agent = self.looper.AgentConfig(
+                    name="claude",
+                    kind="claude",
+                    interface="hybrid",
+                    cwd=root,
+                )
+                looper = self.looper.LooperConfig(
+                    prompt_file=prompt_file,
+                    log_dir=root / "runs",
+                    max_loops=1,
+                )
+                options = self.looper.RunOptions(
+                    agent_name="claude",
+                    config_path=root / "agent-looper.toml",
+                    label="hybrid-no-tail",
+                    tmux_layout="split",
+                )
+
+                result = await self.looper.run_loop(
+                    agent=agent,
+                    looper=looper,
+                    options=options,
+                    start_tmux_log_pane_fn=fake_start_tail,
+                    run_claude_hybrid_turn_fn=fake_hybrid_turn,
+                )
+                return result, start_tail_calls
+
+        result, start_tail_calls = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(start_tail_calls, 0)
+
     def test_run_loop_streams_in_supervisor_when_split_pane_fails(self) -> None:
         async def exercise() -> list[dict[str, object]]:
             run_command_calls: list[dict[str, object]] = []
@@ -1254,6 +1417,29 @@ fresh_session_per_loop = "false"
         self.assertEqual(result, 2)
         self.assertIn("looper error: farm launcher not found", stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_interface_flag_overrides_agent_config(self) -> None:
+        captured: list[str] = []
+        loaded = self.looper.LoadedConfig(
+            looper=self.looper.LooperConfig(),
+            agents={"claude": self.looper.AgentConfig(name="claude", kind="claude", interface="hybrid")},
+        )
+
+        def fake_load_config(*args: object, **kwargs: object) -> object:
+            return loaded
+
+        def fake_run_loop_sync(*, agent: object, looper: object, options: object) -> int:
+            captured.append(agent.interface)
+            return 0
+
+        result = self.looper.run_command_main(
+            ["--local", "--agent", "claude", "--interface", "json"],
+            load_config_fn=fake_load_config,
+            run_loop_sync_fn=fake_run_loop_sync,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured, ["json"])
 
     def test_named_preset_honors_xdg_config_home(self) -> None:
         original_xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -2197,7 +2383,8 @@ class LooperCliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertRegex(result.stdout, r"label: Looper_[0-9a-f]{6}\n")
-        self.assertRegex(result.stdout, r"--name Looper_[0-9a-f]{6}-loop-0001 hello")
+        self.assertIn("interface: hybrid", result.stdout)
+        self.assertRegex(result.stdout, r"\$ claude\n")
 
     def test_double_dash_arguments_are_passed_to_builtin_agent(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2211,6 +2398,8 @@ class LooperCliTests(unittest.TestCase):
                     str(LOOPER_PATH),
                     "--agent",
                     "claude",
+                    "--interface",
+                    "json",
                     "--prompt-file",
                     str(prompt_file),
                     "--label",
@@ -2230,6 +2419,7 @@ class LooperCliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("agent: claude (claude)", result.stdout)
+        self.assertIn("interface: json", result.stdout)
         self.assertIn(
             "$ claude -p --output-format stream-json --verbose "
             "--dangerously-skip-permissions --max-turns 20 --name smoke-loop-0001 hello",
@@ -2558,8 +2748,9 @@ extra_args = ["--max-turns", "3"]
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("agent: claude (claude)", result.stdout)
+        self.assertIn("interface: hybrid", result.stdout)
         self.assertIn("mode: single", result.stdout)
-        self.assertIn("--max-turns 3 --name", result.stdout)
+        self.assertIn("$ claude --max-turns 3", result.stdout)
 
     def test_named_rai_preset_resolves_repo_example(self) -> None:
         with tempfile.TemporaryDirectory() as td:
