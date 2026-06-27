@@ -13,6 +13,17 @@ from .config import (
 )
 from .farm import clean_farm_args, maybe_launch_farm
 from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
+from .hybrid import (
+    ClaudeHybridAssessment,
+    ClaudeSessionEvent,
+    ClaudeSessionTail,
+    assess_claude_hybrid_signals,
+    extract_session_id_from_claude_session,
+    extract_uuid_from_session_path,
+    parse_claude_session_line,
+    read_new_claude_session_events,
+    tmux_prompt_paste_commands,
+)
 from .init import write_starter_files
 from .models import (
     CURRENT_LOG_POINTER_FILENAME,
@@ -96,6 +107,9 @@ __all__ = [
     "VERSION",
     "AgentConfig",
     "AgentKind",
+    "ClaudeHybridAssessment",
+    "ClaudeSessionEvent",
+    "ClaudeSessionTail",
     "CommandContext",
     "CommandTemplateError",
     "ConfigError",
@@ -111,6 +125,7 @@ __all__ = [
     "_safe_stream_write",
     "_terminate_process_group",
     "agent_extra_args",
+    "assess_claude_hybrid_signals",
     "apply_run_options",
     "build_command",
     "clean_farm_args",
@@ -120,6 +135,8 @@ __all__ = [
     "current_log_pointer_path",
     "default_agents",
     "display_tmux_message",
+    "extract_session_id_from_claude_session",
+    "extract_uuid_from_session_path",
     "format_agent_log_line",
     "format_byte_count",
     "format_duration",
@@ -135,10 +152,12 @@ __all__ = [
     "maybe_launch_farm",
     "merge_raw_config",
     "parse_basic_toml",
+    "parse_claude_session_line",
     "parse_output_line",
     "plan_file_all_tasks_checked",
     "prune_backup_branches",
     "read_config_raw",
+    "read_new_claude_session_events",
     "render_template",
     "repo_root",
     "resolve_prompt_defaults",
@@ -155,6 +174,7 @@ __all__ = [
     "split_logged_line",
     "start_tmux_log_pane",
     "tmux_log_tail_command",
+    "tmux_prompt_paste_commands",
     "transcript_log_main",
     "transcript_renderer_command",
     "transient_retry_limit_message",
