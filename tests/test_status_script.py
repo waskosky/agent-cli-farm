@@ -2,6 +2,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -91,7 +92,7 @@ esac
             (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
             bin_dir = project / "bin"
             bin_dir.mkdir()
-            (bin_dir / "python3").symlink_to("/usr/local/bin/python3.12")
+            (bin_dir / "python3").symlink_to(sys.executable)
             env = os.environ.copy()
             env["PATH"] = str(bin_dir)
 
