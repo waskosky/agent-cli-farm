@@ -688,6 +688,7 @@ fresh_session_per_loop = "false"
                     patterns=[],
                     scan_stdout=False,
                     kill_on_stop_pattern=True,
+                    stream_output=False,
                 )
                 return (
                     result,
