@@ -47,6 +47,10 @@ class AnnotatorStatusTests(unittest.TestCase):
         output = "\u2736 ... \u2026 (esc to interrupt)"
         self.assertEqual(self.mod.classify_claude_output(output), "RUN")
 
+    def test_claude_run_when_modern_status_line_is_active(self):
+        output = "\u273b Vibing\u2026 (2m 44s \u00b7 \u2193 12.0k tokens)"
+        self.assertEqual(self.mod.classify_claude_output(output), "RUN")
+
     def test_claude_ready_without_processing_marker(self):
         output = "Output line without prompt"
         self.assertEqual(self.mod.classify_claude_output(output), "READY")

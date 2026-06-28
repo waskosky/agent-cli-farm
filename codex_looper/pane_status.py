@@ -16,6 +16,9 @@ CLAUDE_IDLE_PROMPT_AT_END_PATTERN = rf"(?:^\s*{CLAUDE_IDLE_PROMPT_PATTERN}\s*$)\
 CLAUDE_WAITING_PROMPT_PATTERN = r"\u276f.*\d+\."
 CLAUDE_PROCESSING_PATTERN = (
     r"[\u2736\u2722\u273d\u273b\u00b7\u2733].*\u2026.*\(esc to interrupt.*\)"
+    r"|(?:^|\n)\s*[\u2736\u2722\u273d\u273b\u00b7\u2733]?\s*"
+    r"(?i:vibing|envisioning|thinking|processing|reading|writing|searching|running|working)"
+    r"\u2026"
 )
 
 
