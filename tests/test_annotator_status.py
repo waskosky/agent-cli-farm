@@ -55,6 +55,10 @@ class AnnotatorStatusTests(unittest.TestCase):
         output = "\u273d Topsy-turvying\u2026 (25s \u00b7 \u2193 1.4k tokens)"
         self.assertEqual(self.mod.classify_claude_output(output), "RUN")
 
+    def test_claude_run_when_spinner_status_verb_changes(self):
+        output = "\u2736 Flibbertigibbeting\u2026"
+        self.assertEqual(self.mod.classify_claude_output(output), "RUN")
+
     def test_claude_ready_without_processing_marker(self):
         output = "Output line without prompt"
         self.assertEqual(self.mod.classify_claude_output(output), "READY")

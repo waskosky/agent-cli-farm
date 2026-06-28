@@ -14,12 +14,13 @@ CODEX_ASSISTANT_PREFIX_PATTERN = r"^(?:assistant|codex|agent)\s*:"
 CLAUDE_IDLE_PROMPT_PATTERN = r">(?:\s|\u00a0)"
 CLAUDE_IDLE_PROMPT_AT_END_PATTERN = rf"(?:^\s*{CLAUDE_IDLE_PROMPT_PATTERN}\s*$)\s*\Z"
 CLAUDE_WAITING_PROMPT_PATTERN = r"\u276f.*\d+\."
+CLAUDE_SPINNER_PATTERN = r"[\u2736\u2722\u273d\u273b\u00b7\u2733]"
 CLAUDE_PROCESSING_PATTERN = (
-    r"[\u2736\u2722\u273d\u273b\u00b7\u2733].*\u2026.*\(esc to interrupt.*\)"
-    r"|(?:^|\n)\s*[\u2736\u2722\u273d\u273b\u00b7\u2733]?\s*"
-    r"(?i:vibing|envisioning|thinking|processing|reading|writing|searching|running|working)"
+    rf"{CLAUDE_SPINNER_PATTERN}.*\u2026.*\(esc to interrupt.*\)"
+    rf"|(?:^|\n)\s*{CLAUDE_SPINNER_PATTERN}\s+\S[^\n]*\u2026"
+    r"|(?:^|\n)\s*(?i:thinking|processing|reading|writing|searching|running|working)"
     r"\u2026"
-    r"|(?:^|\n)\s*[\u2736\u2722\u273d\u273b\u00b7\u2733]\s+\S[^\n]*\u2026[^\n]*"
+    rf"|(?:^|\n)\s*{CLAUDE_SPINNER_PATTERN}\s+\S[^\n]*\u2026[^\n]*"
     r"(?:tokens|thinking|effort|\d+s|\d+m)"
 )
 
