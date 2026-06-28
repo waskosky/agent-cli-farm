@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import secrets
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .agents import build_command
+from .control import ControlCommand, control_file_path, read_control_commands
 from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
 from .hybrid import ClaudeHybridController, build_claude_hybrid_command
 from .models import (
@@ -100,6 +102,17 @@ def plan_file_all_tasks_checked(path: Path) -> bool:
     return not markdown_plan_has_unchecked_tasks(path.read_text(encoding="utf-8"))
 
 
+def prompt_file_state(path: Path) -> dict[str, Any]:
+    data = path.read_bytes()
+    stat = path.stat()
+    mtime = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+    return {
+        "prompt_sha256": hashlib.sha256(data).hexdigest(),
+        "prompt_mtime": mtime.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "prompt_bytes": len(data),
+    }
+
+
 async def run_command(
     *,
     command: list[str],
@@ -113,6 +126,7 @@ async def run_command(
     kill_on_stop_pattern: bool,
     completion_pattern: re.Pattern[str] | None = None,
     stream_output: bool = True,
+    on_process_started: Callable[[int, int | None], None] | None = None,
 ) -> ProcessResult:
     return await _run_command_impl(
         command=command,
@@ -129,6 +143,7 @@ async def run_command(
         terminate_process_group=_terminate_process_group,
         close_subprocess_transport=_close_subprocess_transport,
         utc_stamp_fn=utc_stamp,
+        on_process_started=on_process_started,
     )
 
 
@@ -232,6 +247,8 @@ async def run_loop(
         return load_prompts_for_mode(looper.prompt_file, looper.separator, looper.mode)
 
     prompts = load_current_prompts()
+    prompt_reload_count = 1
+    prompt_state = prompt_file_state(looper.prompt_file)
     patterns = compile_stop_patterns(looper.stop_patterns)
     completion_pattern = compile_completion_marker(looper)
 
@@ -270,9 +287,20 @@ async def run_loop(
             "agent_cwd": str(agent.cwd),
             "config_path": str(options.config_path),
             "prompt_file": str(looper.prompt_file),
+            **prompt_state,
+            "prompt_reload_count": prompt_reload_count,
             "mode": looper.mode,
             "reload_prompt_each_loop": looper.reload_prompt_each_loop,
+            "control_file": str(control_file_path(run_dir)),
+            "control_processed_count": 0,
+            "control_last_action": None,
+            "control_last_reason": None,
+            "control_last_id": None,
             "pid": os.getpid(),
+            "child_pid": None,
+            "child_pgid": None,
+            "hybrid_pane_id": None,
+            "hybrid_pane_pid": None,
             "status": "running",
             "total_prompts": len(prompts),
             "current_loop": 0,
@@ -286,6 +314,48 @@ async def run_loop(
         },
     )
     state.record("run_started", status="running")
+
+    processed_control_ids: set[str] = set()
+    control_stop_after_prompt: ControlCommand | None = None
+    control_stop_after_loop: ControlCommand | None = None
+    control_interrupt_now: ControlCommand | None = None
+
+    def control_stop_reason(command: ControlCommand) -> str:
+        reason = command.reason.strip()
+        if reason:
+            return f"control {command.action}: {reason}"
+        return f"control {command.action}"
+
+    def poll_control_commands() -> None:
+        nonlocal control_interrupt_now, control_stop_after_loop, control_stop_after_prompt
+        for command in read_control_commands(run_dir, processed_ids=processed_control_ids):
+            processed_control_ids.add(command.id)
+            state.record(
+                "control_command_received",
+                control_last_action=command.action,
+                control_last_reason=command.reason,
+                control_last_id=command.id,
+                control_processed_count=len(processed_control_ids),
+            )
+            if command.action == "stop_after_prompt":
+                control_stop_after_prompt = command
+            elif command.action == "stop_after_loop":
+                control_stop_after_loop = command
+            elif command.action == "interrupt_now":
+                control_interrupt_now = command
+
+    def next_control_prompt_stop() -> ControlCommand | None:
+        return control_interrupt_now or control_stop_after_prompt
+
+    def stop_for_control(command: ControlCommand) -> int:
+        reason = control_stop_reason(command)
+        print(f"\nSTOP: {reason}")
+        set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
+        set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, reason[:250])
+        return stop_run(reason=reason, exit_code=0)
+
+    def record_child_process(pid: int, pgid: int | None) -> None:
+        state.update(child_pid=pid, child_pgid=pgid)
 
     def stop_run(*, reason: str, exit_code: int, status: str = "stopped") -> int:
         state.record(
@@ -329,10 +399,19 @@ async def run_loop(
     fingerprint_ignored_paths = [looper.log_dir.resolve(), run_dir.resolve()]
 
     while True:
+        poll_control_commands()
+        if control_stop := (next_control_prompt_stop() or control_stop_after_loop):
+            return stop_for_control(control_stop)
+
         loop_number += 1
         if looper.reload_prompt_each_loop:
             try:
                 prompts = load_current_prompts()
+                prompt_reload_count += 1
+                state.update(
+                    **prompt_file_state(looper.prompt_file),
+                    prompt_reload_count=prompt_reload_count,
+                )
             except (ConfigError, PromptError) as exc:
                 reason = f"prompt reload failed: {exc}"
                 print(f"\nSTOP: {reason}", file=sys.stderr)
@@ -452,6 +531,10 @@ async def run_loop(
                         session_name=session_name,
                         session_id=session_id,
                     )
+                    state.update(
+                        hybrid_pane_id=claude_hybrid_controller.pane_id,
+                        hybrid_pane_pid=claude_hybrid_controller.pane_pid(),
+                    )
                 else:
                     result = await run_command_fn(
                         command=command,
@@ -468,6 +551,7 @@ async def run_loop(
                         kill_on_stop_pattern=looper.kill_on_stop_pattern,
                         completion_pattern=completion_pattern,
                         stream_output=not tail_pane_active,
+                        on_process_started=record_child_process,
                     )
 
                 if result.completion_detected:
@@ -490,6 +574,10 @@ async def run_loop(
                     retry_kind=result.retry_kind,
                     retry_after_seconds=result.retry_after_seconds,
                 )
+
+                poll_control_commands()
+                if control_stop := next_control_prompt_stop():
+                    return stop_for_control(control_stop)
 
                 if result.stop_reason:
                     if is_retryable_stop_reason(result.stop_reason):
@@ -576,6 +664,10 @@ async def run_loop(
             last_output_bytes=loop_output_bytes,
             completion_detected=loop_completion_detected,
         )
+
+        poll_control_commands()
+        if control_stop := (next_control_prompt_stop() or control_stop_after_loop):
+            return stop_for_control(control_stop)
 
         if looper.completion_enabled:
             if loop_completion_detected:

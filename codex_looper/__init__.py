@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .agents import agent_extra_args, build_command, render_template
-from .cli import run_command_main
+from .cli import control_main, run_command_main
 from .config import (
     default_agents,
     load_config,
@@ -10,6 +10,16 @@ from .config import (
     read_config_raw,
     repo_root,
     resolve_preset_path,
+)
+from .control import (
+    CONTROL_FILENAME,
+    ControlCommand,
+    ControlError,
+    append_control_command,
+    control_file_path,
+    interrupt_from_state,
+    read_control_commands,
+    select_control_run,
 )
 from .farm import clean_farm_args, maybe_launch_farm
 from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
@@ -127,7 +137,10 @@ __all__ = [
     "ClaudeSessionTail",
     "CommandContext",
     "CommandTemplateError",
+    "CONTROL_FILENAME",
     "ConfigError",
+    "ControlCommand",
+    "ControlError",
     "LoadedConfig",
     "LooperConfig",
     "LooperMode",
@@ -142,6 +155,7 @@ __all__ = [
     "_terminate_process_group",
     "agent_extra_args",
     "aggregate_window_state",
+    "append_control_command",
     "assess_claude_hybrid_signals",
     "apply_run_options",
     "build_command",
@@ -151,6 +165,8 @@ __all__ = [
     "clean_farm_args",
     "compile_completion_marker",
     "compile_stop_patterns",
+    "control_file_path",
+    "control_main",
     "create_backup_branch",
     "current_log_pointer_path",
     "default_agents",
@@ -165,6 +181,7 @@ __all__ = [
     "is_claude_command",
     "is_codex_command",
     "is_retryable_stop_reason",
+    "interrupt_from_state",
     "load_config",
     "load_prompts",
     "load_prompts_for_mode",
@@ -178,6 +195,7 @@ __all__ = [
     "parse_output_line",
     "plan_file_all_tasks_checked",
     "prune_backup_branches",
+    "read_control_commands",
     "read_config_raw",
     "read_new_claude_session_events",
     "render_template",
@@ -192,6 +210,7 @@ __all__ = [
     "run_loop",
     "run_loop_sync",
     "set_tmux_window_option",
+    "select_control_run",
     "should_notify_retry_wait",
     "split_logged_line",
     "start_tmux_log_pane",

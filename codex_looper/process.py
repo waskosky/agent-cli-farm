@@ -15,6 +15,7 @@ from .retry import parse_output_line
 
 TerminateProcessGroup = Callable[[asyncio.subprocess.Process], Awaitable[None]]
 CloseSubprocessTransport = Callable[[asyncio.subprocess.Process], Awaitable[None]]
+ProcessStartedCallback = Callable[[int, int | None], None]
 
 
 def utc_stamp() -> str:
@@ -85,6 +86,7 @@ async def run_command(
     terminate_process_group: TerminateProcessGroup | None = None,
     close_subprocess_transport: CloseSubprocessTransport | None = None,
     utc_stamp_fn: Callable[[], str] | None = None,
+    on_process_started: ProcessStartedCallback | None = None,
 ) -> ProcessResult:
     terminate_process_group = terminate_process_group or _terminate_process_group
     close_subprocess_transport = close_subprocess_transport or _close_subprocess_transport
@@ -107,6 +109,15 @@ async def run_command(
         raise ConfigError(f"executable not found: {command[0]}") from exc
     except PermissionError as exc:
         raise ConfigError(f"executable is not runnable: {command[0]}") from exc
+
+    if on_process_started is not None:
+        pgid = None
+        if os.name == "posix":
+            try:
+                pgid = os.getpgid(process.pid)
+            except ProcessLookupError:
+                pgid = None
+        on_process_started(process.pid, pgid)
 
     result = ProcessResult(returncode=None)
     stop_event = asyncio.Event()

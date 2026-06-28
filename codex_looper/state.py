@@ -67,3 +67,9 @@ class LooperStateRecorder:
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
         with self.events_path.open("a", encoding="utf-8") as events_file:
             events_file.write(json.dumps(_jsonable(event_record), sort_keys=True) + "\n")
+
+    def update(self, **updates: Any) -> None:
+        stamp = utc_iso_stamp()
+        self.state.update({key: _jsonable(value) for key, value in updates.items()})
+        self.state["updated_at"] = stamp
+        _atomic_write_json(self.state_path, self.state)

@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -1143,6 +1144,9 @@ fresh_session_per_loop = "false"
         self.assertEqual(state["exit_code"], 0)
         self.assertEqual(state["stop_reason"], "max loops reached: 1")
         self.assertTrue(str(state["last_log"]).endswith("loop-0001__prompt-001.log"))
+        self.assertEqual(state["prompt_sha256"], hashlib.sha256(b"hello\n").hexdigest())
+        self.assertEqual(state["prompt_bytes"], 6)
+        self.assertTrue(str(state["control_file"]).endswith("control.jsonl"))
         self.assertEqual(
             [event["event"] for event in events],
             [
@@ -1848,6 +1852,151 @@ fresh_session_per_loop = "false"
         self.assertEqual(result, 0)
         self.assertEqual(prompts_seen, ["initial prompt", "initial prompt"])
         self.assertEqual(sleeps, [0.25])
+
+    def test_run_loop_stops_after_prompt_from_control_file(self) -> None:
+        async def exercise() -> tuple[int, list[str], dict[str, object], list[dict[str, object]]]:
+            prompts_seen: list[str] = []
+
+            async def fake_run_command(**kwargs: object) -> object:
+                command = kwargs["command"]
+                log_path = kwargs["log_path"]
+                assert isinstance(command, list)
+                assert isinstance(log_path, Path)
+                prompt = command[-1]
+                assert isinstance(prompt, str)
+                prompts_seen.append(prompt)
+                (log_path.parent / "control.jsonl").write_text(
+                    json.dumps(
+                        {
+                            "id": "test-stop-after-prompt",
+                            "action": "stop_after_prompt",
+                            "reason": "operator requested restart",
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return self.looper.ProcessResult(returncode=0)
+
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                prompt_file = root / "PROMPT.md"
+                prompt_file.write_text("initial prompt\n", encoding="utf-8")
+                agent = self.looper.AgentConfig(
+                    name="generic",
+                    kind="generic",
+                    cwd=root,
+                    first_command=["agent", "{prompt}"],
+                )
+                looper = self.looper.LooperConfig(
+                    mode="single",
+                    mode_explicit=True,
+                    prompt_file=prompt_file,
+                    prompt_file_explicit=True,
+                    log_dir=root / "runs",
+                    sleep_seconds=0.25,
+                    max_loops=3,
+                )
+                options = self.looper.RunOptions(
+                    agent_name="generic",
+                    config_path=root / "agent-looper.toml",
+                    label="control-prompt-smoke",
+                )
+
+                result = await self.looper.run_loop(
+                    agent=agent,
+                    looper=looper,
+                    options=options,
+                    run_command_fn=fake_run_command,
+                )
+                run_dir = next((root / "runs").glob("*control-prompt-smoke*"))
+                state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+                events = [
+                    json.loads(line)
+                    for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                ]
+
+            return result, prompts_seen, state, events
+
+        result, prompts_seen, state, events = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(prompts_seen, ["initial prompt"])
+        self.assertEqual(state["status"], "stopped")
+        self.assertEqual(state["stop_reason"], "control stop_after_prompt: operator requested restart")
+        self.assertEqual(state["control_last_action"], "stop_after_prompt")
+        self.assertIn("control_command_received", [event["event"] for event in events])
+
+    def test_run_loop_stops_after_sequence_loop_from_control_file(self) -> None:
+        async def exercise() -> tuple[int, list[str], dict[str, object]]:
+            prompts_seen: list[str] = []
+
+            async def fake_run_command(**kwargs: object) -> object:
+                command = kwargs["command"]
+                log_path = kwargs["log_path"]
+                assert isinstance(command, list)
+                assert isinstance(log_path, Path)
+                prompt = command[-1]
+                assert isinstance(prompt, str)
+                prompts_seen.append(prompt)
+                if prompts_seen == ["first"]:
+                    (log_path.parent / "control.jsonl").write_text(
+                        json.dumps(
+                            {
+                                "id": "test-stop-after-loop",
+                                "action": "stop_after_loop",
+                                "reason": "checkpoint requested",
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                return self.looper.ProcessResult(returncode=0)
+
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                prompt_file = root / "prompts.md"
+                prompt_file.write_text("first\n---\nsecond\n", encoding="utf-8")
+                agent = self.looper.AgentConfig(
+                    name="generic",
+                    kind="generic",
+                    cwd=root,
+                    first_command=["agent", "{prompt}"],
+                    resume_command=["agent", "{prompt}"],
+                )
+                looper = self.looper.LooperConfig(
+                    mode="sequence",
+                    mode_explicit=True,
+                    prompt_file=prompt_file,
+                    prompt_file_explicit=True,
+                    log_dir=root / "runs",
+                    sleep_seconds=0.25,
+                    max_loops=3,
+                )
+                options = self.looper.RunOptions(
+                    agent_name="generic",
+                    config_path=root / "agent-looper.toml",
+                    label="control-loop-smoke",
+                )
+
+                result = await self.looper.run_loop(
+                    agent=agent,
+                    looper=looper,
+                    options=options,
+                    run_command_fn=fake_run_command,
+                )
+                run_dir = next((root / "runs").glob("*control-loop-smoke*"))
+                state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+
+            return result, prompts_seen, state
+
+        result, prompts_seen, state = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(prompts_seen, ["first", "second"])
+        self.assertEqual(state["current_loop"], 1)
+        self.assertEqual(state["stop_reason"], "control stop_after_loop: checkpoint requested")
+        self.assertEqual(state["control_last_action"], "stop_after_loop")
 
     def test_run_loop_stops_after_completion_marker(self) -> None:
         async def exercise() -> tuple[int, int, list[float]]:
@@ -2578,6 +2727,53 @@ class LooperCliTests(unittest.TestCase):
             self.assertIn("backup_enabled = false", config_text)
             self.assertIn("cb_no_progress = 0", config_text)
             self.assertIn("cb_output_decline = 0", config_text)
+
+    def test_control_stop_queues_command_for_latest_matching_run(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = root / ".agent-looper" / "runs"
+            older = runs / "20260625T000000Z__LOOPER-rai__old"
+            newer = runs / "20260625T000005Z__LOOPER-rai__new"
+            older.mkdir(parents=True)
+            newer.mkdir(parents=True)
+            for run_dir, updated_at in [
+                (older, "2026-06-25T00:00:00Z"),
+                (newer, "2026-06-25T00:00:05Z"),
+            ]:
+                state = {
+                    "schema_version": 1,
+                    "status": "running",
+                    "label": "LOOPER-rai",
+                    "run_dir": str(run_dir),
+                    "updated_at": updated_at,
+                }
+                (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "control",
+                    "stop",
+                    "LOOPER-rai",
+                    "--after-loop",
+                    "--state-root",
+                    str(runs),
+                    "--reason",
+                    "operator restart",
+                ],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("queued stop_after_loop", result.stdout)
+            self.assertFalse((older / "control.jsonl").exists())
+            command = json.loads((newer / "control.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(command["action"], "stop_after_loop")
+            self.assertEqual(command["reason"], "operator restart")
 
     def test_no_args_first_run_initializes_and_prints_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as td:

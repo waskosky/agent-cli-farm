@@ -115,6 +115,11 @@ codex-status activity
 codex-status loopers
 ```
 
+Queue a safe stop without attaching:
+```bash
+codex-looper control stop LOOPER-rai --after-loop --reason "merge checkpoint"
+```
+
 See [Agent Looper Reference](docs/looper.md) for prompt format, CLI parameters, config defaults, stop conditions, farm integration, and current backend limits.
 
 Looper defaults and limits:
@@ -125,7 +130,7 @@ Looper defaults and limits:
 - Backup branches point to committed `HEAD` only; they are not dirty-worktree snapshots. Pruning stays inside the exact configured prefix namespace.
 - The no-progress circuit breaker fingerprints committed `HEAD`, status entries, tracked metadata, and file contents while ignoring the looper run directory.
 - Run directories include a high-resolution timestamp and random suffix; the current-log pointer is updated atomically. In split mode, if tmux cannot create the tail pane, live transcript streaming falls back to the supervisor pane.
-- Every looper run writes durable machine-readable state to `state.json` and append-only lifecycle history to `events.jsonl` in its run directory. `codex-status loopers` reads those files, so stop reasons survive pane exits and can be scraped without tmux.
+- Every looper run writes durable machine-readable state to `state.json`, append-only lifecycle history to `events.jsonl`, and accepts optional operator commands in `control.jsonl` in its run directory. `codex-status loopers` reads state files, so stop reasons survive pane exits and can be scraped without tmux.
 
 ### 4. Watch All Instances
 

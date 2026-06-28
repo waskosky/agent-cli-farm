@@ -304,8 +304,17 @@ Each run directory also contains durable machine-readable status:
 
 - `state.json`: latest snapshot with schema version, pid, label, agent, cwd, current loop/prompt, current session, status, stop reason, exit code, and last log path.
 - `events.jsonl`: append-only lifecycle history for run start, loop start/end, prompt start/end, retry waits, and final stop.
+- `control.jsonl`: optional append-only operator inbox. Queue `stop_after_loop`, `stop_after_prompt`, or `interrupt_now` commands with `codex-looper control stop ...`; the supervisor records consumed commands in `events.jsonl` and stops at the requested safe boundary.
 
 Use `codex-status loopers` from a project root to read `.agent-looper/runs/*/state.json` without attaching to tmux. Set `CODEX_LOOPER_STATE_ROOT=/path/to/runs` to point it at an aggregated or remote-synced run directory.
+
+Examples:
+
+```bash
+codex-looper control stop LOOPER-rai --after-loop --reason "merge checkpoint"
+codex-looper control stop LOOPER-rai --after-prompt --state-root /path/to/.agent-looper/runs
+codex-looper control stop --run-dir .agent-looper/runs/20260628T000000Z__LOOPER-rai__abc123 --now
+```
 
 ## Farm Integration
 

@@ -10,6 +10,12 @@ from dataclasses import replace
 from pathlib import Path
 
 from .config import load_config, resolve_preset_path
+from .control import (
+    ControlError,
+    append_control_command,
+    interrupt_from_state,
+    select_control_run,
+)
 from .farm import default_tmux_layout_from_env, maybe_launch_farm
 from .init import (
     EXAMPLE_CONFIG,
@@ -374,6 +380,67 @@ def doctor_main(argv: list[str] | None = None) -> int:
     return status
 
 
+def control_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog=f"{display_name()} control",
+        description="Queue file-backed control commands for a running looper.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    stop_parser = subparsers.add_parser("stop", help="request a looper stop")
+    stop_parser.add_argument("label", nargs="?", help="looper label or run id")
+    timing = stop_parser.add_mutually_exclusive_group()
+    timing.add_argument("--after-prompt", action="store_true", help="stop after the current prompt")
+    timing.add_argument("--after-loop", action="store_true", help="stop after the current loop")
+    timing.add_argument("--now", action="store_true", help="queue interrupt_now and send SIGINT if possible")
+    stop_parser.add_argument(
+        "--state-root",
+        default=os.environ.get("CODEX_LOOPER_STATE_ROOT", ".agent-looper/runs"),
+        help="directory containing looper run directories",
+    )
+    stop_parser.add_argument("--run-dir", help="exact looper run directory")
+    stop_parser.add_argument("--reason", default="operator requested stop", help="operator note")
+    stop_parser.add_argument(
+        "--include-stopped",
+        action="store_true",
+        help="allow selecting stopped runs when no active run matches",
+    )
+
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.command != "stop":
+        parser.error(f"unsupported control command: {args.command}")
+
+    action = "stop_after_loop"
+    if args.after_prompt:
+        action = "stop_after_prompt"
+    elif args.now:
+        action = "interrupt_now"
+
+    try:
+        state = select_control_run(
+            state_root=Path(args.state_root),
+            label=args.label,
+            run_dir=Path(args.run_dir) if args.run_dir else None,
+            include_stopped=args.include_stopped,
+        )
+        run_dir = Path(str(state["run_dir"]))
+        record = append_control_command(
+            run_dir,
+            action=action,
+            reason=args.reason,
+        )
+    except ControlError as exc:
+        print(f"looper control error: {exc}", file=sys.stderr)
+        return 2
+
+    target = state.get("label") or state.get("run_id") or run_dir.name
+    print(f"queued {record['action']} for {target} at {run_dir}")
+    if args.now:
+        detail = interrupt_from_state(state)
+        if detail:
+            print(detail)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     real_argv = list(sys.argv[1:] if argv is None else argv)
     default_agent = default_agent_from_invocation()
@@ -398,6 +465,7 @@ def main(argv: list[str] | None = None) -> int:
         add_run_arguments(run_parser, default_agent=default_agent)
         subparsers.add_parser("init", help="create starter files")
         subparsers.add_parser("doctor", help="check local dependencies")
+        subparsers.add_parser("control", help="queue control commands for a running looper")
         parser.print_help()
         return 0
 
@@ -409,5 +477,7 @@ def main(argv: list[str] | None = None) -> int:
         return init_main(rest)
     if command == "doctor":
         return doctor_main(rest)
+    if command == "control":
+        return control_main(rest)
 
     return run_command_main(real_argv, default_agent=default_agent)

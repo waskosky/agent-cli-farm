@@ -23,6 +23,7 @@ from codex_looper import runner as _runner
 from codex_looper.agents import agent_extra_args, build_command, render_template
 from codex_looper.cli import (
     add_run_arguments,
+    control_main,
     default_agent_from_invocation,
     display_name,
     doctor_main,
@@ -206,6 +207,7 @@ __all__ = [
     "classify_codex_output",
     "compile_completion_marker",
     "compile_stop_patterns",
+    "control_main",
     "create_backup_branch",
     "current_log_pointer_path",
     "default_agent_from_invocation",
@@ -292,6 +294,7 @@ async def run_command(
     kill_on_stop_pattern: bool,
     completion_pattern: Any | None = None,
     stream_output: bool = True,
+    on_process_started: Any | None = None,
 ) -> ProcessResult:
     return await _run_command_impl(
         command=command,
@@ -308,6 +311,7 @@ async def run_command(
         terminate_process_group=_terminate_process_group,
         close_subprocess_transport=_close_subprocess_transport,
         utc_stamp_fn=utc_stamp,
+        on_process_started=on_process_started,
     )
 
 
@@ -395,6 +399,7 @@ def main(argv: list[str] | None = None) -> int:
         add_run_arguments(run_parser, default_agent=default_agent)
         subparsers.add_parser("init", help="create starter files")
         subparsers.add_parser("doctor", help="check local dependencies")
+        subparsers.add_parser("control", help="queue control commands for a running looper")
         subparsers.add_parser("transcript-log", help="render raw looper JSONL logs")
         parser.print_help()
         return 0
@@ -407,6 +412,8 @@ def main(argv: list[str] | None = None) -> int:
         return init_main(rest)
     if command == "doctor":
         return doctor_main(rest)
+    if command == "control":
+        return control_main(rest)
     if command == "transcript-log":
         return transcript_log_main(rest, prog=f"{display_name()} transcript-log")
 
