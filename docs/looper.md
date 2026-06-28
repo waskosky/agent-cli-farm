@@ -59,6 +59,8 @@ If the cleanup is obvious, implement it and run a fast check.
 
 Prompts in one sequence share the same agent session. After a full sequence completes, the default behavior is to start a fresh session for the next loop.
 
+By default, the supervisor reloads `prompt_file` before each loop. Editing `PROMPT.md` or `prompts.md` while a looper is running affects the next loop without restarting the supervisor. Set `[looper].reload_prompt_each_loop = false` only when a run must keep the exact startup prompt text.
+
 ## Common Commands
 
 ```bash
@@ -139,6 +141,7 @@ prompt_file = "PROMPT.md"
 timeout_seconds = 7200
 sleep_seconds = 2
 fresh_session_per_loop = true
+reload_prompt_each_loop = true
 max_loops = 0
 max_transient_retries = 12
 retry_notify_after_seconds = 300
@@ -196,7 +199,7 @@ Strict TOML typing is part of the contract:
 | `looper.default_agent`, `mode`, `prompt_file`, `log_dir`, `completion_marker`, `plan_file`, `backup_prefix` | string |
 | `looper.timeout_seconds`, `sleep_seconds`, `retry_notify_after_seconds` | finite integer or float |
 | `looper.max_loops`, `max_transient_retries`, `completion_streak`, `backup_keep`, `cb_no_progress`, `cb_output_decline` | integer |
-| `looper.fresh_session_per_loop`, `completion_enabled`, `backup_enabled` | boolean |
+| `looper.fresh_session_per_loop`, `reload_prompt_each_loop`, `completion_enabled`, `backup_enabled` | boolean |
 | `agents.<name>.kind`, `interface`, `model`, `effort` | string |
 | `agents.<name>.extra_args`, `interactive_command`, `first_command`, `resume_command`, `stop_patterns` | array of strings |
 | `agents.<name>.scan_stdout_for_stop_patterns` | boolean |

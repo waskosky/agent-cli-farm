@@ -75,6 +75,7 @@ class LooperConfig:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     sleep_seconds: float = 2.0
     fresh_session_per_loop: bool = True
+    reload_prompt_each_loop: bool = True
     max_loops: int = DEFAULT_MAX_LOOPS
     max_transient_retries: int = DEFAULT_MAX_TRANSIENT_RETRIES
     retry_notify_after_seconds: float = DEFAULT_RETRY_NOTIFY_AFTER_SECONDS

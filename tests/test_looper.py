@@ -393,6 +393,7 @@ separator = "^---\\s*$"
 timeout_seconds = 600
 sleep_seconds = 5
 fresh_session_per_loop = false
+reload_prompt_each_loop = false
 max_loops = 15
 max_transient_retries = 4
 retry_notify_after_seconds = 120
@@ -432,6 +433,7 @@ scan_stdout_for_stop_patterns = true
         self.assertEqual(loaded.looper.timeout_seconds, 600.0)
         self.assertEqual(loaded.looper.sleep_seconds, 5.0)
         self.assertFalse(loaded.looper.fresh_session_per_loop)
+        self.assertFalse(loaded.looper.reload_prompt_each_loop)
         self.assertEqual(loaded.looper.max_loops, 15)
         self.assertEqual(loaded.looper.max_transient_retries, 4)
         self.assertEqual(loaded.looper.retry_notify_after_seconds, 120.0)
@@ -466,6 +468,9 @@ fresh_session_per_loop = "false"
 
             with self.assertRaises(self.looper.ConfigError):
                 self.looper.load_config(path)
+
+    def test_looper_reload_prompt_each_loop_defaults_true(self) -> None:
+        self.assertTrue(self.looper.LooperConfig().reload_prompt_each_loop)
 
     def test_stop_signal_parsing_ignores_normal_stdout(self) -> None:
         patterns = self.looper.compile_stop_patterns([r"rate\s*limit"])
@@ -1725,6 +1730,125 @@ fresh_session_per_loop = "false"
         self.assertEqual(calls, 3)
         self.assertEqual(sleeps, [0.25, 0.25])
 
+    def test_run_loop_reloads_prompt_file_before_each_loop_by_default(self) -> None:
+        async def exercise() -> tuple[int, list[str], list[float]]:
+            prompts_seen: list[str] = []
+            sleeps: list[float] = []
+
+            async def fake_run_command(**kwargs: object) -> object:
+                command = kwargs["command"]
+                assert isinstance(command, list)
+                prompt = command[-1]
+                assert isinstance(prompt, str)
+                prompts_seen.append(prompt)
+                if len(prompts_seen) == 1:
+                    prompt_file.write_text("updated prompt\n", encoding="utf-8")
+                return self.looper.ProcessResult(returncode=0)
+
+            async def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                prompt_file = root / "PROMPT.md"
+                prompt_file.write_text("initial prompt\n", encoding="utf-8")
+                agent = self.looper.AgentConfig(
+                    name="generic",
+                    kind="generic",
+                    cwd=root,
+                    first_command=["agent", "{prompt}"],
+                )
+                looper = self.looper.LooperConfig(
+                    mode="single",
+                    mode_explicit=True,
+                    prompt_file=prompt_file,
+                    prompt_file_explicit=True,
+                    log_dir=root / "runs",
+                    sleep_seconds=0.25,
+                    max_loops=2,
+                )
+                options = self.looper.RunOptions(
+                    agent_name="generic",
+                    config_path=root / "agent-looper.toml",
+                    label="prompt-reload-smoke",
+                )
+
+                result = await self.looper.run_loop(
+                    agent=agent,
+                    looper=looper,
+                    options=options,
+                    run_command_fn=fake_run_command,
+                    sleep_fn=fake_sleep,
+                )
+
+            return result, prompts_seen, sleeps
+
+        result, prompts_seen, sleeps = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(prompts_seen, ["initial prompt", "updated prompt"])
+        self.assertEqual(sleeps, [0.25])
+
+    def test_run_loop_can_keep_original_prompt_file_when_reload_disabled(self) -> None:
+        async def exercise() -> tuple[int, list[str], list[float]]:
+            prompts_seen: list[str] = []
+            sleeps: list[float] = []
+
+            async def fake_run_command(**kwargs: object) -> object:
+                command = kwargs["command"]
+                assert isinstance(command, list)
+                prompt = command[-1]
+                assert isinstance(prompt, str)
+                prompts_seen.append(prompt)
+                if len(prompts_seen) == 1:
+                    prompt_file.write_text("updated prompt\n", encoding="utf-8")
+                return self.looper.ProcessResult(returncode=0)
+
+            async def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                prompt_file = root / "PROMPT.md"
+                prompt_file.write_text("initial prompt\n", encoding="utf-8")
+                agent = self.looper.AgentConfig(
+                    name="generic",
+                    kind="generic",
+                    cwd=root,
+                    first_command=["agent", "{prompt}"],
+                )
+                looper = self.looper.LooperConfig(
+                    mode="single",
+                    mode_explicit=True,
+                    prompt_file=prompt_file,
+                    prompt_file_explicit=True,
+                    reload_prompt_each_loop=False,
+                    log_dir=root / "runs",
+                    sleep_seconds=0.25,
+                    max_loops=2,
+                )
+                options = self.looper.RunOptions(
+                    agent_name="generic",
+                    config_path=root / "agent-looper.toml",
+                    label="prompt-cache-smoke",
+                )
+
+                result = await self.looper.run_loop(
+                    agent=agent,
+                    looper=looper,
+                    options=options,
+                    run_command_fn=fake_run_command,
+                    sleep_fn=fake_sleep,
+                )
+
+            return result, prompts_seen, sleeps
+
+        result, prompts_seen, sleeps = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(prompts_seen, ["initial prompt", "initial prompt"])
+        self.assertEqual(sleeps, [0.25])
+
     def test_run_loop_stops_after_completion_marker(self) -> None:
         async def exercise() -> tuple[int, int, list[float]]:
             calls = 0
@@ -2446,6 +2570,7 @@ class LooperCliTests(unittest.TestCase):
             self.assertIn('mode = "single"', config_text)
             self.assertIn('prompt_file = "PROMPT.md"', config_text)
             self.assertIn("timeout_seconds = 7200", config_text)
+            self.assertIn("reload_prompt_each_loop = true", config_text)
             self.assertIn("max_transient_retries = 12", config_text)
             self.assertIn("retry_notify_after_seconds = 300", config_text)
             self.assertIn("completion_enabled = false", config_text)

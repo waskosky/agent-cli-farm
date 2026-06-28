@@ -24,6 +24,7 @@ from .models import (
     ConfigError,
     LooperConfig,
     ProcessResult,
+    PromptError,
     RunOptions,
 )
 from .process import (
@@ -227,7 +228,10 @@ async def run_loop(
     run_dir = make_run_dir(looper.log_dir, label)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    prompts = load_prompts_for_mode(looper.prompt_file, looper.separator, looper.mode)
+    def load_current_prompts() -> list[str]:
+        return load_prompts_for_mode(looper.prompt_file, looper.separator, looper.mode)
+
+    prompts = load_current_prompts()
     patterns = compile_stop_patterns(looper.stop_patterns)
     completion_pattern = compile_completion_marker(looper)
 
@@ -267,6 +271,7 @@ async def run_loop(
             "config_path": str(options.config_path),
             "prompt_file": str(looper.prompt_file),
             "mode": looper.mode,
+            "reload_prompt_each_loop": looper.reload_prompt_each_loop,
             "pid": os.getpid(),
             "status": "running",
             "total_prompts": len(prompts),
@@ -300,6 +305,10 @@ async def run_loop(
     print(f"label: {label}")
     print(f"mode: {looper.mode}")
     print(f"prompts: {len(prompts)} from {looper.prompt_file}")
+    print(
+        "prompt reload: "
+        + ("before each loop" if looper.reload_prompt_each_loop else "startup only")
+    )
     print(f"logs: {run_dir}")
     print(
         "session mode: "
@@ -321,6 +330,16 @@ async def run_loop(
 
     while True:
         loop_number += 1
+        if looper.reload_prompt_each_loop:
+            try:
+                prompts = load_current_prompts()
+            except (ConfigError, PromptError) as exc:
+                reason = f"prompt reload failed: {exc}"
+                print(f"\nSTOP: {reason}", file=sys.stderr)
+                set_tmux_window_option_fn(TMUX_STATE_OPTION, "ERR")
+                set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, reason[:250])
+                return stop_run(reason=reason, exit_code=2, status="error")
+
         loop_started_at = time.monotonic()
         loop_output_bytes = 0
         loop_completion_detected = False
@@ -341,6 +360,7 @@ async def run_loop(
             current_prompt_index=0,
             current_session=session_name,
             current_session_id=session_id,
+            total_prompts=len(prompts),
             stop_reason=None,
         )
 

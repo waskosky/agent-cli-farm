@@ -120,6 +120,7 @@ See [Agent Looper Reference](docs/looper.md) for prompt format, CLI parameters, 
 Looper defaults and limits:
 - The `run` subcommand is optional. In an initialized directory, `codex-looper` means `codex-looper run`.
 - Prompt mode defaults to `single` with `PROMPT.md`. A custom `--prompt-file` also defaults to `single`; the legacy default file `prompts.md` implies `sequence`.
+- Running loopers reload the prompt file before each loop by default, so prompt edits apply on the next pass. Set `reload_prompt_each_loop = false` only when a run must keep the startup prompt text.
 - Config loading is strict: documented scalars must have the expected TOML type, numeric values must be finite, and invalid regexes fail before the loop starts.
 - Backup branches point to committed `HEAD` only; they are not dirty-worktree snapshots. Pruning stays inside the exact configured prefix namespace.
 - The no-progress circuit breaker fingerprints committed `HEAD`, status entries, tracked metadata, and file contents while ignoring the looper run directory.

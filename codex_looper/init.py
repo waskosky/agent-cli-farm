@@ -29,6 +29,7 @@ prompt_file = {json.dumps(prompt_file)}
 timeout_seconds = {timeout_seconds}
 sleep_seconds = {sleep_seconds}
 fresh_session_per_loop = true
+reload_prompt_each_loop = true
 # max_loops = 0 means forever. Use --once or --max-loops for a bounded run.
 max_loops = {max_loops}
 # Rate-limit retries are uncapped; this caps repeated non-rate-limit transient retries.

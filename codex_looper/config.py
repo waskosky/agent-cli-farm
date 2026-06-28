@@ -432,6 +432,11 @@ def load_config(
             "looper.fresh_session_per_loop",
             default_looper.fresh_session_per_loop,
         ),
+        reload_prompt_each_loop=_as_bool(
+            raw_looper.get("reload_prompt_each_loop"),
+            "looper.reload_prompt_each_loop",
+            default_looper.reload_prompt_each_loop,
+        ),
         max_loops=_as_int(
             raw_looper.get("max_loops"), "looper.max_loops", default_looper.max_loops, minimum=0
         ),
