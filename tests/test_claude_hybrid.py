@@ -10,6 +10,7 @@ from codex_looper.hybrid import (
     build_claude_hybrid_command,
     extract_session_id_from_claude_session,
     extract_uuid_from_session_path,
+    prompt_submit_delay_seconds,
     read_new_claude_session_events,
     tmux_prompt_paste_commands,
     tmux_split_window_command,
@@ -164,6 +165,37 @@ class ClaudeHybridTests(unittest.TestCase):
         flattened_args = "\0".join(arg for command in commands for arg in command)
         self.assertNotIn(prompt, flattened_args)
 
+    def test_prompt_submit_delay_scales_with_prompt_size(self) -> None:
+        small = prompt_submit_delay_seconds("short prompt")
+        large = prompt_submit_delay_seconds("x" * 60_000)
+
+        self.assertGreaterEqual(small, 0.25)
+        self.assertGreater(large, small)
+        self.assertLessEqual(large, 2.0)
+
+    def test_controller_waits_between_paste_and_enter(self) -> None:
+        commands: list[list[str]] = []
+        sleeps: list[float] = []
+
+        def command_runner(command: list[str], *, input_text: str | None = None):
+            commands.append(command)
+            return TmuxCommandResult(returncode=0)
+
+        controller = ClaudeHybridController(
+            command=["claude"],
+            cwd=Path("/tmp/project"),
+            env={},
+            command_runner=command_runner,
+            sleep_fn=lambda seconds: sleeps.append(seconds),
+            pane_id="%7",
+        )
+
+        controller.send_prompt("x" * 60_000)
+
+        self.assertEqual([command[1] for command in commands], ["load-buffer", "paste-buffer", "send-keys"])
+        self.assertEqual(len(sleeps), 1)
+        self.assertGreaterEqual(sleeps[0], 1.0)
+
     def test_tmux_split_window_command_passes_cwd_env_and_command(self) -> None:
         command = tmux_split_window_command(
             ["claude", "--model", "opus"],
@@ -305,6 +337,62 @@ class ClaudeHybridTests(unittest.TestCase):
         flattened_args = "\0".join(arg for command, _ in commands for arg in command)
         self.assertNotIn("complex prompt", flattened_args)
         self.assertTrue(any(command[:3] == ["tmux", "load-buffer", "-b"] for command, _ in commands))
+
+    def test_controller_does_not_finish_turn_without_new_user_event(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_path = root / ".claude" / "projects" / "-tmp-project" / f"{SESSION_ID}.jsonl"
+            session_path.parent.mkdir(parents=True)
+            session_path.write_text("", encoding="utf-8")
+
+            def command_runner(command: list[str], *, input_text: str | None = None):
+                if command[:3] == ["tmux", "split-window", "-P"]:
+                    return TmuxCommandResult(returncode=0, stdout="%7\n")
+                if command[:3] == ["tmux", "capture-pane", "-t"]:
+                    return TmuxCommandResult(returncode=0, stdout="Done\n> ")
+                if command[:3] == ["tmux", "list-panes", "-t"]:
+                    return TmuxCommandResult(returncode=0, stdout="4242\n")
+                if command[:2] == ["pgrep", "-P"]:
+                    return TmuxCommandResult(returncode=1)
+                if command[:2] == ["lsof", "-Fn"]:
+                    return TmuxCommandResult(returncode=0, stdout=f"n{session_path}\n")
+                if command[:3] == ["tmux", "paste-buffer", "-d"]:
+                    with session_path.open("a", encoding="utf-8") as handle:
+                        handle.write(
+                            json.dumps(
+                                {
+                                    "type": "assistant",
+                                    "uuid": "assistant-stale",
+                                    "sessionId": SESSION_ID,
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": [{"type": "text", "text": "stale answer"}],
+                                    },
+                                }
+                            )
+                            + "\n"
+                        )
+                    return TmuxCommandResult(returncode=0)
+                return TmuxCommandResult(returncode=0)
+
+            controller = ClaudeHybridController(
+                command=["claude"],
+                cwd=root,
+                env={},
+                command_runner=command_runner,
+                sleep_fn=lambda seconds: None,
+            )
+
+            result = controller.run_turn(
+                prompt="prompt that was not accepted",
+                timeout_seconds=0.01,
+                log_path=root / "turn.log",
+                completion_pattern=None,
+                stop_patterns=[],
+            )
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.stop_reason, "Claude hybrid timeout after 0.01 seconds")
 
 
 if __name__ == "__main__":

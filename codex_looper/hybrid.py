@@ -10,8 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
-from typing import Any, Literal
+from typing import Any, Literal, TextIO
 
 from .agents import agent_extra_args
 from .models import AgentConfig, ConfigError, ProcessResult
@@ -27,6 +26,9 @@ SleepFn = Callable[[float], None]
 DEFAULT_HYBRID_SPLIT_SIZE = "70%"
 DEFAULT_HYBRID_CAPTURE_LINES = 220
 DEFAULT_HYBRID_READY_TIMEOUT_SECONDS = 60.0
+DEFAULT_HYBRID_PASTE_SUBMIT_DELAY_SECONDS = 0.25
+HYBRID_PASTE_SUBMIT_BYTES_PER_SECOND = 50_000
+MAX_HYBRID_PASTE_SUBMIT_DELAY_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -261,6 +263,15 @@ def tmux_prompt_paste_commands(
     ]
 
 
+def prompt_submit_delay_seconds(prompt: str) -> float:
+    prompt_bytes = len(prompt.encode("utf-8"))
+    size_delay = prompt_bytes / HYBRID_PASTE_SUBMIT_BYTES_PER_SECOND
+    return min(
+        MAX_HYBRID_PASTE_SUBMIT_DELAY_SECONDS,
+        DEFAULT_HYBRID_PASTE_SUBMIT_DELAY_SECONDS + size_delay,
+    )
+
+
 def tmux_split_window_command(
     pane_command: list[str],
     *,
@@ -453,6 +464,8 @@ class ClaudeHybridController:
             if result.returncode != 0:
                 detail = (result.stderr or result.stdout or "unknown tmux prompt paste failure").strip()
                 raise ConfigError(f"failed to send prompt to Claude hybrid pane: {detail}")
+            if command[1:2] == ["paste-buffer"]:
+                self.sleep_fn(prompt_submit_delay_seconds(prompt))
 
     def run_turn(
         self,
@@ -515,7 +528,11 @@ class ClaudeHybridController:
                     session_path=session_path,
                     previous_offset=prompt_offset,
                 )
-                if assessment.ready_to_send_next and assessment.assistant_event_seen:
+                if (
+                    assessment.ready_to_send_next
+                    and assessment.user_event_seen
+                    and assessment.assistant_event_seen
+                ):
                     return ProcessResult(
                         returncode=0,
                         session_id=assessment.session_id,
