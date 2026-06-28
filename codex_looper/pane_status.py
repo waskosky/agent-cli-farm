@@ -19,6 +19,8 @@ CLAUDE_PROCESSING_PATTERN = (
     r"|(?:^|\n)\s*[\u2736\u2722\u273d\u273b\u00b7\u2733]?\s*"
     r"(?i:vibing|envisioning|thinking|processing|reading|writing|searching|running|working)"
     r"\u2026"
+    r"|(?:^|\n)\s*[\u2736\u2722\u273d\u273b\u00b7\u2733]\s+\S[^\n]*\u2026[^\n]*"
+    r"(?:tokens|thinking|effort|\d+s|\d+m)"
 )
 
 
