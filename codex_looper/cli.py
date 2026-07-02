@@ -160,6 +160,16 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
         type=nonnegative_int,
         help="stop after this many consecutive completed loops with declining output bytes; 0 disables",
     )
+    parser.add_argument(
+        "--cb-output-match",
+        dest="cb_output_match_pattern",
+        help="stop after completed loop output matches this regex for the configured repeat count",
+    )
+    parser.add_argument(
+        "--cb-output-match-repeats",
+        type=positive_int,
+        help="matching loops required for --cb-output-match before stopping",
+    )
     parser.add_argument("--once", action="store_true", help="run the sequence once, then stop")
     session_group = parser.add_mutually_exclusive_group()
     session_group.add_argument(
@@ -248,6 +258,8 @@ def parse_run_options(
         backup_keep=args.backup_keep,
         cb_no_progress=args.cb_no_progress,
         cb_output_decline=args.cb_output_decline,
+        cb_output_match_pattern=args.cb_output_match_pattern,
+        cb_output_match_repeats=args.cb_output_match_repeats,
         preset=args.preset,
         once=args.once,
         fresh_session_per_loop=args.fresh_session_per_loop,

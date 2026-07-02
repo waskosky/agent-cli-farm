@@ -89,6 +89,28 @@ def compile_completion_marker(looper: LooperConfig) -> re.Pattern[str] | None:
         raise ConfigError(f"invalid completion marker {looper.completion_marker!r}: {exc}") from exc
 
 
+def compile_output_match_pattern(looper: LooperConfig) -> re.Pattern[str] | None:
+    if not looper.cb_output_match_pattern:
+        return None
+    try:
+        return re.compile(looper.cb_output_match_pattern)
+    except re.error as exc:
+        raise ConfigError(
+            f"invalid cb_output_match_pattern {looper.cb_output_match_pattern!r}: {exc}"
+        ) from exc
+
+
+def loop_logs_match(pattern: re.Pattern[str], paths: list[Path]) -> bool:
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if pattern.search(text):
+            return True
+    return False
+
+
 UNCHECKED_MARKDOWN_TASK_PATTERN = re.compile(r"^\s*[-*]\s+\[\s\]", re.MULTILINE)
 
 
@@ -216,6 +238,10 @@ def apply_run_options(config: LooperConfig, options: RunOptions) -> LooperConfig
         updates["cb_no_progress"] = options.cb_no_progress
     if options.cb_output_decline is not None:
         updates["cb_output_decline"] = options.cb_output_decline
+    if options.cb_output_match_pattern is not None:
+        updates["cb_output_match_pattern"] = options.cb_output_match_pattern
+    if options.cb_output_match_repeats is not None:
+        updates["cb_output_match_repeats"] = options.cb_output_match_repeats
     if options.once:
         updates["max_loops"] = 1
     if options.fresh_session_per_loop is not None:
@@ -251,6 +277,7 @@ async def run_loop(
     prompt_state = prompt_file_state(looper.prompt_file)
     patterns = compile_stop_patterns(looper.stop_patterns)
     completion_pattern = compile_completion_marker(looper)
+    output_match_pattern = compile_output_match_pattern(looper)
 
     if options.cwd is not None:
         agent = replace(agent, cwd=options.cwd)
@@ -393,6 +420,7 @@ async def run_loop(
     completion_streak_count = 0
     no_progress_count = 0
     output_decline_count = 0
+    output_match_count = 0
     previous_loop_output_bytes: int | None = None
     persistent_session_name = label
     persistent_session_id = ""
@@ -421,6 +449,7 @@ async def run_loop(
 
         loop_started_at = time.monotonic()
         loop_output_bytes = 0
+        loop_log_paths: list[Path] = []
         loop_completion_detected = False
         progress_before = None
         session_name = (
@@ -469,6 +498,7 @@ async def run_loop(
             first_prompt_in_session = False
             retry_count = 0
             log_path = run_dir / f"loop-{loop_number:04d}__prompt-{prompt_index:03d}.log"
+            loop_log_paths.append(log_path)
             if tail_pane_active:
                 update_current_log_pointer_fn(run_dir=run_dir, log_path=log_path)
 
@@ -732,6 +762,31 @@ async def run_loop(
             else:
                 output_decline_count = 0
             previous_loop_output_bytes = loop_output_bytes
+
+        if output_match_pattern is not None:
+            if loop_logs_match(output_match_pattern, loop_log_paths):
+                output_match_count += 1
+                print(
+                    "output match detected "
+                    f"({output_match_count}/{looper.cb_output_match_repeats}): "
+                    f"{looper.cb_output_match_pattern}"
+                )
+                state.update(
+                    output_match_detected=True,
+                    output_match_count=output_match_count,
+                    output_match_pattern=looper.cb_output_match_pattern,
+                )
+                if output_match_count >= looper.cb_output_match_repeats:
+                    reason = f"output matched configured pattern for {output_match_count} loop(s)"
+                    print(f"STOP: {reason}")
+                    set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
+                    set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, reason[:250])
+                    return stop_run(reason=reason, exit_code=0)
+            else:
+                if output_match_count:
+                    print("output match missing; resetting output-match streak")
+                output_match_count = 0
+                state.update(output_match_detected=False, output_match_count=0)
 
         if options.dry_run:
             print("dry run complete")

@@ -47,6 +47,7 @@ class ClaudeSessionEvent:
     role: str | None
     timestamp: str | None
     content_types: tuple[str, ...]
+    stop_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,11 @@ def parse_claude_session_line(line: str) -> ClaudeSessionEvent | None:
         if isinstance(raw_role, str) and raw_role:
             role = raw_role
         content = message.get("content")
+    raw_stop_reason = (
+        message.get("stop_reason")
+        if isinstance(message, dict)
+        else data.get("stop_reason")
+    )
 
     event_type = data.get("type")
     session_id = data.get("sessionId")
@@ -145,6 +151,7 @@ def parse_claude_session_line(line: str) -> ClaudeSessionEvent | None:
         role=role,
         timestamp=timestamp if isinstance(timestamp, str) else None,
         content_types=_content_types_from_value(content),
+        stop_reason=raw_stop_reason if isinstance(raw_stop_reason, str) else None,
     )
 
 
@@ -186,6 +193,12 @@ def assess_claude_hybrid_signals(
     last_event_type = tail.events[-1].event_type if tail.events else None
     role_events = [event.role for event in tail.events if event.role]
     last_role = role_events[-1] if role_events else None
+    assistant_events = [
+        event
+        for event in tail.events
+        if event.role == "assistant" or event.event_type == "assistant"
+    ]
+    last_assistant_stop_reason = assistant_events[-1].stop_reason if assistant_events else None
     assistant_event_seen = any(
         event.role == "assistant" or event.event_type == "assistant" for event in tail.events
     )
@@ -224,6 +237,20 @@ def assess_claude_hybrid_signals(
         )
 
     if assistant_event_seen:
+        if last_assistant_stop_reason == "tool_use":
+            return ClaudeHybridAssessment(
+                pane_state=normalized_state,
+                session_id=session_id,
+                next_offset=tail.offset,
+                event_count=len(tail.events),
+                last_event_type=last_event_type,
+                last_role=last_role,
+                assistant_event_seen=assistant_event_seen,
+                user_event_seen=user_event_seen,
+                ready_to_send_next=False,
+                confidence="running",
+                reason="assistant requested tool use; waiting for terminal assistant event",
+            )
         confidence: HybridConfidence = "high"
         reason = "pane ready and assistant event seen in Claude session file"
     elif tail.events:

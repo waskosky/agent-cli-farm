@@ -94,6 +94,7 @@ from .retry import (
 from .runner import (
     apply_run_options,
     compile_completion_marker,
+    compile_output_match_pattern,
     compile_stop_patterns,
     make_label,
     make_run_dir,
@@ -164,6 +165,7 @@ __all__ = [
     "classify_codex_output",
     "clean_farm_args",
     "compile_completion_marker",
+    "compile_output_match_pattern",
     "compile_stop_patterns",
     "control_file_path",
     "control_main",

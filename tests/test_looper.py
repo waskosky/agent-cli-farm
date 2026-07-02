@@ -2499,6 +2499,66 @@ fresh_session_per_loop = "false"
         self.assertEqual(calls, 3)
         self.assertEqual(sleeps, [0.25, 0.25])
 
+    def test_run_loop_stops_after_configured_output_match_repeats(self) -> None:
+        async def exercise() -> tuple[int, int, list[float]]:
+            calls = 0
+            sleeps: list[float] = []
+            original_run_command = self.looper.run_command
+            original_sleep = self.looper.asyncio.sleep
+
+            async def fake_run_command(**kwargs: object) -> object:
+                nonlocal calls
+                calls += 1
+                log_path = kwargs["log_path"]
+                assert isinstance(log_path, Path)
+                log_path.write_text("STATUS: BLOCKED\n", encoding="utf-8")
+                return self.looper.ProcessResult(returncode=0, output_bytes=16)
+
+            async def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+
+            self.looper.run_command = fake_run_command
+            self.looper.asyncio.sleep = fake_sleep
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="generic",
+                        kind="generic",
+                        cwd=root,
+                        first_command=["agent", "{prompt}"],
+                    )
+                    looper = self.looper.LooperConfig(
+                        mode="single",
+                        mode_explicit=True,
+                        prompt_file=prompt_file,
+                        prompt_file_explicit=True,
+                        log_dir=root / "runs",
+                        sleep_seconds=0.25,
+                        cb_output_match_pattern=r"(?m)^STATUS:\s*BLOCKED$",
+                        cb_output_match_repeats=2,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="generic",
+                        config_path=root / "agent-looper.toml",
+                        label="output-match-smoke",
+                    )
+
+                    result = await self.looper.run_loop(agent=agent, looper=looper, options=options)
+            finally:
+                self.looper.run_command = original_run_command
+                self.looper.asyncio.sleep = original_sleep
+
+            return result, calls, sleeps
+
+        result, calls, sleeps = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, 2)
+        self.assertEqual(sleeps, [0.25])
+
     def test_output_decline_counter_resets_when_output_recovers(self) -> None:
         async def exercise() -> tuple[int, int, list[float]]:
             outputs = [100, 80, 90, 70, 60]
@@ -2619,6 +2679,39 @@ class LooperCliTests(unittest.TestCase):
         self.assertIn("agent: codex (codex)", result.stdout)
         self.assertIn("dry run complete", result.stdout)
 
+    def test_cb_output_match_flags_are_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workdir = Path(td)
+            prompt_file = workdir / "PROMPT.md"
+            prompt_file.write_text("hello\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "--agent",
+                    "codex",
+                    "--prompt-file",
+                    str(prompt_file),
+                    "--label",
+                    "match-smoke",
+                    "--cb-output-match",
+                    r"STATUS:\s*BLOCKED",
+                    "--cb-output-match-repeats",
+                    "3",
+                    "--once",
+                    "--dry-run",
+                ],
+                cwd=workdir,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("agent: codex (codex)", result.stdout)
+        self.assertIn("dry run complete", result.stdout)
+
     def test_version_marks_farm_default_looper_release(self) -> None:
         result = subprocess.run(
             [sys.executable, str(LOOPER_PATH), "--version"],
@@ -2628,7 +2721,7 @@ class LooperCliTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "codex-looper 0.3.1")
+        self.assertEqual(result.stdout.strip(), "codex-looper 0.3.2")
 
     def test_default_label_uses_looper_short_id(self) -> None:
         with tempfile.TemporaryDirectory() as td:

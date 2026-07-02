@@ -399,6 +399,17 @@ def load_config(
         default_looper.cb_output_decline,
         minimum=0,
     )
+    cb_output_match_pattern = _as_str(
+        raw_looper.get("cb_output_match_pattern"),
+        "looper.cb_output_match_pattern",
+        default_looper.cb_output_match_pattern,
+    )
+    cb_output_match_repeats = _as_int(
+        raw_looper.get("cb_output_match_repeats"),
+        "looper.cb_output_match_repeats",
+        default_looper.cb_output_match_repeats,
+        minimum=1,
+    )
     looper = LooperConfig(
         default_agent=_as_str(
             raw_looper.get("default_agent"),
@@ -496,6 +507,8 @@ def load_config(
         backup_keep=backup_keep,
         cb_no_progress=cb_no_progress,
         cb_output_decline=cb_output_decline,
+        cb_output_match_pattern=cb_output_match_pattern,
+        cb_output_match_repeats=cb_output_match_repeats,
     )
 
     agents = default_agents()

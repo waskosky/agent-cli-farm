@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 AgentKind = Literal["claude", "codex", "generic"]
 AgentInterface = Literal["json", "hybrid"]
 LooperMode = Literal["single", "sequence"]
@@ -93,6 +93,8 @@ class LooperConfig:
     backup_keep: int = 10
     cb_no_progress: int = 0
     cb_output_decline: int = 0
+    cb_output_match_pattern: str = ""
+    cb_output_match_repeats: int = 1
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,8 @@ class RunOptions:
     backup_keep: int | None = None
     cb_no_progress: int | None = None
     cb_output_decline: int | None = None
+    cb_output_match_pattern: str | None = None
+    cb_output_match_repeats: int | None = None
     preset: str | None = None
     once: bool = False
     fresh_session_per_loop: bool | None = None

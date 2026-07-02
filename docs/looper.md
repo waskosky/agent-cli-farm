@@ -110,6 +110,8 @@ Numeric constraints are strict. Integer counters must be whole numbers and finit
 | `--backup-keep N` | `10` | nonnegative integer | Prune older backup branches, keeping the newest N. `0` disables pruning. |
 | `--cb-no-progress N` | `0` | nonnegative integer | Stop after N completed loops with no git workspace fingerprint change. |
 | `--cb-output-decline N` | `0` | nonnegative integer | Stop after N consecutive completed loops whose captured output byte count is lower than the prior loop. |
+| `--cb-output-match REGEX` | unset | valid regex string | Stop after completed loop output matches the regex for the configured repeat count. |
+| `--cb-output-match-repeats N` | `1` | positive integer | Matching loops required before `--cb-output-match` stops the run. |
 | `--once` | off | boolean flag | Equivalent to `--max-loops 1`. |
 | `--fresh-session-per-loop` | on | boolean flag | Start a new agent session for each completed loop. |
 | `--reuse-session` | off | boolean flag | Reuse one agent session across all loops. |
@@ -155,6 +157,8 @@ backup_prefix = "looper-backup"
 backup_keep = 10
 cb_no_progress = 0
 cb_output_decline = 0
+cb_output_match_pattern = ""
+cb_output_match_repeats = 1
 ```
 
 Agent defaults:
@@ -196,9 +200,9 @@ Strict TOML typing is part of the contract:
 
 | Config key family | Required type |
 | --- | --- |
-| `looper.default_agent`, `mode`, `prompt_file`, `log_dir`, `completion_marker`, `plan_file`, `backup_prefix` | string |
+| `looper.default_agent`, `mode`, `prompt_file`, `log_dir`, `completion_marker`, `plan_file`, `backup_prefix`, `cb_output_match_pattern` | string |
 | `looper.timeout_seconds`, `sleep_seconds`, `retry_notify_after_seconds` | finite integer or float |
-| `looper.max_loops`, `max_transient_retries`, `completion_streak`, `backup_keep`, `cb_no_progress`, `cb_output_decline` | integer |
+| `looper.max_loops`, `max_transient_retries`, `completion_streak`, `backup_keep`, `cb_no_progress`, `cb_output_decline`, `cb_output_match_repeats` | integer |
 | `looper.fresh_session_per_loop`, `reload_prompt_each_loop`, `completion_enabled`, `backup_enabled` | boolean |
 | `agents.<name>.kind`, `interface`, `model`, `effort` | string |
 | `agents.<name>.extra_args`, `interactive_command`, `first_command`, `resume_command`, `stop_patterns` | array of strings |
@@ -254,6 +258,8 @@ Pruning is scoped to the exact configured namespace. For example, a prefix of `l
 
 Output-decline is byte-count based. It does not judge semantic quality, and it can be fooled by verbose low-value output or concise high-value output.
 
+`--cb-output-match REGEX --cb-output-match-repeats N` stops after N consecutive completed loops whose captured logs match the configured regex. Use it for project-specific status lines such as repeated blocked reports while keeping the looper engine independent of any one prompt format. A non-matching loop resets the streak.
+
 Every completed loop prints a compact metrics line:
 
 ```text
@@ -296,6 +302,7 @@ The looper stops when it sees:
 - configured completion marker and satisfied plan gate
 - configured no-progress circuit breaker
 - configured output-decline circuit breaker
+- configured output-match circuit breaker
 - configured max loop count
 
 Logs are written under `.agent-looper/runs/<timestamp>__<label>__<random>/`. Run directory names use UTC time with subsecond precision plus a random suffix to avoid collisions. The `.agent-looper/current-log` pointer is updated atomically so the split tmux tail pane either sees the previous complete pointer or the next complete pointer.

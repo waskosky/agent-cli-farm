@@ -50,6 +50,8 @@ backup_prefix = "looper-backup"
 backup_keep = 10
 cb_no_progress = 0
 cb_output_decline = 0
+cb_output_match_pattern = ""
+cb_output_match_repeats = 1
 
 [agents.claude]
 kind = "claude"

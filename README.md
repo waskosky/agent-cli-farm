@@ -101,6 +101,7 @@ codex-looper --once --label repo-smoke
 codex-looper --mode sequence --prompt-file prompts.md --once
 claude-looper --complete-on 'EXIT_SIGNAL:\s*true' --plan-file fix_plan.md --backup
 codex-looper --cb-no-progress 3 --cb-output-decline 2 --backup
+codex-looper --cb-output-match 'STATUS:\s*BLOCKED' --cb-output-match-repeats 3
 codex-looper --preset rai
 claude-looper --farm-session work --label cleanup-pass --cwd /path/to/project
 codex-looper --local --once --label local-smoke
@@ -129,6 +130,7 @@ Looper defaults and limits:
 - Config loading is strict: documented scalars must have the expected TOML type, numeric values must be finite, and invalid regexes fail before the loop starts.
 - Backup branches point to committed `HEAD` only; they are not dirty-worktree snapshots. Pruning stays inside the exact configured prefix namespace.
 - The no-progress circuit breaker fingerprints committed `HEAD`, status entries, tracked metadata, and file contents while ignoring the looper run directory.
+- The output-match circuit breaker stops repeated project-defined status reports, for example a loop that keeps saying it is blocked.
 - Run directories include a high-resolution timestamp and random suffix; the current-log pointer is updated atomically. In split mode, if tmux cannot create the tail pane, live transcript streaming falls back to the supervisor pane.
 - Every looper run writes durable machine-readable state to `state.json`, append-only lifecycle history to `events.jsonl`, and accepts optional operator commands in `control.jsonl` in its run directory. `codex-status loopers` reads state files, so stop reasons survive pane exits and can be scraped without tmux.
 

@@ -74,6 +74,7 @@ class ClaudeHybridTests(unittest.TestCase):
                             "timestamp": "2026-06-27T00:00:01Z",
                             "message": {
                                 "role": "assistant",
+                                "stop_reason": "end_turn",
                                 "content": [{"type": "text", "text": "redacted answer"}],
                             },
                         },
@@ -89,6 +90,7 @@ class ClaudeHybridTests(unittest.TestCase):
         self.assertEqual([event.event_type for event in second.events], ["assistant"])
         self.assertEqual(second.events[0].role, "assistant")
         self.assertEqual(second.events[0].content_types, ("text",))
+        self.assertEqual(second.events[0].stop_reason, "end_turn")
 
     def test_assessment_is_high_confidence_when_pane_ready_and_session_advanced(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -109,6 +111,7 @@ class ClaudeHybridTests(unittest.TestCase):
                         "sessionId": SESSION_ID,
                         "message": {
                             "role": "assistant",
+                            "stop_reason": "end_turn",
                             "content": [{"type": "text", "text": "redacted answer"}],
                         },
                     },
@@ -125,6 +128,45 @@ class ClaudeHybridTests(unittest.TestCase):
         self.assertEqual(assessment.last_role, "assistant")
         self.assertIn("pane ready", assessment.reason)
         self.assertIn("assistant event", assessment.reason)
+
+    def test_assessment_waits_for_terminal_assistant_event_after_tool_use(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / f"{SESSION_ID}.jsonl"
+            write_jsonl(
+                path,
+                [
+                    {
+                        "type": "user",
+                        "uuid": "user-1",
+                        "sessionId": SESSION_ID,
+                        "message": {"role": "user", "content": "redacted prompt"},
+                    },
+                    {
+                        "type": "assistant",
+                        "uuid": "assistant-tool",
+                        "parentUuid": "user-1",
+                        "sessionId": SESSION_ID,
+                        "message": {
+                            "role": "assistant",
+                            "stop_reason": "tool_use",
+                            "content": [{"type": "tool_use", "id": "tool-1", "name": "Bash"}],
+                        },
+                    },
+                    {
+                        "type": "user",
+                        "uuid": "tool-result-1",
+                        "parentUuid": "assistant-tool",
+                        "sessionId": SESSION_ID,
+                        "message": {"role": "user", "content": "tool result"},
+                    },
+                ],
+            )
+
+            assessment = assess_claude_hybrid_signals("READY", session_path=path)
+
+        self.assertFalse(assessment.ready_to_send_next)
+        self.assertEqual(assessment.confidence, "running")
+        self.assertIn("tool use", assessment.reason)
 
     def test_assessment_stays_running_when_pane_is_running(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -295,6 +337,7 @@ class ClaudeHybridTests(unittest.TestCase):
                                     "sessionId": SESSION_ID,
                                     "message": {
                                         "role": "assistant",
+                                        "stop_reason": "end_turn",
                                         "content": [
                                             {
                                                 "type": "text",
@@ -337,6 +380,97 @@ class ClaudeHybridTests(unittest.TestCase):
         flattened_args = "\0".join(arg for command, _ in commands for arg in command)
         self.assertNotIn("complex prompt", flattened_args)
         self.assertTrue(any(command[:3] == ["tmux", "load-buffer", "-b"] for command, _ in commands))
+
+    def test_controller_waits_for_final_answer_after_tool_use(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_path = root / ".claude" / "projects" / "-tmp-project" / f"{SESSION_ID}.jsonl"
+            session_path.parent.mkdir(parents=True)
+            session_path.write_text("", encoding="utf-8")
+            capture_count = 0
+
+            def append_row(row: dict[str, object]) -> None:
+                with session_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(row) + "\n")
+
+            def command_runner(command: list[str], *, input_text: str | None = None):
+                nonlocal capture_count
+                if command[:3] == ["tmux", "split-window", "-P"]:
+                    return TmuxCommandResult(returncode=0, stdout="%7\n")
+                if command[:3] == ["tmux", "capture-pane", "-t"]:
+                    capture_count += 1
+                    if capture_count == 2:
+                        append_row(
+                            {
+                                "type": "user",
+                                "uuid": "tool-result-1",
+                                "sessionId": SESSION_ID,
+                                "message": {"role": "user", "content": "tool result"},
+                            }
+                        )
+                        append_row(
+                            {
+                                "type": "assistant",
+                                "uuid": "assistant-final",
+                                "parentUuid": "tool-result-1",
+                                "sessionId": SESSION_ID,
+                                "message": {
+                                    "role": "assistant",
+                                    "stop_reason": "end_turn",
+                                    "content": [{"type": "text", "text": "final answer"}],
+                                },
+                            }
+                        )
+                    return TmuxCommandResult(returncode=0, stdout="Done\n> ")
+                if command[:3] == ["tmux", "list-panes", "-t"]:
+                    return TmuxCommandResult(returncode=0, stdout="4242\n")
+                if command[:2] == ["pgrep", "-P"]:
+                    return TmuxCommandResult(returncode=1)
+                if command[:2] == ["lsof", "-Fn"]:
+                    return TmuxCommandResult(returncode=0, stdout=f"n{session_path}\n")
+                if command[:3] == ["tmux", "paste-buffer", "-d"]:
+                    append_row(
+                        {
+                            "type": "user",
+                            "uuid": "user-1",
+                            "sessionId": SESSION_ID,
+                            "message": {"role": "user", "content": "redacted"},
+                        }
+                    )
+                    append_row(
+                        {
+                            "type": "assistant",
+                            "uuid": "assistant-tool",
+                            "parentUuid": "user-1",
+                            "sessionId": SESSION_ID,
+                            "message": {
+                                "role": "assistant",
+                                "stop_reason": "tool_use",
+                                "content": [{"type": "tool_use", "id": "tool-1", "name": "Bash"}],
+                            },
+                        }
+                    )
+                    return TmuxCommandResult(returncode=0)
+                return TmuxCommandResult(returncode=0)
+
+            controller = ClaudeHybridController(
+                command=["claude"],
+                cwd=root,
+                env={},
+                command_runner=command_runner,
+                sleep_fn=lambda seconds: None,
+            )
+
+            result = controller.run_turn(
+                prompt="prompt with tool",
+                timeout_seconds=5,
+                log_path=root / "turn.log",
+                completion_pattern=None,
+                stop_patterns=[],
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertGreaterEqual(capture_count, 2)
 
     def test_controller_does_not_finish_turn_without_new_user_event(self) -> None:
         with tempfile.TemporaryDirectory() as td:
