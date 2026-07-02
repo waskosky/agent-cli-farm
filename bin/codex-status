@@ -4,6 +4,14 @@ set -euo pipefail
 # List and manage Codex CLI farm sessions
 # Usage: codex-status [--session SESSION] [sessions|windows|activity|logs|loopers]
 
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+SCRIPT_DIR="${SCRIPT_PATH%/*}"
+if [ "$SCRIPT_DIR" = "$SCRIPT_PATH" ]; then
+    SCRIPT_DIR="."
+fi
+SCRIPT_DIR="$(cd "$SCRIPT_DIR" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PYTHONPATH_BASE="$REPO_ROOT:$SCRIPT_DIR"
 DEFAULT_SESSION="codexfarm"
 
 board_session_name() {
@@ -19,6 +27,7 @@ ACTION="sessions"
 SESSION="${CODEX_SESSION:-$DEFAULT_SESSION}"
 action_set=0
 session_set=0
+REPAIR_STALE_LOOPERS=0
 
 while (( "$#" )); do
     case "${1:-}" in
@@ -34,6 +43,10 @@ while (( "$#" )); do
         sessions|windows|activity|logs|loopers)
             ACTION="$1"
             action_set=1
+            shift
+            ;;
+        --repair-stale|--repair-stale-loopers)
+            REPAIR_STALE_LOOPERS=1
             shift
             ;;
         -h|--help)
@@ -188,13 +201,14 @@ case "$ACTION" in
         ;;
 
     loopers)
-        python3 - <<'PY'
+        CODEX_STATUS_REPAIR_STALE_LOOPERS="$REPAIR_STALE_LOOPERS" PYTHONPATH="$PYTHONPATH_BASE${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any
+
+from codex_looper.status_state import iter_looper_state_views
 
 
 def text(value: Any, default: str = "-") -> str:
@@ -204,28 +218,25 @@ def text(value: Any, default: str = "-") -> str:
 
 
 root = Path(os.environ.get("CODEX_LOOPER_STATE_ROOT") or Path.cwd() / ".agent-looper" / "runs")
+repair_stale = os.environ.get("CODEX_STATUS_REPAIR_STALE_LOOPERS") == "1"
 print("=== Looper Runs ===")
 if not root.exists():
     print(f"No looper runs found at {root}")
     raise SystemExit(0)
 
-states: list[tuple[str, Path, dict[str, Any]]] = []
-for state_path in root.glob("*/state.json"):
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        states.append(("", state_path, {"label": state_path.parent.name, "status": f"unreadable: {exc}"}))
-        continue
-    updated_at = text(state.get("updated_at"), "")
-    states.append((updated_at, state_path, state))
+states = list(iter_looper_state_views(root, repair_stale=repair_stale))
 
 if not states:
     print(f"No looper state files found at {root}")
     raise SystemExit(0)
 
-for _, state_path, state in sorted(states, reverse=True):
+for view in sorted(states, key=lambda item: item.sort_key, reverse=True):
+    state_path = view.state_path
+    state = view.state
     label = text(state.get("label") or state_path.parent.name)
     status = text(state.get("status"), "unknown")
+    if view.stale:
+        status = "stale"
     agent_name = text(state.get("agent_name"), "unknown")
     agent_kind = text(state.get("agent_kind"), "unknown")
     loop = text(state.get("current_loop"))
@@ -235,6 +246,9 @@ for _, state_path, state in sorted(states, reverse=True):
     if state.get("updated_at"):
         print(f"    updated: {state['updated_at']}")
     print(f"    run: {text(state.get('run_dir') or state_path.parent)}")
+    if view.stale_reason:
+        prefix = "repaired" if view.repaired else "stale"
+        print(f"    {prefix}: {view.stale_reason}")
     if state.get("stop_reason"):
         print(f"    stop: {state['stop_reason']}")
     if state.get("last_log"):
@@ -251,6 +265,8 @@ PY
         echo "  activity - Show window status, command, and recent pane output"
         echo "  logs     - Show log files"
         echo "  loopers  - Show durable looper run state from .agent-looper/runs"
+        echo "Options:"
+        echo "  --repair-stale-loopers  Mark active looper states stopped when their supervisor pid is gone"
         if [ "$ACTION" = "help" ]; then
             exit 0
         fi

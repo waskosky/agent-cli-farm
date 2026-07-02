@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -112,6 +113,115 @@ esac
         self.assertIn("session=session-abc", result.stdout)
         self.assertIn("stop: completion marker", result.stdout)
         self.assertIn("loop-0002__prompt-001.log", result.stdout)
+
+    def test_loopers_marks_and_repairs_stale_running_state(self) -> None:
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead_pid = dead.pid
+        dead.wait(timeout=5)
+
+        with tempfile.TemporaryDirectory(prefix="status-script-test-") as td:
+            project = Path(td)
+            run_dir = project / ".agent-looper" / "runs" / "20260702T000000Z__stale-smoke__abc123"
+            run_dir.mkdir(parents=True)
+            state = {
+                "schema_version": 1,
+                "status": "running",
+                "pid": dead_pid,
+                "label": "stale-smoke",
+                "agent_name": "generic",
+                "agent_kind": "generic",
+                "run_dir": str(run_dir),
+                "current_loop": 12,
+                "current_prompt_index": 1,
+                "updated_at": "2026-07-02T00:00:05Z",
+            }
+            state_path = run_dir / "state.json"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            bin_dir = project / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "python3").symlink_to(sys.executable)
+            env = os.environ.copy()
+            env["PATH"] = str(bin_dir)
+
+            stale_result = subprocess.run(
+                ["/bin/bash", str(REPO_ROOT / "bin" / "codex-status"), "loopers"],
+                cwd=project,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(stale_result.returncode, 0, stale_result.stderr)
+            self.assertIn("stale-smoke: [stale] generic/generic", stale_result.stdout)
+            self.assertIn(f"stale: supervisor process {dead_pid} is no longer running", stale_result.stdout)
+            self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["status"], "running")
+            self.assertFalse((run_dir / "events.jsonl").exists())
+
+            repair_result = subprocess.run(
+                [
+                    "/bin/bash",
+                    str(REPO_ROOT / "bin" / "codex-status"),
+                    "loopers",
+                    "--repair-stale-loopers",
+                ],
+                cwd=project,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(repair_result.returncode, 0, repair_result.stderr)
+            self.assertIn("stale-smoke: [stopped] generic/generic", repair_result.stdout)
+            self.assertIn(f"repaired: supervisor process {dead_pid} is no longer running", repair_result.stdout)
+            self.assertIn("stop: external termination", repair_result.stdout)
+            repaired = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(repaired["status"], "stopped")
+            self.assertEqual(repaired["last_event"], "run_stopped")
+            events = (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(json.loads(events[0])["event"], "run_stopped")
+
+    def test_loopers_imports_package_from_installed_bin_layout(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="status-script-test-") as td:
+            project = Path(td) / "project"
+            project.mkdir()
+            run_dir = project / ".agent-looper" / "runs" / "20260702T010000Z__installed__abc123"
+            run_dir.mkdir(parents=True)
+            (run_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "stopped",
+                        "label": "installed",
+                        "agent_name": "generic",
+                        "agent_kind": "generic",
+                        "run_dir": str(run_dir),
+                        "updated_at": "2026-07-02T01:00:05Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            install_bin = Path(td) / "home" / "bin"
+            install_bin.mkdir(parents=True)
+            installed_status = install_bin / "codex-status"
+            shutil.copy2(REPO_ROOT / "bin" / "codex-status", installed_status)
+            shutil.copytree(REPO_ROOT / "codex_looper", install_bin / "codex_looper")
+            (install_bin / "python3").symlink_to(sys.executable)
+            env = os.environ.copy()
+            env["PATH"] = str(install_bin)
+
+            result = subprocess.run(
+                ["/bin/bash", str(installed_status), "loopers"],
+                cwd=project,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("installed: [stopped] generic/generic", result.stdout)
 
 
 if __name__ == "__main__":

@@ -313,7 +313,7 @@ Each run directory also contains durable machine-readable status:
 - `events.jsonl`: append-only lifecycle history for run start, loop start/end, prompt start/end, retry waits, and final stop.
 - `control.jsonl`: optional append-only operator inbox. Queue `stop_after_loop`, `stop_after_prompt`, or `interrupt_now` commands with `codex-looper control stop ...`; the supervisor records consumed commands in `events.jsonl` and stops at the requested safe boundary.
 
-Use `codex-status loopers` from a project root to read `.agent-looper/runs/*/state.json` without attaching to tmux. Set `CODEX_LOOPER_STATE_ROOT=/path/to/runs` to point it at an aggregated or remote-synced run directory.
+Use `codex-status loopers` from a project root to read `.agent-looper/runs/*/state.json` without attaching to tmux. Active states whose supervisor pid is gone are shown as `stale`. Use `codex-status loopers --repair-stale-loopers` to mark those stale states `stopped`, append a `run_stopped` event, and record an external-termination stop reason. Set `CODEX_LOOPER_STATE_ROOT=/path/to/runs` to point it at an aggregated or remote-synced run directory.
 
 Examples:
 
