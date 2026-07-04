@@ -313,7 +313,7 @@ Each run directory also contains durable machine-readable status:
 - `events.jsonl`: append-only lifecycle history for run start, loop start/end, prompt start/end, retry waits, and final stop.
 - `control.jsonl`: optional append-only operator inbox. Queue `stop_after_loop`, `stop_after_prompt`, or `interrupt_now` commands with `codex-looper control stop ...`; the supervisor records consumed commands in `events.jsonl` and stops at the requested safe boundary.
 
-Use `codex-status loopers` from a project root to read `.agent-looper/runs/*/state.json` without attaching to tmux. Active states whose supervisor pid is gone are shown as `stale`. Use `codex-status loopers --repair-stale-loopers` to mark those stale states `stopped`, append a `run_stopped` event, and record an external-termination stop reason. Set `CODEX_LOOPER_STATE_ROOT=/path/to/runs` to point it at an aggregated or remote-synced run directory.
+Use `codex-status loopers` from a project root to read `.agent-looper/runs/*/state.json` without attaching to tmux. Active states whose supervisor pid is gone or defunct are shown as `stale`. Use `codex-status loopers --repair-stale-loopers` to mark those stale states `stopped`, append a `run_stopped` event, and record an external-termination stop reason. Set `CODEX_LOOPER_STATE_ROOT=/path/to/runs` to point it at an aggregated or remote-synced run directory.
 
 Examples:
 
@@ -321,7 +321,12 @@ Examples:
 codex-looper control stop LOOPER-rai --after-loop --reason "merge checkpoint"
 codex-looper control stop LOOPER-rai --after-prompt --state-root /path/to/.agent-looper/runs
 codex-looper control stop --run-dir .agent-looper/runs/20260628T000000Z__LOOPER-rai__abc123 --now
+codex-looper control stop LOOPER-rai --force --grace-seconds 5
 ```
+
+`--now` queues `interrupt_now` and sends SIGINT to every known runtime target: the child process group, hybrid pane descendants and process group when present, and the supervisor process. `--force` implies `--now`; after the grace interval it escalates still-running targets through SIGTERM and then SIGKILL, then attempts stale-state repair for the run directory. Do not combine `--force` with `--after-loop` or `--after-prompt`; those are cooperative safe-boundary stops.
+
+Priority follow-up for the tmux control pane is to make it a small operator UI over this same backend rather than a separate stop implementation. The pane should show the selected run, current status, and bounded actions such as stop after prompt, stop after loop, interrupt now, force stop, repair stale state, open the current log, and refresh status. It should read `state.json`, append `control.jsonl`, and call the shared stop-target functions so CLI and pane behavior stay identical.
 
 ## Farm Integration
 
@@ -351,6 +356,7 @@ codex-status loopers
 - It does not bypass authentication, permissions, sandboxing, or provider limits unless you explicitly pass agent-native flags that do so.
 - Provider status and stop detection are heuristic because Codex/Claude/Gemini CLIs do not expose a shared structured status protocol.
 - Claude hybrid mode requires tmux because the real Claude interface lives in a managed pane. Use `--interface json` for local non-tmux runs or scripted noninteractive behavior.
+- The split pane is currently a live transcript pane, not an interactive control panel.
 - The Gemini backend is intentionally generic until a stable noninteractive resume interface is confirmed.
 - There is no per-worktree run lock. Starting multiple write-enabled loopers against the same checkout can race or overwrite work.
 - Backup branches protect committed `HEAD`, not dirty worktree state.

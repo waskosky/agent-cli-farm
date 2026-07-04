@@ -132,7 +132,8 @@ Looper defaults and limits:
 - The no-progress circuit breaker fingerprints committed `HEAD`, status entries, tracked metadata, and file contents while ignoring the looper run directory.
 - The output-match circuit breaker stops repeated project-defined status reports, for example a loop that keeps saying it is blocked.
 - Run directories include a high-resolution timestamp and random suffix; the current-log pointer is updated atomically. In split mode, if tmux cannot create the tail pane, live transcript streaming falls back to the supervisor pane.
-- Every looper run writes durable machine-readable state to `state.json`, append-only lifecycle history to `events.jsonl`, and accepts optional operator commands in `control.jsonl` in its run directory. `codex-status loopers` reads state files, flags active states whose supervisor process is gone as stale, and `codex-status loopers --repair-stale-loopers` records those states as externally stopped so stop reasons survive pane exits and can be scraped without tmux.
+- Every looper run writes durable machine-readable state to `state.json`, append-only lifecycle history to `events.jsonl`, and accepts optional operator commands in `control.jsonl` in its run directory. `codex-status loopers` reads state files, flags active states whose supervisor process is gone or defunct as stale, and `codex-status loopers --repair-stale-loopers` records those states as externally stopped so stop reasons survive pane exits and can be scraped without tmux.
+- `codex-looper control stop --now` interrupts all known runtime targets, including hybrid tmux pane descendants and process groups. Use `codex-looper control stop LABEL --force` for a stuck looper that needs SIGTERM/SIGKILL escalation and stale-state repair.
 
 ### 4. Watch All Instances
 

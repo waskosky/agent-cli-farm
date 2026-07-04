@@ -10,6 +10,16 @@ from codex_looper import status_state
 
 
 class StatusStateTest(unittest.TestCase):
+    def test_process_is_running_treats_linux_zombies_as_stopped(self) -> None:
+        with mock.patch.object(status_state, "_linux_proc_state", return_value="Z"):
+            self.assertFalse(status_state.process_is_running(12345))
+
+    def test_parse_linux_proc_state_handles_parentheses_in_command_name(self) -> None:
+        self.assertEqual(
+            status_state._parse_linux_proc_state("123 (cmd with ) paren) S 1 2 3"),
+            "S",
+        )
+
     def test_active_state_stale_reason_marks_dead_supervisor(self) -> None:
         with mock.patch.object(status_state, "process_is_running", return_value=False):
             reason = status_state.active_state_stale_reason(

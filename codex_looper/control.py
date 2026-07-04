@@ -4,11 +4,13 @@ import json
 import os
 import secrets
 import signal
+import subprocess
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 CONTROL_FILENAME = "control.jsonl"
 VALID_CONTROL_ACTIONS = frozenset({"stop_after_prompt", "stop_after_loop", "interrupt_now"})
@@ -24,6 +26,22 @@ class ControlCommand:
     action: str
     reason: str
     created_at: str
+
+
+@dataclass(frozen=True)
+class SignalTarget:
+    kind: str
+    identifier: int
+    label: str
+
+
+@dataclass(frozen=True)
+class StopSignalResult:
+    stage: str
+    target: SignalTarget
+    signal_name: str
+    ok: bool
+    detail: str
 
 
 def utc_iso_stamp() -> str:
@@ -161,18 +179,239 @@ def select_control_run(
     return max(candidates, key=_state_sort_key)
 
 
-def interrupt_from_state(state: Mapping[str, Any]) -> str | None:
-    pgid = state.get("child_pgid")
-    pid = state.get("child_pid") or state.get("pid")
+def _coerce_pid(value: Any) -> int | None:
     try:
-        if pgid and os.name == "posix":
-            os.killpg(int(str(pgid)), signal.SIGINT)
-            return f"sent SIGINT to process group {pgid}"
-        if pid:
-            os.kill(int(str(pid)), signal.SIGINT)
-            return f"sent SIGINT to process {pid}"
-    except (LookupError, ProcessLookupError):
-        return "target process is no longer running"
-    except (OSError, ValueError) as exc:
-        return f"interrupt failed: {exc}"
-    return None
+        pid = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    return pid
+
+
+def _signal_name(signum: int) -> str:
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f"signal {signum}"
+
+
+def _process_group_for_pid(pid: int) -> int | None:
+    if os.name != "posix":
+        return None
+    try:
+        pgid = os.getpgid(pid)
+    except (LookupError, ProcessLookupError, PermissionError, OSError):
+        return None
+    return pgid if pgid > 0 else None
+
+
+def descendant_pids(root_pid: int) -> list[int]:
+    pending = [root_pid]
+    descendants: list[int] = []
+    seen = {root_pid}
+    while pending:
+        parent = pending.pop(0)
+        try:
+            result = subprocess.run(
+                ["pgrep", "-P", str(parent)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except (FileNotFoundError, OSError):
+            break
+        if result.returncode not in (0, 1):
+            break
+        for line in result.stdout.splitlines():
+            child = _coerce_pid(line.strip())
+            if child is None or child in seen:
+                continue
+            seen.add(child)
+            descendants.append(child)
+            pending.append(child)
+    return descendants
+
+
+def _add_target(
+    targets: list[SignalTarget],
+    seen: set[tuple[str, int]],
+    target: SignalTarget,
+) -> None:
+    key = (target.kind, target.identifier)
+    if key in seen:
+        return
+    seen.add(key)
+    targets.append(target)
+
+
+def _add_process_group_or_process(
+    targets: list[SignalTarget],
+    seen: set[tuple[str, int]],
+    *,
+    pid: int,
+    label: str,
+) -> None:
+    pgid = _process_group_for_pid(pid)
+    if pgid is not None:
+        _add_target(
+            targets,
+            seen,
+            SignalTarget("process_group", pgid, f"{label} process group"),
+        )
+        return
+    _add_target(targets, seen, SignalTarget("process", pid, f"{label} process"))
+
+
+def stop_targets_from_state(state: Mapping[str, Any]) -> list[SignalTarget]:
+    targets: list[SignalTarget] = []
+    seen: set[tuple[str, int]] = set()
+    child_pgid = _coerce_pid(state.get("child_pgid"))
+    child_pid = _coerce_pid(state.get("child_pid"))
+    hybrid_pane_pid = _coerce_pid(state.get("hybrid_pane_pid"))
+    supervisor_pid = _coerce_pid(state.get("pid"))
+
+    if child_pgid is not None and os.name == "posix":
+        _add_target(
+            targets,
+            seen,
+            SignalTarget("process_group", child_pgid, "child process group"),
+        )
+    elif child_pid is not None:
+        _add_process_group_or_process(targets, seen, pid=child_pid, label="child")
+
+    if hybrid_pane_pid is not None:
+        for descendant_pid in descendant_pids(hybrid_pane_pid):
+            _add_process_group_or_process(
+                targets,
+                seen,
+                pid=descendant_pid,
+                label="hybrid descendant",
+            )
+        _add_process_group_or_process(
+            targets,
+            seen,
+            pid=hybrid_pane_pid,
+            label="hybrid pane",
+        )
+
+    if supervisor_pid is not None:
+        _add_target(
+            targets,
+            seen,
+            SignalTarget("process", supervisor_pid, "supervisor process"),
+        )
+
+    return targets
+
+
+def target_is_running(target: SignalTarget) -> bool:
+    try:
+        if target.kind == "process_group":
+            if os.name != "posix":
+                return False
+            os.killpg(target.identifier, 0)
+        else:
+            os.kill(target.identifier, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def send_signal_to_targets(
+    targets: Iterable[SignalTarget],
+    signum: int,
+    *,
+    stage: str,
+) -> list[StopSignalResult]:
+    signal_name = _signal_name(signum)
+    results: list[StopSignalResult] = []
+    for target in targets:
+        try:
+            if target.kind == "process_group":
+                if os.name != "posix":
+                    raise OSError("process groups are unsupported on this platform")
+                os.killpg(target.identifier, signum)
+            else:
+                os.kill(target.identifier, signum)
+        except (LookupError, ProcessLookupError):
+            results.append(
+                StopSignalResult(
+                    stage=stage,
+                    target=target,
+                    signal_name=signal_name,
+                    ok=False,
+                    detail=f"{target.label} {target.identifier} is no longer running",
+                )
+            )
+        except (OSError, ValueError) as exc:
+            results.append(
+                StopSignalResult(
+                    stage=stage,
+                    target=target,
+                    signal_name=signal_name,
+                    ok=False,
+                    detail=f"{stage} failed for {target.label} {target.identifier}: {exc}",
+                )
+            )
+        else:
+            results.append(
+                StopSignalResult(
+                    stage=stage,
+                    target=target,
+                    signal_name=signal_name,
+                    ok=True,
+                    detail=f"{stage}: sent {signal_name} to {target.label} {target.identifier}",
+                )
+            )
+    return results
+
+
+def format_stop_signal_results(results: Iterable[StopSignalResult]) -> str | None:
+    result_list = list(results)
+    all_details = [result.detail for result in result_list]
+    details = [result.detail for result in result_list if result.ok or "failed" in result.detail]
+    if not details:
+        return "\n".join(all_details) if all_details else None
+    return "\n".join(details)
+
+
+def interrupt_from_state(state: Mapping[str, Any]) -> str | None:
+    results = send_signal_to_targets(
+        stop_targets_from_state(state),
+        signal.SIGINT,
+        stage="interrupt",
+    )
+    return format_stop_signal_results(results)
+
+
+def force_stop_from_state(
+    state: Mapping[str, Any],
+    *,
+    grace_seconds: float = 5.0,
+    kill: bool = True,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    target_is_running_fn: Callable[[SignalTarget], bool] = target_is_running,
+) -> list[StopSignalResult]:
+    targets = stop_targets_from_state(state)
+    if not targets:
+        return []
+
+    results = send_signal_to_targets(targets, signal.SIGINT, stage="interrupt")
+    if grace_seconds > 0:
+        sleep_fn(grace_seconds)
+
+    remaining = [target for target in targets if target_is_running_fn(target)]
+    if remaining:
+        results.extend(send_signal_to_targets(remaining, signal.SIGTERM, stage="terminate"))
+        if grace_seconds > 0:
+            sleep_fn(grace_seconds)
+
+    remaining = [target for target in targets if target_is_running_fn(target)]
+    if kill and remaining:
+        results.extend(send_signal_to_targets(remaining, signal.SIGKILL, stage="kill"))
+    return results

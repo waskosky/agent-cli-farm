@@ -13,6 +13,8 @@ from .config import load_config, resolve_preset_path
 from .control import (
     ControlError,
     append_control_command,
+    force_stop_from_state,
+    format_stop_signal_results,
     interrupt_from_state,
     select_control_run,
 )
@@ -38,6 +40,7 @@ from .models import (
     RunOptions,
 )
 from .runner import apply_run_options, make_label, run_loop_sync
+from .status_state import repair_stale_state_file
 
 LoadConfigFn = Callable[..., LoadedConfig]
 RunLoopSyncFn = Callable[..., int]
@@ -405,6 +408,17 @@ def control_main(argv: list[str] | None = None) -> int:
     timing.add_argument("--after-loop", action="store_true", help="stop after the current loop")
     timing.add_argument("--now", action="store_true", help="queue interrupt_now and send SIGINT if possible")
     stop_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="imply --now, then escalate SIGINT to SIGTERM and SIGKILL for known looper targets",
+    )
+    stop_parser.add_argument(
+        "--grace-seconds",
+        type=nonnegative_float,
+        default=5.0,
+        help="seconds to wait between forced stop escalation stages",
+    )
+    stop_parser.add_argument(
         "--state-root",
         default=os.environ.get("CODEX_LOOPER_STATE_ROOT", ".agent-looper/runs"),
         help="directory containing looper run directories",
@@ -420,11 +434,13 @@ def control_main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if args.command != "stop":
         parser.error(f"unsupported control command: {args.command}")
+    if args.force and (args.after_prompt or args.after_loop):
+        parser.error("--force cannot be combined with --after-prompt or --after-loop")
 
     action = "stop_after_loop"
     if args.after_prompt:
         action = "stop_after_prompt"
-    elif args.now:
+    elif args.now or args.force:
         action = "interrupt_now"
 
     try:
@@ -446,7 +462,20 @@ def control_main(argv: list[str] | None = None) -> int:
 
     target = state.get("label") or state.get("run_id") or run_dir.name
     print(f"queued {record['action']} for {target} at {run_dir}")
-    if args.now:
+    if args.force:
+        results = force_stop_from_state(state, grace_seconds=args.grace_seconds)
+        detail = format_stop_signal_results(results)
+        if detail:
+            print(detail)
+        state_path = run_dir / "state.json"
+        try:
+            _, repaired, stale_reason = repair_stale_state_file(state_path)
+        except Exception as exc:
+            print(f"stale-state repair failed: {exc}", file=sys.stderr)
+        else:
+            if repaired and stale_reason:
+                print(f"repaired stale looper state: {stale_reason}")
+    elif args.now:
         detail = interrupt_from_state(state)
         if detail:
             print(detail)

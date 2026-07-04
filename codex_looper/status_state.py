@@ -46,7 +46,27 @@ def _coerce_pid(value: Any) -> int | None:
     return pid
 
 
+def _parse_linux_proc_state(stat_text: str) -> str | None:
+    command_end = stat_text.rfind(")")
+    if command_end < 0:
+        return None
+    fields = stat_text[command_end + 1 :].strip().split()
+    if not fields:
+        return None
+    return fields[0]
+
+
+def _linux_proc_state(pid: int) -> str | None:
+    try:
+        stat_text = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+        return _parse_linux_proc_state(stat_text)
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+
+
 def process_is_running(pid: int) -> bool:
+    if os.name == "posix" and _linux_proc_state(pid) == "Z":
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
