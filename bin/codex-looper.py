@@ -50,6 +50,7 @@ from codex_looper.config import (
 from codex_looper.config import (
     read_config_raw as _read_config_raw_impl,
 )
+from codex_looper.control_panel import control_pane_main
 from codex_looper.farm import (
     clean_farm_args,
     default_tmux_layout_from_env,
@@ -147,6 +148,7 @@ from codex_looper.runner import (
     utc_stamp,
 )
 from codex_looper.tmux import (
+    control_pane_command,
     current_log_pointer_path,
     display_tmux_message,
     set_tmux_window_option,
@@ -208,6 +210,8 @@ __all__ = [
     "compile_completion_marker",
     "compile_stop_patterns",
     "control_main",
+    "control_pane_command",
+    "control_pane_main",
     "create_backup_branch",
     "current_log_pointer_path",
     "default_agent_from_invocation",
@@ -400,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
         subparsers.add_parser("init", help="create starter files")
         subparsers.add_parser("doctor", help="check local dependencies")
         subparsers.add_parser("control", help="queue control commands for a running looper")
+        subparsers.add_parser("control-pane", help="run the tmux looper control pane")
         subparsers.add_parser("transcript-log", help="render raw looper JSONL logs")
         parser.print_help()
         return 0
@@ -414,6 +419,8 @@ def main(argv: list[str] | None = None) -> int:
         return doctor_main(rest)
     if command == "control":
         return control_main(rest)
+    if command == "control-pane":
+        return control_pane_main(rest, prog=f"{display_name()} control-pane")
     if command == "transcript-log":
         return transcript_log_main(rest, prog=f"{display_name()} transcript-log")
 

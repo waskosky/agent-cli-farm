@@ -991,7 +991,7 @@ fresh_session_per_loop = "false"
             tmux_commands,
         )
 
-    def test_run_loop_split_layout_opens_tail_pane_and_tracks_current_log(self) -> None:
+    def test_run_loop_split_layout_opens_control_pane_and_tracks_current_log(self) -> None:
         async def exercise() -> tuple[int, list[list[str]], list[dict[str, object]], str]:
             tmux_commands: list[list[str]] = []
             run_command_calls: list[dict[str, object]] = []
@@ -1069,8 +1069,10 @@ fresh_session_per_loop = "false"
         self.assertEqual(len(split_commands), 1, tmux_commands)
         self.assertIn("-d", split_commands[0])
         self.assertIn("current-log.path", split_commands[0][-1])
-        self.assertIn("tail -n +1 -F", split_commands[0][-1])
-        self.assertIn("transcript-log", split_commands[0][-1])
+        self.assertIn("control-pane", split_commands[0][-1])
+        self.assertIn("--run-dir", split_commands[0][-1])
+        self.assertIn("--pointer", split_commands[0][-1])
+        self.assertIn("--supervisor-pid", split_commands[0][-1])
         self.assertIn("loop-0001__prompt-001.log", pointer_text)
         self.assertEqual(len(run_command_calls), 1)
         self.assertIn("stream_output", run_command_calls[0])

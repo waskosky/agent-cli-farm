@@ -305,7 +305,7 @@ The looper stops when it sees:
 - configured output-match circuit breaker
 - configured max loop count
 
-Logs are written under `.agent-looper/runs/<timestamp>__<label>__<random>/`. Run directory names use UTC time with subsecond precision plus a random suffix to avoid collisions. The `.agent-looper/current-log` pointer is updated atomically so the split tmux tail pane either sees the previous complete pointer or the next complete pointer.
+Logs are written under `.agent-looper/runs/<timestamp>__<label>__<random>/`. Run directory names use UTC time with subsecond precision plus a random suffix to avoid collisions. The `.agent-looper/current-log` pointer is updated atomically so the split tmux control pane either sees the previous complete pointer or the next complete pointer.
 
 Each run directory also contains durable machine-readable status:
 
@@ -326,14 +326,14 @@ codex-looper control stop LOOPER-rai --force --grace-seconds 5
 
 `--now` queues `interrupt_now` and sends SIGINT to every known runtime target: the child process group, hybrid pane descendants and process group when present, and the supervisor process. `--force` implies `--now`; after the grace interval it escalates still-running targets through SIGTERM and then SIGKILL, then attempts stale-state repair for the run directory. Do not combine `--force` with `--after-loop` or `--after-prompt`; those are cooperative safe-boundary stops.
 
-Priority follow-up for the tmux control pane is to make it a small operator UI over this same backend rather than a separate stop implementation. The pane should show the selected run, current status, and bounded actions such as stop after prompt, stop after loop, interrupt now, force stop, repair stale state, open the current log, and refresh status. It should read `state.json`, append `control.jsonl`, and call the shared stop-target functions so CLI and pane behavior stay identical.
+Farm-launched split layout starts a looper control pane below the supervisor. The pane shows the selected run, current status, current log path, a rendered live transcript, and bounded actions: `p` stop after prompt, `l` stop after loop, `i` interrupt now, `f` force stop, `r` repair stale state, and `q` quit the pane. Actions read `state.json`, append `control.jsonl`, and call the shared stop-target functions so CLI and pane behavior stay identical.
 
 ## Farm Integration
 
 Normal non-dry-run looper commands call `codex-add` so existing farm behavior still owns session creation, board linking, pipe-pane logging, and annotator startup. Use `--local` to run in the current terminal. Use `--farm-session NAME` for a separate farm.
 Farm windows enable tmux `remain-on-exit` by default, so a stopped looper leaves its final pane visible for inspection instead of closing the window. Set `CODEX_REMAIN_ON_EXIT=0` when launching if you want the old close-on-exit behavior.
 Looper labels are kept for logs and agent session names only. They do not rename tmux windows; farm window names come from `CODEX_NAME` when set, otherwise the working directory basename.
-Farm-launched loopers default to `CODEX_LOOPER_LAYOUT=split`: the main pane shows the looper supervisor and a second detached pane tails the current `.agent-looper/runs/.../loop-*.log` file. In split mode, the live agent transcript is shown in the tail pane rather than duplicated in the supervisor pane. Use `--tmux-layout single` or `CODEX_LOOPER_LAYOUT=single` to keep the older one-pane view. If tmux split-pane creation fails, the looper keeps running and falls back to supervisor-pane streaming so the transcript is still visible.
+Farm-launched loopers default to `CODEX_LOOPER_LAYOUT=split`: the main pane shows the looper supervisor and a second detached pane shows the looper control pane and live transcript for the current `.agent-looper/runs/.../loop-*.log` file. In split mode, the live agent transcript is shown in the control pane rather than duplicated in the supervisor pane. Use `--tmux-layout single` or `CODEX_LOOPER_LAYOUT=single` to keep the older one-pane view. If tmux split-pane creation fails, the looper keeps running and falls back to supervisor-pane streaming so the transcript is still visible.
 
 Example:
 
@@ -356,7 +356,6 @@ codex-status loopers
 - It does not bypass authentication, permissions, sandboxing, or provider limits unless you explicitly pass agent-native flags that do so.
 - Provider status and stop detection are heuristic because Codex/Claude/Gemini CLIs do not expose a shared structured status protocol.
 - Claude hybrid mode requires tmux because the real Claude interface lives in a managed pane. Use `--interface json` for local non-tmux runs or scripted noninteractive behavior.
-- The split pane is currently a live transcript pane, not an interactive control panel.
 - The Gemini backend is intentionally generic until a stable noninteractive resume interface is confirmed.
 - There is no per-worktree run lock. Starting multiple write-enabled loopers against the same checkout can race or overwrite work.
 - Backup branches protect committed `HEAD`, not dirty worktree state.

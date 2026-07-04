@@ -18,6 +18,7 @@ from .control import (
     interrupt_from_state,
     select_control_run,
 )
+from .control_panel import control_pane_main
 from .farm import default_tmux_layout_from_env, maybe_launch_farm
 from .init import (
     EXAMPLE_CONFIG,
@@ -507,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
         subparsers.add_parser("init", help="create starter files")
         subparsers.add_parser("doctor", help="check local dependencies")
         subparsers.add_parser("control", help="queue control commands for a running looper")
+        subparsers.add_parser("control-pane", help="run the tmux looper control pane")
         parser.print_help()
         return 0
 
@@ -520,5 +522,7 @@ def main(argv: list[str] | None = None) -> int:
         return doctor_main(rest)
     if command == "control":
         return control_main(rest)
+    if command == "control-pane":
+        return control_pane_main(rest, prog=f"{display_name()} control-pane")
 
     return run_command_main(real_argv, default_agent=default_agent)

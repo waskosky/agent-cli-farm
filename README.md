@@ -108,7 +108,7 @@ codex-looper --local --once --label local-smoke
 ```
 
 Looper labels are used for logs and agent session names only. Farm tmux window names stay tied to `CODEX_NAME` or the working directory basename.
-Farm-launched loopers use a two-pane tmux layout by default: the main pane shows supervisor status and the second pane tails the active prompt log with the live agent transcript. Use `--tmux-layout single` or `CODEX_LOOPER_LAYOUT=single` to keep one pane.
+Farm-launched loopers use a two-pane tmux layout by default: the main pane shows supervisor status and the second pane shows a looper control pane with the live agent transcript. Use `--tmux-layout single` or `CODEX_LOOPER_LAYOUT=single` to keep one pane.
 
 Inspect a running looper or agent without attaching:
 ```bash
@@ -131,7 +131,7 @@ Looper defaults and limits:
 - Backup branches point to committed `HEAD` only; they are not dirty-worktree snapshots. Pruning stays inside the exact configured prefix namespace.
 - The no-progress circuit breaker fingerprints committed `HEAD`, status entries, tracked metadata, and file contents while ignoring the looper run directory.
 - The output-match circuit breaker stops repeated project-defined status reports, for example a loop that keeps saying it is blocked.
-- Run directories include a high-resolution timestamp and random suffix; the current-log pointer is updated atomically. In split mode, if tmux cannot create the tail pane, live transcript streaming falls back to the supervisor pane.
+- Run directories include a high-resolution timestamp and random suffix; the current-log pointer is updated atomically. In split mode, if tmux cannot create the control pane, live transcript streaming falls back to the supervisor pane.
 - Every looper run writes durable machine-readable state to `state.json`, append-only lifecycle history to `events.jsonl`, and accepts optional operator commands in `control.jsonl` in its run directory. `codex-status loopers` reads state files, flags active states whose supervisor process is gone or defunct as stale, and `codex-status loopers --repair-stale-loopers` records those states as externally stopped so stop reasons survive pane exits and can be scraped without tmux.
 - `codex-looper control stop --now` interrupts all known runtime targets, including hybrid tmux pane descendants and process groups. Use `codex-looper control stop LABEL --force` for a stuck looper that needs SIGTERM/SIGKILL escalation and stale-state repair.
 

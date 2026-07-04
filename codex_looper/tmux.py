@@ -37,6 +37,23 @@ def transcript_renderer_command() -> str:
     return shlex.join([sys.executable, "-u", str(Path(sys.argv[0]).resolve()), "transcript-log"])
 
 
+def control_pane_command(*, run_dir: Path, pointer_path: Path, supervisor_pid: int) -> str:
+    return shlex.join(
+        [
+            sys.executable,
+            "-u",
+            str(Path(sys.argv[0]).resolve()),
+            "control-pane",
+            "--run-dir",
+            str(run_dir),
+            "--pointer",
+            str(pointer_path),
+            "--supervisor-pid",
+            str(supervisor_pid),
+        ]
+    )
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
@@ -99,7 +116,11 @@ def start_tmux_log_pane(run_dir: Path, options: RunOptions) -> bool:
             "-v",
             "-l",
             "35%",
-            tmux_log_tail_command(pointer_path=pointer_path, supervisor_pid=os.getpid()),
+            control_pane_command(
+                run_dir=run_dir,
+                pointer_path=pointer_path,
+                supervisor_pid=os.getpid(),
+            ),
         ],
         check=False,
     )
