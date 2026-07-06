@@ -1181,6 +1181,60 @@ fresh_session_per_loop = "false"
         self.assertEqual(events[-1]["status"], "stopped")
         self.assertEqual(events[-1]["stop_reason"], "max loops reached: 1")
 
+    def test_run_loop_prints_focus_updates_in_supervisor_output(self) -> None:
+        async def exercise() -> tuple[int, str]:
+            async def fake_run_command(**kwargs: object) -> object:
+                env = dict(kwargs.get("env") or {})
+                self.looper.append_focus_update(
+                    Path(env["CODEX_LOOPER_RUN_DIR"]),
+                    summary="Verifying merged supervisor focus display.",
+                    command_id="focus-supervisor-test",
+                )
+                return self.looper.ProcessResult(returncode=0)
+
+            async def fake_sleep(seconds: float) -> None:
+                return None
+
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                prompt_file = root / "PROMPT.md"
+                prompt_file.write_text("hello\n", encoding="utf-8")
+                agent = self.looper.AgentConfig(
+                    name="generic",
+                    kind="generic",
+                    cwd=root,
+                    first_command=["agent", "{prompt}"],
+                )
+                looper = self.looper.LooperConfig(
+                    prompt_file=prompt_file,
+                    log_dir=root / "runs",
+                    max_loops=1,
+                )
+                options = self.looper.RunOptions(
+                    agent_name="generic",
+                    config_path=root / "agent-looper.toml",
+                    label="focus-supervisor",
+                )
+                output = io.StringIO()
+
+                with contextlib.redirect_stdout(output):
+                    result = await self.looper.run_loop(
+                        agent=agent,
+                        looper=looper,
+                        options=options,
+                        run_command_fn=fake_run_command,
+                        sleep_fn=fake_sleep,
+                    )
+
+                return result, output.getvalue()
+
+        result, output = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertIn("focus: not reported yet", output)
+        self.assertIn("control: codex-looper control focus|stop|note --run-dir", output)
+        self.assertIn("focus: Verifying merged supervisor focus display.", output)
+
     def test_run_loop_uses_claude_hybrid_controller_for_hybrid_interface(self) -> None:
         async def exercise() -> tuple[int, list[dict[str, object]], int]:
             hybrid_calls: list[dict[str, object]] = []

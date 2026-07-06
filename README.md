@@ -108,7 +108,7 @@ codex-looper --local --once --label local-smoke
 ```
 
 Looper labels are used for logs and agent session names only. Farm tmux window names stay tied to `CODEX_NAME` or the working directory basename.
-Farm-launched loopers use a two-pane tmux layout by default: the main pane shows supervisor status and the second pane shows a looper control pane with the live agent transcript. Use `--tmux-layout single` or `CODEX_LOOPER_LAYOUT=single` to keep one pane.
+Farm-launched loopers use a two-pane tmux layout by default. Claude hybrid runs use the main pane as the merged supervisor/status/control surface and the second pane for the live Claude Code TTY. Non-hybrid split runs use the second pane as a looper control pane with the live agent transcript. Use `--tmux-layout single` or `CODEX_LOOPER_LAYOUT=single` to keep one pane.
 
 Inspect a running looper or agent without attaching:
 ```bash
@@ -138,7 +138,7 @@ run directory as `operator_notes.jsonl`. When run state does not include a
 hybrid pane id, pass an explicit `--pane`; broad tmux pane scanning requires
 `--allow-pane-scan` after verifying the intended recipient.
 
-Agents can refresh the visible focus line from inside a run with
+Agents can refresh the visible supervisor focus line from inside a run with
 `codex-looper control focus --run-dir "$CODEX_LOOPER_RUN_DIR" --summary "..."`.
 Keep it to one human-readable sentence about the larger stroke of work; the
 append-only history is stored in `focus.jsonl`.

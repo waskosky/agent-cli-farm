@@ -19,6 +19,7 @@ from .control import (
     ControlCommand,
     control_file_path,
     focus_log_file_path,
+    latest_focus_update,
     operator_notes_file_path,
     read_control_commands,
 )
@@ -70,6 +71,7 @@ DisplayTmuxMessageFn = Callable[[str], None]
 StartTmuxLogPaneFn = Callable[[Path, RunOptions], bool]
 UpdateCurrentLogPointerFn = Callable[..., None]
 SleepFn = Callable[[float], Awaitable[None]]
+FOCUS_REFRESH_SECONDS = 2.0
 
 
 def utc_stamp() -> str:
@@ -139,6 +141,45 @@ def prompt_file_state(path: Path) -> dict[str, Any]:
         "prompt_mtime": mtime.isoformat(timespec="seconds").replace("+00:00", "Z"),
         "prompt_bytes": len(data),
     }
+
+
+class SupervisorFocusReporter:
+    def __init__(self, run_dir: Path) -> None:
+        self.run_dir = run_dir
+        self.last_focus_id = ""
+
+    def snapshot_summary(self) -> str:
+        record = latest_focus_update(self.run_dir)
+        self.last_focus_id = str(record.get("id") or "")
+        return str(record.get("summary") or "")
+
+    def print_if_changed(self) -> None:
+        record = latest_focus_update(self.run_dir)
+        focus_id = str(record.get("id") or "")
+        if not focus_id or focus_id == self.last_focus_id:
+            return
+        self.last_focus_id = focus_id
+        summary = str(record.get("summary") or "").strip()
+        if summary:
+            print(f"\nfocus: {summary}")
+
+
+async def await_with_focus_updates(
+    awaitable: Awaitable[ProcessResult],
+    *,
+    focus_reporter: SupervisorFocusReporter,
+) -> ProcessResult:
+    task = asyncio.ensure_future(awaitable)
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=FOCUS_REFRESH_SECONDS)
+            focus_reporter.print_if_changed()
+        result = await task
+        focus_reporter.print_if_changed()
+        return result
+    except BaseException:
+        task.cancel()
+        raise
 
 
 async def run_command(
@@ -358,6 +399,7 @@ async def run_loop(
         },
     )
     state.record("run_started", status="running")
+    focus_reporter = SupervisorFocusReporter(run_dir)
 
     processed_control_ids: set[str] = set()
     control_stop_after_prompt: ControlCommand | None = None
@@ -424,6 +466,13 @@ async def run_loop(
         + ("before each loop" if looper.reload_prompt_each_loop else "startup only")
     )
     print(f"logs: {run_dir}")
+    print(f"focus: {focus_reporter.snapshot_summary() or 'not reported yet'}")
+    print(
+        "control: "
+        f"codex-looper control focus|stop|note --run-dir {shlex.quote(str(run_dir))} ..."
+    )
+    if use_claude_hybrid:
+        print("panes: supervisor status/control here; Claude Code runs in the paired pane")
     print(
         "session mode: "
         + (
@@ -568,37 +617,43 @@ async def run_loop(
                 if use_claude_hybrid:
                     if claude_hybrid_controller is None:
                         raise ConfigError("Claude hybrid controller was not initialized")
-                    result = await run_claude_hybrid_turn_fn(
-                        controller=claude_hybrid_controller,
-                        prompt=prompt,
-                        timeout_seconds=looper.timeout_seconds,
-                        log_path=log_path,
-                        patterns=patterns,
-                        completion_pattern=completion_pattern,
-                        session_name=session_name,
-                        session_id=session_id,
+                    result = await await_with_focus_updates(
+                        run_claude_hybrid_turn_fn(
+                            controller=claude_hybrid_controller,
+                            prompt=prompt,
+                            timeout_seconds=looper.timeout_seconds,
+                            log_path=log_path,
+                            patterns=patterns,
+                            completion_pattern=completion_pattern,
+                            session_name=session_name,
+                            session_id=session_id,
+                        ),
+                        focus_reporter=focus_reporter,
                     )
                     state.update(
                         hybrid_pane_id=claude_hybrid_controller.pane_id,
                         hybrid_pane_pid=claude_hybrid_controller.pane_pid(),
                     )
                 else:
-                    result = await run_command_fn(
-                        command=command,
-                        cwd=agent.cwd,
-                        env=agent.env,
-                        timeout_seconds=looper.timeout_seconds,
-                        log_path=log_path,
-                        agent_kind=agent.kind,
-                        patterns=patterns,
-                        scan_stdout=(
-                            looper.scan_stdout_for_stop_patterns
-                            or agent.scan_stdout_for_stop_patterns
+                    result = await await_with_focus_updates(
+                        run_command_fn(
+                            command=command,
+                            cwd=agent.cwd,
+                            env=agent.env,
+                            timeout_seconds=looper.timeout_seconds,
+                            log_path=log_path,
+                            agent_kind=agent.kind,
+                            patterns=patterns,
+                            scan_stdout=(
+                                looper.scan_stdout_for_stop_patterns
+                                or agent.scan_stdout_for_stop_patterns
+                            ),
+                            kill_on_stop_pattern=looper.kill_on_stop_pattern,
+                            completion_pattern=completion_pattern,
+                            stream_output=not tail_pane_active,
+                            on_process_started=record_child_process,
                         ),
-                        kill_on_stop_pattern=looper.kill_on_stop_pattern,
-                        completion_pattern=completion_pattern,
-                        stream_output=not tail_pane_active,
-                        on_process_started=record_child_process,
+                        focus_reporter=focus_reporter,
                     )
 
                 if result.completion_detected:
