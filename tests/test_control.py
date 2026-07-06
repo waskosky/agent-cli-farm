@@ -128,6 +128,41 @@ class ControlStopTargetTests(unittest.TestCase):
         self.assertEqual([result.stage for result in results], ["interrupt", "terminate"])
 
 
+class ControlFocusTests(unittest.TestCase):
+    def test_append_focus_update_compacts_summary_and_reads_latest(self) -> None:
+        tempdir = tempfile.TemporaryDirectory(prefix="control-focus-test-")
+        self.addCleanup(tempdir.cleanup)
+        run_dir = Path(tempdir.name)
+
+        first = control.append_focus_update(
+            run_dir,
+            summary="  Auditing\n\nlooper prompt status visibility.  ",
+            actor=" agent ",
+            source=" prompt ",
+            command_id="focus-1",
+        )
+        second = control.append_focus_update(
+            run_dir,
+            summary="Preparing focused tests for the pane display.",
+            command_id="focus-2",
+        )
+
+        self.assertEqual(first["summary"], "Auditing looper prompt status visibility.")
+        self.assertEqual(first["actor"], "agent")
+        self.assertEqual(first["source"], "prompt")
+        self.assertEqual(second["id"], "focus-2")
+        self.assertEqual(control.latest_focus_update(run_dir)["id"], "focus-2")
+        records = control.read_focus_updates(run_dir, limit=2)
+        self.assertEqual([record["id"] for record in records], ["focus-1", "focus-2"])
+
+    def test_append_focus_update_rejects_blank_summary(self) -> None:
+        tempdir = tempfile.TemporaryDirectory(prefix="control-focus-test-")
+        self.addCleanup(tempdir.cleanup)
+
+        with self.assertRaises(control.ControlError):
+            control.append_focus_update(Path(tempdir.name), summary=" \n\t ")
+
+
 class ControlCliTests(unittest.TestCase):
     def test_force_stop_queues_interrupt_now_and_repairs_state(self) -> None:
         tempdir = tempfile.TemporaryDirectory(prefix="control-cli-test-")
@@ -162,6 +197,35 @@ class ControlCliTests(unittest.TestCase):
     def test_force_stop_rejects_safe_boundary_flags(self) -> None:
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.control_main(["stop", "run", "--after-loop", "--force"])
+
+    def test_focus_command_records_summary(self) -> None:
+        tempdir = tempfile.TemporaryDirectory(prefix="control-cli-focus-test-")
+        self.addCleanup(tempdir.cleanup)
+        run_dir = Path(tempdir.name) / "run"
+        run_dir.mkdir()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            status = cli.control_main(
+                [
+                    "focus",
+                    "--run-dir",
+                    str(run_dir),
+                    "--summary",
+                    "  Verifying\nfocus display.  ",
+                    "--actor",
+                    "agent",
+                    "--source",
+                    "prompt",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertIn("focus updated", output.getvalue())
+        record = json.loads((run_dir / "focus.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(record["summary"], "Verifying focus display.")
+        self.assertEqual(record["actor"], "agent")
+        self.assertEqual(record["source"], "prompt")
 
 
 if __name__ == "__main__":

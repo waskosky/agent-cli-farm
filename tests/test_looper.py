@@ -1079,11 +1079,18 @@ fresh_session_per_loop = "false"
         self.assertFalse(run_command_calls[0]["stream_output"])
 
     def test_run_loop_writes_durable_state_and_event_history(self) -> None:
-        async def exercise() -> tuple[int, dict[str, object], list[dict[str, object]]]:
+        async def exercise() -> tuple[
+            int,
+            dict[str, object],
+            list[dict[str, object]],
+            list[dict[str, str]],
+        ]:
             original_run_command = self.looper.run_command
             original_sleep = self.looper.asyncio.sleep
+            command_envs: list[dict[str, str]] = []
 
             async def fake_run_command(**kwargs: object) -> object:
+                command_envs.append(dict(kwargs.get("env") or {}))
                 return self.looper.ProcessResult(
                     returncode=0,
                     session_id="session-abc",
@@ -1126,12 +1133,12 @@ fresh_session_per_loop = "false"
                         .read_text(encoding="utf-8")
                         .splitlines()
                     ]
-                    return result, state, events
+                    return result, state, events, command_envs
             finally:
                 self.looper.run_command = original_run_command
                 self.looper.asyncio.sleep = original_sleep
 
-        result, state, events = asyncio.run(exercise())
+        result, state, events, command_envs = asyncio.run(exercise())
 
         self.assertEqual(result, 0)
         self.assertEqual(state["schema_version"], 1)
@@ -1149,7 +1156,17 @@ fresh_session_per_loop = "false"
         self.assertEqual(state["prompt_sha256"], hashlib.sha256(b"hello\n").hexdigest())
         self.assertEqual(state["prompt_bytes"], 6)
         self.assertTrue(str(state["control_file"]).endswith("control.jsonl"))
+        self.assertTrue(str(state["focus_log_file"]).endswith("focus.jsonl"))
         self.assertTrue(str(state["operator_notes_file"]).endswith("operator_notes.jsonl"))
+        self.assertEqual(len(command_envs), 1)
+        self.assertEqual(command_envs[0]["CODEX_LOOPER_LABEL"], "state-smoke")
+        self.assertEqual(command_envs[0]["CODEX_LOOPER_RUN_DIR"], state["run_dir"])
+        self.assertEqual(command_envs[0]["CODEX_LOOPER_FOCUS_FILE"], state["focus_log_file"])
+        self.assertEqual(command_envs[0]["CODEX_LOOPER_CONTROL_FILE"], state["control_file"])
+        self.assertEqual(
+            command_envs[0]["CODEX_LOOPER_OPERATOR_NOTES_FILE"],
+            state["operator_notes_file"],
+        )
         self.assertEqual(
             [event["event"] for event in events],
             [

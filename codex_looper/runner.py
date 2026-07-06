@@ -18,6 +18,7 @@ from .agents import build_command
 from .control import (
     ControlCommand,
     control_file_path,
+    focus_log_file_path,
     operator_notes_file_path,
     read_control_commands,
 )
@@ -294,6 +295,15 @@ async def run_loop(
     if options.agent_args:
         agent = replace(agent, extra_args=[*agent.extra_args, *options.agent_args])
 
+    looper_agent_env = {
+        "CODEX_LOOPER_RUN_DIR": str(run_dir),
+        "CODEX_LOOPER_LABEL": label,
+        "CODEX_LOOPER_CONTROL_FILE": str(control_file_path(run_dir)),
+        "CODEX_LOOPER_FOCUS_FILE": str(focus_log_file_path(run_dir)),
+        "CODEX_LOOPER_OPERATOR_NOTES_FILE": str(operator_notes_file_path(run_dir)),
+    }
+    agent = replace(agent, env={**agent.env, **looper_agent_env})
+
     use_claude_hybrid = agent.interface == "hybrid"
     if use_claude_hybrid and agent.kind != "claude":
         raise ConfigError("hybrid interface is currently only supported for claude agents")
@@ -324,6 +334,7 @@ async def run_loop(
             "mode": looper.mode,
             "reload_prompt_each_loop": looper.reload_prompt_each_loop,
             "control_file": str(control_file_path(run_dir)),
+            "focus_log_file": str(focus_log_file_path(run_dir)),
             "operator_notes_file": str(operator_notes_file_path(run_dir)),
             "control_processed_count": 0,
             "control_last_action": None,

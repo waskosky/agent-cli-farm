@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from codex_looper import control
 from codex_looper import control_panel
 from codex_looper import tmux
 
@@ -94,6 +95,36 @@ class ControlPanelTests(unittest.TestCase):
 
         self.assertEqual(output.getvalue(), "hello\n")
         self.assertEqual(offset_after_second_read, offset)
+
+    def test_format_state_summary_includes_focus_summary(self) -> None:
+        rendered = control_panel.format_state_summary(
+            {"label": "run", "status": "running"},
+            log_path=None,
+            focus_summary="Improving looper status visibility.",
+        )
+
+        self.assertIn("focus: Improving looper status visibility.", rendered)
+
+    def test_render_header_reads_latest_focus_summary(self) -> None:
+        tempdir = tempfile.TemporaryDirectory(prefix="control-pane-focus-test-")
+        self.addCleanup(tempdir.cleanup)
+        run_dir = Path(tempdir.name)
+        pointer = run_dir / "current-log.path"
+        pointer.write_text("", encoding="utf-8")
+        (run_dir / "state.json").write_text(
+            json.dumps({"label": "run", "status": "running"}),
+            encoding="utf-8",
+        )
+        control.append_focus_update(
+            run_dir,
+            summary="Checking whether screenshots are usable.",
+            command_id="focus-test",
+        )
+        output = io.StringIO()
+
+        control_panel.render_header(run_dir, pointer, output)
+
+        self.assertIn("focus: Checking whether screenshots are usable.", output.getvalue())
 
     def test_control_pane_main_accepts_quit_action(self) -> None:
         tempdir = tempfile.TemporaryDirectory(prefix="control-pane-test-")

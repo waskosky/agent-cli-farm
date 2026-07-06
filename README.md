@@ -121,6 +121,11 @@ Queue a safe stop without attaching:
 codex-looper control stop LOOPER-rai --after-loop --reason "merge checkpoint"
 ```
 
+Record the agent's current high-level focus without attaching:
+```bash
+codex-looper control focus LOOPER-rai --summary "Verifying that live screenshots are still reaching the validation loop."
+```
+
 Send or record an operator note without attaching:
 ```bash
 codex-looper control note LOOPER-rai --delivery btw --note "controller drift was fixed after the latest calibration"
@@ -133,6 +138,11 @@ run directory as `operator_notes.jsonl`. When run state does not include a
 hybrid pane id, pass an explicit `--pane`; broad tmux pane scanning requires
 `--allow-pane-scan` after verifying the intended recipient.
 
+Agents can refresh the visible focus line from inside a run with
+`codex-looper control focus --run-dir "$CODEX_LOOPER_RUN_DIR" --summary "..."`.
+Keep it to one human-readable sentence about the larger stroke of work; the
+append-only history is stored in `focus.jsonl`.
+
 See [Agent Looper Reference](docs/looper.md) for prompt format, CLI parameters, config defaults, stop conditions, farm integration, and current backend limits.
 
 Looper defaults and limits:
@@ -144,7 +154,7 @@ Looper defaults and limits:
 - The no-progress circuit breaker fingerprints committed `HEAD`, status entries, tracked metadata, and file contents while ignoring the looper run directory.
 - The output-match circuit breaker stops repeated project-defined status reports, for example a loop that keeps saying it is blocked.
 - Run directories include a high-resolution timestamp and random suffix; the current-log pointer is updated atomically. In split mode, if tmux cannot create the control pane, live transcript streaming falls back to the supervisor pane.
-- Every looper run writes durable machine-readable state to `state.json`, append-only lifecycle history to `events.jsonl`, and accepts optional operator commands in `control.jsonl` in its run directory. `codex-status loopers` reads state files, flags active states whose supervisor process is gone or defunct as stale, and `codex-status loopers --repair-stale-loopers` records those states as externally stopped so stop reasons survive pane exits and can be scraped without tmux.
+- Every looper run writes durable machine-readable state to `state.json`, append-only lifecycle history to `events.jsonl`, visible focus history to `focus.jsonl`, and accepts optional operator commands in `control.jsonl` in its run directory. `codex-status loopers` reads state files, flags active states whose supervisor process is gone or defunct as stale, and `codex-status loopers --repair-stale-loopers` records those states as externally stopped so stop reasons survive pane exits and can be scraped without tmux.
 - `codex-looper control stop --now` interrupts all known runtime targets, including hybrid tmux pane descendants and process groups. Use `codex-looper control stop LABEL --force` for a stuck looper that needs SIGTERM/SIGKILL escalation and stale-state repair.
 
 ### 4. Watch All Instances

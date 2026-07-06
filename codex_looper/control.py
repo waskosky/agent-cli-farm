@@ -17,6 +17,7 @@ from .hybrid import TmuxCommandResult, default_command_runner, tmux_prompt_paste
 
 CONTROL_FILENAME = "control.jsonl"
 OPERATOR_NOTES_FILENAME = "operator_notes.jsonl"
+FOCUS_LOG_FILENAME = "focus.jsonl"
 VALID_CONTROL_ACTIONS = frozenset({"stop_after_prompt", "stop_after_loop", "interrupt_now"})
 OPERATOR_NOTE_DELIVERIES = frozenset({"record", "btw", "prompt"})
 TMUX_PANE_FIELDS = (
@@ -73,6 +74,10 @@ def operator_notes_file_path(run_dir: Path) -> Path:
     return run_dir / OPERATOR_NOTES_FILENAME
 
 
+def focus_log_file_path(run_dir: Path) -> Path:
+    return run_dir / FOCUS_LOG_FILENAME
+
+
 def append_control_command(
     run_dir: Path,
     *,
@@ -96,6 +101,65 @@ def append_control_command(
     return record
 
 
+def _compact_text(text: str, *, limit: int | None = None) -> str:
+    compact = re.sub(r"\s+", " ", str(text or "")).strip()
+    if limit is None or len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)].rstrip() + "..."
+
+
+def append_focus_update(
+    run_dir: Path,
+    *,
+    summary: str,
+    actor: str = "agent",
+    source: str = "manual",
+    command_id: str | None = None,
+) -> dict[str, Any]:
+    compact_summary = _compact_text(summary)
+    if not compact_summary:
+        raise ControlError("focus summary is required")
+    record: dict[str, Any] = {
+        "id": command_id or _control_id(),
+        "created_at": utc_iso_stamp(),
+        "actor": str(actor or "agent").strip() or "agent",
+        "source": str(source or "manual").strip() or "manual",
+        "summary": compact_summary,
+    }
+    path = focus_log_file_path(run_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+    return record
+
+
+def read_focus_updates(run_dir: Path, *, limit: int = 20) -> list[dict[str, Any]]:
+    path = focus_log_file_path(run_dir)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(raw, dict) and str(raw.get("summary") or "").strip():
+            records.append(raw)
+    limit_count = max(0, int(limit))
+    return records[-limit_count:] if limit_count else []
+
+
+def latest_focus_update(run_dir: Path) -> dict[str, Any]:
+    records = read_focus_updates(run_dir, limit=1)
+    return records[-1] if records else {}
+
+
 def format_operator_note_for_delivery(note: str, *, delivery: str = "btw") -> str:
     normalized_delivery = str(delivery or "btw").strip()
     if normalized_delivery not in OPERATOR_NOTE_DELIVERIES:
@@ -110,10 +174,7 @@ def format_operator_note_for_delivery(note: str, *, delivery: str = "btw") -> st
 
 
 def _compact_preview(text: str, *, limit: int = 200) -> str:
-    compact = re.sub(r"\s+", " ", str(text or "")).strip()
-    if len(compact) <= limit:
-        return compact
-    return compact[: max(0, limit - 1)].rstrip() + "..."
+    return _compact_text(text, limit=limit)
 
 
 def append_operator_note(

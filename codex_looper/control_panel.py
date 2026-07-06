@@ -16,6 +16,7 @@ from .control import (
     force_stop_from_state,
     format_stop_signal_results,
     interrupt_from_state,
+    latest_focus_update,
 )
 from .state import STATE_FILENAME
 from .status_state import repair_stale_state_file
@@ -61,7 +62,12 @@ def supervisor_is_running(supervisor_pid: int | None) -> bool:
     return True
 
 
-def format_state_summary(state: dict[str, Any], *, log_path: Path | None) -> str:
+def format_state_summary(
+    state: dict[str, Any],
+    *,
+    log_path: Path | None,
+    focus_summary: str = "",
+) -> str:
     label = str(state.get("label") or state.get("run_id") or "unknown")
     status = str(state.get("status") or "unknown")
     loop = state.get("current_loop")
@@ -76,6 +82,7 @@ def format_state_summary(state: dict[str, Any], *, log_path: Path | None) -> str
         "== Looper Control Pane ==",
         f"run: {label}",
         f"status: {status} ({location})",
+        f"focus: {focus_summary or 'not reported yet'}",
         f"log: {log_path if log_path else 'waiting for current log'}",
         "actions: b NOTE /btw | p stop after prompt | l stop after loop | i interrupt now | f force stop | r repair stale | q quit",
         "enter an action key, then Enter.",
@@ -87,7 +94,15 @@ def format_state_summary(state: dict[str, Any], *, log_path: Path | None) -> str
 
 def render_header(run_dir: Path, pointer_path: Path, output_stream: TextIO) -> None:
     state = load_run_state(run_dir)
-    print(format_state_summary(state, log_path=current_log_path(pointer_path)), file=output_stream)
+    focus = latest_focus_update(run_dir)
+    print(
+        format_state_summary(
+            state,
+            log_path=current_log_path(pointer_path),
+            focus_summary=str(focus.get("summary") or ""),
+        ),
+        file=output_stream,
+    )
     output_stream.flush()
 
 
@@ -243,6 +258,7 @@ def control_pane_main(
     run_dir = Path(args.run_dir)
     pointer_path = Path(args.pointer)
     last_log_path: Path | None = None
+    last_focus_id = str(latest_focus_update(run_dir).get("id") or "")
     offset = 0
     render_header(run_dir, pointer_path, output_stream)
 
@@ -251,6 +267,11 @@ def control_pane_main(
         if log_path != last_log_path:
             last_log_path = log_path
             offset = 0
+            print("", file=output_stream)
+            render_header(run_dir, pointer_path, output_stream)
+        focus_id = str(latest_focus_update(run_dir).get("id") or "")
+        if focus_id != last_focus_id:
+            last_focus_id = focus_id
             print("", file=output_stream)
             render_header(run_dir, pointer_path, output_stream)
         if log_path is not None:

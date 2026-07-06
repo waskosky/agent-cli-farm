@@ -12,6 +12,7 @@ from pathlib import Path
 from .config import load_config, resolve_preset_path
 from .control import (
     ControlError,
+    append_focus_update,
     append_control_command,
     deliver_operator_note,
     force_stop_from_state,
@@ -427,6 +428,21 @@ def _operator_note_text(args: argparse.Namespace) -> str:
     raise ControlError("operator note text is required; use --note or --note-file")
 
 
+def _focus_summary_text(args: argparse.Namespace) -> str:
+    summary = getattr(args, "summary", None)
+    summary_file = getattr(args, "summary_file", None)
+    if summary and summary_file:
+        raise ControlError("--summary cannot be combined with --summary-file")
+    if summary_file:
+        try:
+            return Path(summary_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ControlError(f"failed to read summary file {summary_file}: {exc}") from exc
+    if summary:
+        return str(summary)
+    raise ControlError("focus summary is required; use --summary or --summary-file")
+
+
 def control_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog=f"{display_name()} control",
@@ -471,8 +487,22 @@ def control_main(argv: list[str] | None = None) -> int:
         help="allow tmux pane scanning when the selected run has no hybrid pane id",
     )
 
+    focus_parser = subparsers.add_parser(
+        "focus",
+        help="record the current high-level looper focus",
+    )
+    _add_control_target_arguments(focus_parser)
+    focus_parser.add_argument("--summary", help="one-sentence high-level focus summary")
+    focus_parser.add_argument("--summary-file", help="file containing focus summary text")
+    focus_parser.add_argument("--actor", default="agent", help="actor name to record")
+    focus_parser.add_argument(
+        "--source",
+        default="manual",
+        help="short source label, for example prompt, cli, or control-pane",
+    )
+
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    if args.command not in {"stop", "note"}:
+    if args.command not in {"stop", "note", "focus"}:
         parser.error(f"unsupported control command: {args.command}")
     if args.command == "stop" and args.force and (args.after_prompt or args.after_loop):
         parser.error("--force cannot be combined with --after-prompt or --after-loop")
@@ -502,6 +532,13 @@ def control_main(argv: list[str] | None = None) -> int:
                 tmux_session=args.tmux_session or "",
                 allow_pane_scan=args.allow_pane_scan,
             )
+        elif args.command == "focus":
+            focus_record = append_focus_update(
+                run_dir,
+                summary=_focus_summary_text(args),
+                actor=args.actor,
+                source=args.source,
+            )
         else:
             record = append_control_command(
                 run_dir,
@@ -524,6 +561,11 @@ def control_main(argv: list[str] | None = None) -> int:
         if note_result.get("error"):
             print(f"delivery error: {note_result['error']}", file=sys.stderr)
             return 2
+        return 0
+    if args.command == "focus":
+        print(f"focus updated for {target} at {run_dir}")
+        print(f"focus id: {focus_record['id']}")
+        print(f"summary: {focus_record['summary']}")
         return 0
 
     print(f"queued {record['action']} for {target} at {run_dir}")
