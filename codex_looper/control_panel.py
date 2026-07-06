@@ -12,6 +12,7 @@ from typing import TextIO, Any
 
 from .control import (
     append_control_command,
+    deliver_operator_note,
     force_stop_from_state,
     format_stop_signal_results,
     interrupt_from_state,
@@ -76,7 +77,7 @@ def format_state_summary(state: dict[str, Any], *, log_path: Path | None) -> str
         f"run: {label}",
         f"status: {status} ({location})",
         f"log: {log_path if log_path else 'waiting for current log'}",
-        "actions: p stop after prompt | l stop after loop | i interrupt now | f force stop | r repair stale | q quit",
+        "actions: b NOTE /btw | p stop after prompt | l stop after loop | i interrupt now | f force stop | r repair stale | q quit",
         "enter an action key, then Enter.",
     ]
     if stop_reason:
@@ -108,6 +109,25 @@ def run_control_pane_action(
     key = normalized[0]
     if key == "q":
         return ControlPaneActionResult("leaving looper control pane", should_exit=True)
+    if key == "b":
+        note = normalized[1:].strip()
+        if not note:
+            return ControlPaneActionResult("usage: b <operator note to send with /btw>")
+        result = deliver_operator_note(
+            run_dir=run_dir,
+            state=_state_for_signals(run_dir),
+            note=note,
+            delivery="btw",
+            actor="control pane",
+        )
+        if result.get("ok"):
+            pane = result.get("target", {}).get("paneId")
+            suffix = f" to {pane}" if pane else ""
+            return ControlPaneActionResult(f"sent operator /btw note{suffix}")
+        return ControlPaneActionResult(
+            "operator note delivery failed: "
+            + str(result.get("error") or "unknown delivery error")
+        )
     if key == "p":
         append_control_command(
             run_dir,

@@ -50,6 +50,15 @@ from codex_looper.config import (
 from codex_looper.config import (
     read_config_raw as _read_config_raw_impl,
 )
+from codex_looper.control import (
+    OPERATOR_NOTE_DELIVERIES,
+    append_operator_note,
+    deliver_operator_note,
+    format_operator_note_for_delivery,
+    operator_notes_file_path,
+    paste_text_to_tmux_pane,
+    resolve_operator_note_target,
+)
 from codex_looper.control_panel import control_pane_main
 from codex_looper.farm import (
     clean_farm_args,
@@ -184,6 +193,7 @@ __all__ = [
     "LoadedConfig",
     "LooperConfig",
     "LooperMode",
+    "OPERATOR_NOTE_DELIVERIES",
     "ParsedLine",
     "ProcessResult",
     "PromptError",
@@ -200,6 +210,7 @@ __all__ = [
     "_terminate_process_group",
     "add_run_arguments",
     "agent_extra_args",
+    "append_operator_note",
     "apply_run_options",
     "build_command",
     "build_claude_hybrid_command",
@@ -217,6 +228,7 @@ __all__ = [
     "default_agent_from_invocation",
     "default_agents",
     "default_tmux_layout_from_env",
+    "deliver_operator_note",
     "display_name",
     "display_tmux_message",
     "doctor_main",
@@ -225,6 +237,7 @@ __all__ = [
     "format_byte_count",
     "format_duration",
     "format_loop_metrics",
+    "format_operator_note_for_delivery",
     "git_workspace_fingerprint",
     "guidance_lines",
     "init_main",
@@ -245,6 +258,8 @@ __all__ = [
     "parse_basic_toml",
     "parse_output_line",
     "parse_run_options",
+    "operator_notes_file_path",
+    "paste_text_to_tmux_pane",
     "plan_file_all_tasks_checked",
     "positive_float",
     "positive_int",
@@ -254,6 +269,7 @@ __all__ = [
     "render_template",
     "repo_root",
     "resolve_agent_name",
+    "resolve_operator_note_target",
     "resolve_preset_path",
     "resolve_prompt_defaults",
     "resolve_self_executable",

@@ -121,6 +121,18 @@ Queue a safe stop without attaching:
 codex-looper control stop LOOPER-rai --after-loop --reason "merge checkpoint"
 ```
 
+Send or record an operator note without attaching:
+```bash
+codex-looper control note LOOPER-rai --delivery btw --note "controller drift was fixed after the latest calibration"
+codex-looper control note LOOPER-rai --delivery record --note-file ./handoff-note.md
+```
+
+In the split looper control pane, enter `b NOTE` to send `NOTE` through Claude's
+`/btw` side channel to the active hybrid pane. Notes are also recorded in the
+run directory as `operator_notes.jsonl`. When run state does not include a
+hybrid pane id, pass an explicit `--pane`; broad tmux pane scanning requires
+`--allow-pane-scan` after verifying the intended recipient.
+
 See [Agent Looper Reference](docs/looper.md) for prompt format, CLI parameters, config defaults, stop conditions, farm integration, and current backend limits.
 
 Looper defaults and limits:

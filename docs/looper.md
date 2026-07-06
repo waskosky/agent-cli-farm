@@ -312,6 +312,7 @@ Each run directory also contains durable machine-readable status:
 - `state.json`: latest snapshot with schema version, pid, label, agent, cwd, current loop/prompt, current session, status, stop reason, exit code, and last log path.
 - `events.jsonl`: append-only lifecycle history for run start, loop start/end, prompt start/end, retry waits, and final stop.
 - `control.jsonl`: optional append-only operator inbox. Queue `stop_after_loop`, `stop_after_prompt`, or `interrupt_now` commands with `codex-looper control stop ...`; the supervisor records consumed commands in `events.jsonl` and stops at the requested safe boundary.
+- `operator_notes.jsonl`: append-only operator-note history. Use `codex-looper control note ...` to record a note, paste it into the active hybrid pane as Claude `/btw`, or paste it as a normal prompt when that is the explicit operator intent.
 
 Use `codex-status loopers` from a project root to read `.agent-looper/runs/*/state.json` without attaching to tmux. Active states whose supervisor pid is gone or defunct are shown as `stale`. Use `codex-status loopers --repair-stale-loopers` to mark those stale states `stopped`, append a `run_stopped` event, and record an external-termination stop reason. Set `CODEX_LOOPER_STATE_ROOT=/path/to/runs` to point it at an aggregated or remote-synced run directory.
 
@@ -322,11 +323,14 @@ codex-looper control stop LOOPER-rai --after-loop --reason "merge checkpoint"
 codex-looper control stop LOOPER-rai --after-prompt --state-root /path/to/.agent-looper/runs
 codex-looper control stop --run-dir .agent-looper/runs/20260628T000000Z__LOOPER-rai__abc123 --now
 codex-looper control stop LOOPER-rai --force --grace-seconds 5
+codex-looper control note LOOPER-rai --delivery btw --note "camera drift was fixed after controller calibration"
+codex-looper control note LOOPER-rai --pane %12 --delivery btw --note "send this to the explicit pane"
+codex-looper control note --run-dir .agent-looper/runs/20260628T000000Z__LOOPER-rai__abc123 --delivery record --note-file ./handoff-note.md
 ```
 
 `--now` queues `interrupt_now` and sends SIGINT to every known runtime target: the child process group, hybrid pane descendants and process group when present, and the supervisor process. `--force` implies `--now`; after the grace interval it escalates still-running targets through SIGTERM and then SIGKILL, then attempts stale-state repair for the run directory. Do not combine `--force` with `--after-loop` or `--after-prompt`; those are cooperative safe-boundary stops.
 
-Farm-launched split layout starts a looper control pane below the supervisor. The pane shows the selected run, current status, current log path, a rendered live transcript, and bounded actions: `p` stop after prompt, `l` stop after loop, `i` interrupt now, `f` force stop, `r` repair stale state, and `q` quit the pane. Actions read `state.json`, append `control.jsonl`, and call the shared stop-target functions so CLI and pane behavior stay identical.
+Farm-launched split layout starts a looper control pane below the supervisor. The pane shows the selected run, current status, current log path, a rendered live transcript, and bounded actions: `b NOTE` send an operator `/btw` note, `p` stop after prompt, `l` stop after loop, `i` interrupt now, `f` force stop, `r` repair stale state, and `q` quit the pane. Actions read `state.json`, append durable records, and call the shared note/stop-target functions so CLI and pane behavior stay identical. Prefer `--delivery record` or `b NOTE` for contextual operator updates; use `--delivery prompt` only when the operator intends to add an ordinary user prompt to the live pane. When `state.json` does not identify a hybrid pane, pass an explicit `--pane`; broad tmux pane scanning requires `--allow-pane-scan` after verifying the intended recipient.
 
 ## Farm Integration
 

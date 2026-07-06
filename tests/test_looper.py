@@ -1149,6 +1149,7 @@ fresh_session_per_loop = "false"
         self.assertEqual(state["prompt_sha256"], hashlib.sha256(b"hello\n").hexdigest())
         self.assertEqual(state["prompt_bytes"], 6)
         self.assertTrue(str(state["control_file"]).endswith("control.jsonl"))
+        self.assertTrue(str(state["operator_notes_file"]).endswith("operator_notes.jsonl"))
         self.assertEqual(
             [event["event"] for event in events],
             [
@@ -2869,6 +2870,159 @@ class LooperCliTests(unittest.TestCase):
             command = json.loads((newer / "control.jsonl").read_text(encoding="utf-8"))
             self.assertEqual(command["action"], "stop_after_loop")
             self.assertEqual(command["reason"], "operator restart")
+
+    def test_operator_note_delivery_uses_hybrid_pane_from_state(self) -> None:
+        looper = load_looper_module()
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "runs" / "active"
+            run_dir.mkdir(parents=True)
+            calls: list[tuple[list[str], str | None]] = []
+
+            def fake_runner(command: list[str], input_text: str | None = None) -> object:
+                calls.append((command, input_text))
+                return looper.TmuxCommandResult(returncode=0)
+
+            result = looper.deliver_operator_note(
+                run_dir=run_dir,
+                state={
+                    "run_dir": str(run_dir),
+                    "label": "LOOPER-rai",
+                    "hybrid_pane_id": "%9",
+                },
+                note="line one\nline two",
+                delivery="btw",
+                actor="mike",
+                command_runner=fake_runner,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["target"]["paneId"], "%9")
+            self.assertEqual(calls[0][0][:3], ["tmux", "load-buffer", "-b"])
+            self.assertEqual(calls[0][1], "/btw line one line two")
+            self.assertEqual(calls[1][0][:2], ["tmux", "paste-buffer"])
+            self.assertEqual(calls[2][0], ["tmux", "send-keys", "-t", "%9", "Enter"])
+            note_record = json.loads((run_dir / "operator_notes.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(note_record["status"], "delivered")
+            self.assertEqual(note_record["actor"], "mike")
+            self.assertEqual(
+                looper.format_operator_note_for_delivery("hello\nthere", delivery="btw"),
+                "/btw hello there",
+            )
+
+    def test_operator_note_delivery_requires_explicit_target_before_pane_scan(self) -> None:
+        looper = load_looper_module()
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td) / "runs" / "active"
+            run_dir.mkdir(parents=True)
+
+            def unexpected_runner(command: list[str], input_text: str | None = None) -> object:
+                raise AssertionError(f"unexpected tmux command: {command}")
+
+            result = looper.deliver_operator_note(
+                run_dir=run_dir,
+                state={
+                    "run_dir": str(run_dir),
+                    "label": "LOOPER-rai",
+                    "agent_kind": "claude",
+                },
+                note="check target first",
+                delivery="btw",
+                command_runner=unexpected_runner,
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("--pane", result["error"])
+            note_record = json.loads((run_dir / "operator_notes.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(note_record["status"], "failed")
+
+    def test_control_note_records_for_latest_matching_run(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = root / ".agent-looper" / "runs"
+            older = runs / "20260625T000000Z__LOOPER-rai__old"
+            newer = runs / "20260625T000005Z__LOOPER-rai__new"
+            older.mkdir(parents=True)
+            newer.mkdir(parents=True)
+            for run_dir, updated_at in [
+                (older, "2026-06-25T00:00:00Z"),
+                (newer, "2026-06-25T00:00:05Z"),
+            ]:
+                state = {
+                    "schema_version": 1,
+                    "status": "running",
+                    "label": "LOOPER-rai",
+                    "run_dir": str(run_dir),
+                    "updated_at": updated_at,
+                }
+                (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "control",
+                    "note",
+                    "LOOPER-rai",
+                    "--state-root",
+                    str(runs),
+                    "--delivery",
+                    "record",
+                    "--actor",
+                    "mike",
+                    "--note",
+                    "controller drift warning",
+                ],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("operator note recorded", result.stdout)
+            self.assertFalse((older / "operator_notes.jsonl").exists())
+            note_record = json.loads((newer / "operator_notes.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(note_record["delivery"], "record")
+            self.assertEqual(note_record["status"], "recorded")
+            self.assertEqual(note_record["actor"], "mike")
+            self.assertEqual(note_record["note"], "controller drift warning")
+
+    def test_control_pane_b_action_sends_btw_note(self) -> None:
+        import codex_looper.control_panel as control_panel
+
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            (run_dir / "state.json").write_text(
+                json.dumps(
+                    {
+                        "run_dir": str(run_dir),
+                        "label": "LOOPER-rai",
+                        "hybrid_pane_id": "%12",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            calls: list[dict[str, object]] = []
+            original = control_panel.deliver_operator_note
+
+            def fake_deliver_operator_note(**kwargs: object) -> dict[str, object]:
+                calls.append(dict(kwargs))
+                return {"ok": True, "target": {"paneId": "%12"}}
+
+            control_panel.deliver_operator_note = fake_deliver_operator_note  # type: ignore[assignment]
+            try:
+                result = control_panel.run_control_pane_action(
+                    "b controller fixed",
+                    run_dir=run_dir,
+                )
+            finally:
+                control_panel.deliver_operator_note = original  # type: ignore[assignment]
+
+            self.assertFalse(result.should_exit)
+            self.assertIn("sent operator /btw note", result.message)
+            self.assertEqual(calls[0]["note"], "controller fixed")
+            self.assertEqual(calls[0]["delivery"], "btw")
 
     def test_no_args_first_run_initializes_and_prints_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from .agents import build_command
-from .control import ControlCommand, control_file_path, read_control_commands
+from .control import (
+    ControlCommand,
+    control_file_path,
+    operator_notes_file_path,
+    read_control_commands,
+)
 from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
 from .hybrid import ClaudeHybridController, build_claude_hybrid_command
 from .models import (
@@ -319,6 +324,7 @@ async def run_loop(
             "mode": looper.mode,
             "reload_prompt_each_loop": looper.reload_prompt_each_loop,
             "control_file": str(control_file_path(run_dir)),
+            "operator_notes_file": str(operator_notes_file_path(run_dir)),
             "control_processed_count": 0,
             "control_last_action": None,
             "control_last_reason": None,

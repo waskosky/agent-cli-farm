@@ -13,6 +13,7 @@ from .config import load_config, resolve_preset_path
 from .control import (
     ControlError,
     append_control_command,
+    deliver_operator_note,
     force_stop_from_state,
     format_stop_signal_results,
     interrupt_from_state,
@@ -396,6 +397,36 @@ def doctor_main(argv: list[str] | None = None) -> int:
     return status
 
 
+def _add_control_target_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("label", nargs="?", help="looper label or run id")
+    parser.add_argument(
+        "--state-root",
+        default=os.environ.get("CODEX_LOOPER_STATE_ROOT", ".agent-looper/runs"),
+        help="directory containing looper run directories",
+    )
+    parser.add_argument("--run-dir", help="exact looper run directory")
+    parser.add_argument(
+        "--include-stopped",
+        action="store_true",
+        help="allow selecting stopped runs when no active run matches",
+    )
+
+
+def _operator_note_text(args: argparse.Namespace) -> str:
+    note = getattr(args, "note", None)
+    note_file = getattr(args, "note_file", None)
+    if note and note_file:
+        raise ControlError("--note cannot be combined with --note-file")
+    if note_file:
+        try:
+            return Path(note_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ControlError(f"failed to read note file {note_file}: {exc}") from exc
+    if note:
+        return str(note)
+    raise ControlError("operator note text is required; use --note or --note-file")
+
+
 def control_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog=f"{display_name()} control",
@@ -403,7 +434,7 @@ def control_main(argv: list[str] | None = None) -> int:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     stop_parser = subparsers.add_parser("stop", help="request a looper stop")
-    stop_parser.add_argument("label", nargs="?", help="looper label or run id")
+    _add_control_target_arguments(stop_parser)
     timing = stop_parser.add_mutually_exclusive_group()
     timing.add_argument("--after-prompt", action="store_true", help="stop after the current prompt")
     timing.add_argument("--after-loop", action="store_true", help="stop after the current loop")
@@ -419,29 +450,37 @@ def control_main(argv: list[str] | None = None) -> int:
         default=5.0,
         help="seconds to wait between forced stop escalation stages",
     )
-    stop_parser.add_argument(
-        "--state-root",
-        default=os.environ.get("CODEX_LOOPER_STATE_ROOT", ".agent-looper/runs"),
-        help="directory containing looper run directories",
-    )
-    stop_parser.add_argument("--run-dir", help="exact looper run directory")
     stop_parser.add_argument("--reason", default="operator requested stop", help="operator note")
-    stop_parser.add_argument(
-        "--include-stopped",
+
+    note_parser = subparsers.add_parser("note", help="record or send an operator note")
+    _add_control_target_arguments(note_parser)
+    note_parser.add_argument("--note", help="operator note text")
+    note_parser.add_argument("--note-file", help="file containing operator note text")
+    note_parser.add_argument(
+        "--delivery",
+        choices=("record", "btw", "prompt"),
+        default="btw",
+        help="record only, paste through Claude /btw, or paste as a normal prompt",
+    )
+    note_parser.add_argument("--actor", default="operator", help="actor name to record")
+    note_parser.add_argument("--pane", help="explicit tmux pane id target")
+    note_parser.add_argument("--tmux-session", help="restrict tmux pane fallback to one session")
+    note_parser.add_argument(
+        "--allow-pane-scan",
         action="store_true",
-        help="allow selecting stopped runs when no active run matches",
+        help="allow tmux pane scanning when the selected run has no hybrid pane id",
     )
 
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    if args.command != "stop":
+    if args.command not in {"stop", "note"}:
         parser.error(f"unsupported control command: {args.command}")
-    if args.force and (args.after_prompt or args.after_loop):
+    if args.command == "stop" and args.force and (args.after_prompt or args.after_loop):
         parser.error("--force cannot be combined with --after-prompt or --after-loop")
 
     action = "stop_after_loop"
-    if args.after_prompt:
+    if args.command == "stop" and args.after_prompt:
         action = "stop_after_prompt"
-    elif args.now or args.force:
+    elif args.command == "stop" and (args.now or args.force):
         action = "interrupt_now"
 
     try:
@@ -452,16 +491,41 @@ def control_main(argv: list[str] | None = None) -> int:
             include_stopped=args.include_stopped,
         )
         run_dir = Path(str(state["run_dir"]))
-        record = append_control_command(
-            run_dir,
-            action=action,
-            reason=args.reason,
-        )
+        if args.command == "note":
+            note_result = deliver_operator_note(
+                run_dir=run_dir,
+                state=state,
+                note=_operator_note_text(args),
+                delivery=args.delivery,
+                actor=args.actor,
+                pane_id=args.pane or "",
+                tmux_session=args.tmux_session or "",
+                allow_pane_scan=args.allow_pane_scan,
+            )
+        else:
+            record = append_control_command(
+                run_dir,
+                action=action,
+                reason=args.reason,
+            )
     except ControlError as exc:
         print(f"looper control error: {exc}", file=sys.stderr)
         return 2
 
     target = state.get("label") or state.get("run_id") or run_dir.name
+    if args.command == "note":
+        status = str(note_result.get("status") or "unknown")
+        note_id = str(note_result.get("note", {}).get("id") or "")
+        print(f"operator note {status} for {target} at {run_dir}")
+        if note_id:
+            print(f"note id: {note_id}")
+        if note_result.get("target", {}).get("paneId"):
+            print(f"pane: {note_result['target']['paneId']}")
+        if note_result.get("error"):
+            print(f"delivery error: {note_result['error']}", file=sys.stderr)
+            return 2
+        return 0
+
     print(f"queued {record['action']} for {target} at {run_dir}")
     if args.force:
         results = force_stop_from_state(state, grace_seconds=args.grace_seconds)
