@@ -78,8 +78,10 @@ from codex_looper.git_safety import (
 )
 from codex_looper.hybrid import (
     ClaudeHybridController,
+    CodexHybridController,
     TmuxCommandResult,
     build_claude_hybrid_command,
+    build_codex_hybrid_command,
     tmux_split_window_command,
 )
 from codex_looper.init import (
@@ -193,6 +195,7 @@ __all__ = [
     "AgentConfig",
     "AgentInterface",
     "ClaudeHybridController",
+    "CodexHybridController",
     "CommandContext",
     "CommandTemplateError",
     "ConfigError",
@@ -221,6 +224,7 @@ __all__ = [
     "apply_run_options",
     "build_command",
     "build_claude_hybrid_command",
+    "build_codex_hybrid_command",
     "build_example_config",
     "clean_farm_args",
     "classify_claude_output",
@@ -352,6 +356,7 @@ async def run_loop(
     options: RunOptions,
     run_command_fn: Any | None = None,
     run_claude_hybrid_turn_fn: Any | None = None,
+    run_codex_hybrid_turn_fn: Any | None = None,
     set_tmux_window_option_fn: Any | None = None,
     display_tmux_message_fn: Any | None = None,
     start_tmux_log_pane_fn: Any | None = None,
@@ -364,6 +369,7 @@ async def run_loop(
         options=options,
         run_command_fn=run_command_fn or run_command,
         run_claude_hybrid_turn_fn=run_claude_hybrid_turn_fn or _runner.run_claude_hybrid_turn,
+        run_codex_hybrid_turn_fn=run_codex_hybrid_turn_fn or _runner.run_codex_hybrid_turn,
         set_tmux_window_option_fn=set_tmux_window_option_fn or set_tmux_window_option,
         display_tmux_message_fn=display_tmux_message_fn or display_tmux_message,
         start_tmux_log_pane_fn=start_tmux_log_pane_fn or start_tmux_log_pane,

@@ -293,7 +293,7 @@ def _agent_interface(value: Any, key: str, default: str) -> str:
 def default_agents() -> dict[str, AgentConfig]:
     return {
         "claude": AgentConfig(name="claude", kind="claude", interface="hybrid"),
-        "codex": AgentConfig(name="codex", kind="codex"),
+        "codex": AgentConfig(name="codex", kind="codex", interface="hybrid"),
         "gemini": AgentConfig(
             name="gemini",
             kind="generic",
@@ -532,8 +532,10 @@ def load_config(
             f"agents.{name}.interface",
             base.interface if base else "json",
         )
-        if interface == "hybrid" and kind != "claude":
-            raise ConfigError(f"agents.{name}.interface hybrid is currently only supported for claude")
+        if interface == "hybrid" and kind not in {"claude", "codex"}:
+            raise ConfigError(
+                f"agents.{name}.interface hybrid is currently only supported for claude or codex"
+            )
         agents[name] = AgentConfig(
             name=name,
             kind=kind,  # type: ignore[arg-type]

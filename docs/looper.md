@@ -84,14 +84,14 @@ Use `--once` or `--max-loops N` for bounded runs. Without either, the looper rep
 
 ## CLI Options
 
-Values are resolved in this order: built-in defaults, project config, preset config, environment layout defaults where documented, and finally CLI flags. Agent-native argv after `--` is appended to built-in Codex/Claude command templates for that invocation. For Claude's default hybrid interface, those argv tokens are appended to the visible interactive `claude` pane command.
+Values are resolved in this order: built-in defaults, project config, preset config, environment layout defaults where documented, and finally CLI flags. Agent-native argv after `--` is appended to built-in Codex/Claude command templates for that invocation. For Codex and Claude hybrid interfaces, those argv tokens are appended to the visible interactive pane command.
 
 Numeric constraints are strict. Integer counters must be whole numbers and finite; values documented as nonnegative accept `0`; values documented as positive must be greater than `0`. Float seconds must be finite and nonnegative unless the row says positive.
 
 | Option | Default | Constraint | Purpose |
 | --- | --- | --- | --- |
 | `--agent NAME` | `[looper].default_agent` or wrapper default | nonempty string | Selects an agent config from `agent-looper.toml`. |
-| `--interface json\|hybrid` | agent config | enum | Override the selected agent interface for this run. `hybrid` is currently Claude-only. |
+| `--interface json\|hybrid` | agent config | enum | Override the selected agent interface for this run. `hybrid` is available for Codex and Claude. |
 | `--config PATH` | `agent-looper.toml` | path string | Project config file path. Missing config is allowed. |
 | `--preset NAME_OR_PATH` | unset | name or path string | Layer a preset TOML file over project config. Named presets resolve from `${XDG_CONFIG_HOME:-~/.config}/codexfarm/presets/` and repo `examples/presets/`. |
 | `--mode single\|sequence` | `single`, with legacy inference | enum | Select prompt loading mode. |
@@ -129,7 +129,7 @@ Numeric constraints are strict. Integer counters must be whole numbers and finit
 
 Use `--` for one-off agent-native flags. For Claude, the correct spelling is `--dangerously-skip-permissions`; local Claude help recommends it only for isolated sandboxes. To make it permanent for a project, put the same values in `[agents.claude].extra_args`.
 
-`claude-looper` defaults to `interface = "hybrid"`. The hybrid interface starts a visible Claude TTY pane, pastes prompts into that pane, reads Claude's session JSONL files for session identity and turn advancement, and keeps the supervisor pane focused on loop state. Use `--interface json` or `[agents.claude].interface = "json"` to force the older noninteractive `claude -p --output-format stream-json` path.
+`codex-looper` and `claude-looper` default to `interface = "hybrid"`. The hybrid interface starts a visible agent TTY pane, pastes prompts into that pane, reads the agent's session JSONL files for session identity and turn advancement, and keeps the supervisor pane focused on loop state. Use `--interface json` or `[agents.codex].interface = "json"` / `[agents.claude].interface = "json"` to force the older noninteractive JSON stream path.
 
 ## Config Defaults
 
@@ -165,7 +165,7 @@ Agent defaults:
 
 | Agent | Command behavior |
 | --- | --- |
-| `codex` | First prompt: `codex exec --json <prompt>`; later prompts resume by Codex thread ID when available, otherwise `resume --last`. |
+| `codex` | Default hybrid: start a visible `codex --no-alt-screen` TTY pane once, paste each prompt, and detect turn completion from pane readiness plus Codex session JSONL advancement. With `interface = "json"`: first prompt uses `codex exec --json <prompt>`; later prompts resume by Codex thread ID when available, otherwise `resume --last`. |
 | `claude` | Default hybrid: start a visible `claude` TTY pane once, paste each prompt, and detect turn completion from pane readiness plus Claude session JSONL advancement. With `interface = "json"`: first prompt uses `claude -p --output-format stream-json --verbose --name <session> <prompt>`; later prompts use `--resume <session>`. |
 | `gemini` | Generic default: `gemini -p <prompt>` for every prompt. Override this if your Gemini CLI supports a better noninteractive/resume mode. |
 
@@ -185,9 +185,14 @@ model = "claude-opus-4-8"
 effort = "max"
 ```
 
-Use `interactive_command` when Claude hybrid mode should launch a wrapper or profile command instead of the built-in `claude` executable:
+Use `interactive_command` when hybrid mode should launch a wrapper or profile command instead of the built-in interactive executable:
 
 ```toml
+[agents.codex]
+kind = "codex"
+interface = "hybrid"
+interactive_command = ["codex-wrapper", "--profile", "loop"]
+
 [agents.claude]
 kind = "claude"
 interface = "hybrid"

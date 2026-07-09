@@ -12,8 +12,8 @@ from pathlib import Path
 from .config import load_config, resolve_preset_path
 from .control import (
     ControlError,
-    append_focus_update,
     append_control_command,
+    append_focus_update,
     deliver_operator_note,
     force_stop_from_state,
     format_stop_signal_results,
@@ -113,7 +113,10 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
     parser.add_argument(
         "--interface",
         choices=("json", "hybrid"),
-        help="agent interface override; Claude defaults to hybrid, json keeps the non-interactive stream-json path",
+        help=(
+            "agent interface override; Codex and Claude default to hybrid, "
+            "json keeps the non-interactive JSON stream path"
+        ),
     )
     parser.add_argument(
         "--tmux-layout",

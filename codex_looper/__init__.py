@@ -19,8 +19,8 @@ from .control import (
     ControlError,
     SignalTarget,
     StopSignalResult,
-    append_focus_update,
     append_control_command,
+    append_focus_update,
     append_operator_note,
     control_file_path,
     deliver_operator_note,
@@ -55,17 +55,26 @@ from .control_panel import (
 from .farm import clean_farm_args, maybe_launch_farm
 from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
 from .hybrid import (
-    ClaudeHybridController,
     ClaudeHybridAssessment,
+    ClaudeHybridController,
     ClaudeSessionEvent,
     ClaudeSessionTail,
+    CodexHybridAssessment,
+    CodexHybridController,
+    CodexSessionEvent,
+    CodexSessionTail,
     TmuxCommandResult,
     assess_claude_hybrid_signals,
+    assess_codex_hybrid_signals,
     build_claude_hybrid_command,
+    build_codex_hybrid_command,
     extract_session_id_from_claude_session,
+    extract_session_id_from_codex_session,
     extract_uuid_from_session_path,
     parse_claude_session_line,
+    parse_codex_session_line,
     read_new_claude_session_events,
+    read_new_codex_session_events,
     tmux_prompt_paste_commands,
     tmux_split_window_command,
 )
@@ -99,7 +108,6 @@ from .models import (
     RunOptions,
     TmuxLayout,
 )
-from .process import _close_subprocess_transport, _safe_stream_write, _terminate_process_group
 from .pane_status import (
     aggregate_window_state,
     classify_claude_output,
@@ -108,6 +116,7 @@ from .pane_status import (
     is_codex_command,
     strip_ansi,
 )
+from .process import _close_subprocess_transport, _safe_stream_write, _terminate_process_group
 from .prompts import load_prompts, load_prompts_for_mode, resolve_prompt_defaults
 from .retry import (
     format_byte_count,
@@ -168,6 +177,10 @@ __all__ = [
     "ClaudeHybridAssessment",
     "ClaudeSessionEvent",
     "ClaudeSessionTail",
+    "CodexHybridAssessment",
+    "CodexHybridController",
+    "CodexSessionEvent",
+    "CodexSessionTail",
     "CommandContext",
     "CommandTemplateError",
     "CONTROL_FILENAME",
@@ -197,9 +210,11 @@ __all__ = [
     "append_control_command",
     "append_operator_note",
     "assess_claude_hybrid_signals",
+    "assess_codex_hybrid_signals",
     "apply_run_options",
     "build_command",
     "build_claude_hybrid_command",
+    "build_codex_hybrid_command",
     "classify_claude_output",
     "classify_codex_output",
     "clean_farm_args",
@@ -219,6 +234,7 @@ __all__ = [
     "descendant_pids",
     "emit_new_log_lines",
     "extract_session_id_from_claude_session",
+    "extract_session_id_from_codex_session",
     "extract_uuid_from_session_path",
     "focus_log_file_path",
     "format_agent_log_line",
@@ -246,6 +262,7 @@ __all__ = [
     "merge_raw_config",
     "parse_basic_toml",
     "parse_claude_session_line",
+    "parse_codex_session_line",
     "parse_output_line",
     "operator_notes_file_path",
     "paste_text_to_tmux_pane",
@@ -255,6 +272,7 @@ __all__ = [
     "read_focus_updates",
     "read_config_raw",
     "read_new_claude_session_events",
+    "read_new_codex_session_events",
     "render_header",
     "render_template",
     "repo_root",

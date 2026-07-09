@@ -24,7 +24,12 @@ from .control import (
     read_control_commands,
 )
 from .git_safety import create_backup_branch, git_workspace_fingerprint, prune_backup_branches
-from .hybrid import ClaudeHybridController, build_claude_hybrid_command
+from .hybrid import (
+    ClaudeHybridController,
+    CodexHybridController,
+    build_claude_hybrid_command,
+    build_codex_hybrid_command,
+)
 from .models import (
     TMUX_STATE_OPTION,
     TMUX_STOP_REASON_OPTION,
@@ -66,6 +71,7 @@ from .tmux import (
 
 RunCommandFn = Callable[..., Awaitable[ProcessResult]]
 RunClaudeHybridTurnFn = Callable[..., Awaitable[ProcessResult]]
+RunCodexHybridTurnFn = Callable[..., Awaitable[ProcessResult]]
 SetTmuxWindowOptionFn = Callable[[str, str], None]
 DisplayTmuxMessageFn = Callable[[str], None]
 StartTmuxLogPaneFn = Callable[[Path, RunOptions], bool]
@@ -238,6 +244,28 @@ async def run_claude_hybrid_turn(
     )
 
 
+async def run_codex_hybrid_turn(
+    *,
+    controller: CodexHybridController,
+    prompt: str,
+    timeout_seconds: float,
+    log_path: Path,
+    patterns: list[re.Pattern[str]],
+    completion_pattern: re.Pattern[str] | None,
+    session_name: str,
+    session_id: str,
+) -> ProcessResult:
+    del session_name, session_id
+    return await asyncio.to_thread(
+        controller.run_turn,
+        prompt=prompt,
+        timeout_seconds=timeout_seconds,
+        log_path=log_path,
+        completion_pattern=completion_pattern,
+        stop_patterns=patterns,
+    )
+
+
 def make_label(label: str | None, agent_name: str) -> str:
     if label:
         return label
@@ -305,6 +333,7 @@ async def run_loop(
     options: RunOptions,
     run_command_fn: RunCommandFn = run_command,
     run_claude_hybrid_turn_fn: RunClaudeHybridTurnFn = run_claude_hybrid_turn,
+    run_codex_hybrid_turn_fn: RunCodexHybridTurnFn = run_codex_hybrid_turn,
     set_tmux_window_option_fn: SetTmuxWindowOptionFn = set_tmux_window_option,
     display_tmux_message_fn: DisplayTmuxMessageFn = display_tmux_message,
     start_tmux_log_pane_fn: StartTmuxLogPaneFn = start_tmux_log_pane,
@@ -345,16 +374,25 @@ async def run_loop(
     }
     agent = replace(agent, env={**agent.env, **looper_agent_env})
 
-    use_claude_hybrid = agent.interface == "hybrid"
-    if use_claude_hybrid and agent.kind != "claude":
-        raise ConfigError("hybrid interface is currently only supported for claude agents")
+    use_hybrid = agent.interface == "hybrid"
+    if use_hybrid and agent.kind not in {"claude", "codex"}:
+        raise ConfigError("hybrid interface is currently only supported for claude or codex agents")
     claude_hybrid_controller = (
         ClaudeHybridController(
             command=build_claude_hybrid_command(agent),
             cwd=agent.cwd,
             env=agent.env,
         )
-        if use_claude_hybrid
+        if use_hybrid and agent.kind == "claude"
+        else None
+    )
+    codex_hybrid_controller = (
+        CodexHybridController(
+            command=build_codex_hybrid_command(agent),
+            cwd=agent.cwd,
+            env=agent.env,
+        )
+        if use_hybrid and agent.kind == "codex"
         else None
     )
 
@@ -452,7 +490,7 @@ async def run_loop(
         )
         return exit_code
 
-    tail_pane_active = False if use_claude_hybrid else start_tmux_log_pane_fn(run_dir, options)
+    tail_pane_active = False if use_hybrid else start_tmux_log_pane_fn(run_dir, options)
     set_tmux_window_option_fn(TMUX_STATE_OPTION, "RUN")
     set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, "")
 
@@ -471,8 +509,8 @@ async def run_loop(
         "control: "
         f"codex-looper control focus|stop|note --run-dir {shlex.quote(str(run_dir))} ..."
     )
-    if use_claude_hybrid:
-        print("panes: supervisor status/control here; Claude Code runs in the paired pane")
+    if use_hybrid:
+        print(f"panes: supervisor status/control here; {agent.name} runs in the paired pane")
     print(
         "session mode: "
         + (
@@ -589,8 +627,10 @@ async def run_loop(
                     label=label,
                     run_dir=run_dir,
                 )
-                if use_claude_hybrid:
+                if use_hybrid and agent.kind == "claude":
                     command = build_claude_hybrid_command(agent)
+                elif use_hybrid and agent.kind == "codex":
+                    command = build_codex_hybrid_command(agent)
                 else:
                     command = build_command(
                         agent=agent,
@@ -614,7 +654,7 @@ async def run_loop(
                     )
                     break
 
-                if use_claude_hybrid:
+                if use_hybrid and agent.kind == "claude":
                     if claude_hybrid_controller is None:
                         raise ConfigError("Claude hybrid controller was not initialized")
                     result = await await_with_focus_updates(
@@ -633,6 +673,26 @@ async def run_loop(
                     state.update(
                         hybrid_pane_id=claude_hybrid_controller.pane_id,
                         hybrid_pane_pid=claude_hybrid_controller.pane_pid(),
+                    )
+                elif use_hybrid and agent.kind == "codex":
+                    if codex_hybrid_controller is None:
+                        raise ConfigError("Codex hybrid controller was not initialized")
+                    result = await await_with_focus_updates(
+                        run_codex_hybrid_turn_fn(
+                            controller=codex_hybrid_controller,
+                            prompt=prompt,
+                            timeout_seconds=looper.timeout_seconds,
+                            log_path=log_path,
+                            patterns=patterns,
+                            completion_pattern=completion_pattern,
+                            session_name=session_name,
+                            session_id=session_id,
+                        ),
+                        focus_reporter=focus_reporter,
+                    )
+                    state.update(
+                        hybrid_pane_id=codex_hybrid_controller.pane_id,
+                        hybrid_pane_pid=codex_hybrid_controller.pane_pid(),
                     )
                 else:
                     result = await await_with_focus_updates(

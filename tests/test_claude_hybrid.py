@@ -5,17 +5,22 @@ from pathlib import Path
 
 from codex_looper.hybrid import (
     ClaudeHybridController,
+    CodexHybridController,
     TmuxCommandResult,
     assess_claude_hybrid_signals,
+    assess_codex_hybrid_signals,
     build_claude_hybrid_command,
+    build_codex_hybrid_command,
     extract_session_id_from_claude_session,
+    extract_session_id_from_codex_session,
     extract_uuid_from_session_path,
     prompt_submit_delay_seconds,
     read_new_claude_session_events,
+    read_new_codex_session_events,
     tmux_prompt_paste_commands,
     tmux_split_window_command,
 )
-from codex_looper.models import AgentConfig
+from codex_looper.models import AgentConfig, ConfigError
 
 SESSION_ID = "54f5b65c-a31c-4aa1-b91b-896b35e2a759"
 
@@ -244,6 +249,7 @@ class ClaudeHybridTests(unittest.TestCase):
             cwd=Path("/tmp/project"),
             env={"B_ENV": "two", "A_ENV": "one"},
             split_size="60%",
+            inherited_env={},
         )
 
         self.assertEqual(
@@ -258,11 +264,31 @@ class ClaudeHybridTests(unittest.TestCase):
                 "-v",
                 "-l",
                 "60%",
+                "-e",
+                "A_ENV=one",
+                "-e",
+                "B_ENV=two",
                 "-c",
                 "/tmp/project",
-                "env A_ENV=one B_ENV=two claude --model opus",
+                "claude --model opus",
             ],
         )
+
+    def test_tmux_split_window_command_inherits_non_secret_agent_home_env(self) -> None:
+        command = tmux_split_window_command(
+            ["codex", "--no-alt-screen"],
+            cwd=Path("/tmp/project"),
+            env={},
+            inherited_env={
+                "CODEX_HOME": "/tmp/codex-home",
+                "OPENAI_API_KEY": "secret-token",
+            },
+        )
+
+        self.assertIn("-e", command)
+        self.assertIn("CODEX_HOME=/tmp/codex-home", command)
+        self.assertNotIn("OPENAI_API_KEY=secret-token", command)
+        self.assertEqual(command[-1], "codex --no-alt-screen")
 
     def test_build_claude_hybrid_command_allows_custom_interactive_command(self) -> None:
         default_agent = AgentConfig(
@@ -306,7 +332,7 @@ class ClaudeHybridTests(unittest.TestCase):
                     if captures:
                         return TmuxCommandResult(returncode=0, stdout=captures.pop(0))
                     return TmuxCommandResult(returncode=0, stdout="Done\n> ")
-                if command[:3] == ["tmux", "list-panes", "-t"]:
+                if command[:4] == ["tmux", "display-message", "-p", "-t"]:
                     return TmuxCommandResult(returncode=0, stdout="4242\n")
                 if command[:2] == ["pgrep", "-P"]:
                     return TmuxCommandResult(returncode=1)
@@ -381,6 +407,97 @@ class ClaudeHybridTests(unittest.TestCase):
         self.assertNotIn("complex prompt", flattened_args)
         self.assertTrue(any(command[:3] == ["tmux", "load-buffer", "-b"] for command, _ in commands))
 
+    def test_controller_switches_to_new_claude_session_file_after_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_dir = root / ".claude" / "projects" / "-tmp-project"
+            session_dir.mkdir(parents=True)
+            stale_session = session_dir / f"{SESSION_ID}.jsonl"
+            fresh_session_id = "8a6853a0-81fc-401e-aac2-91e20d060220"
+            fresh_session = session_dir / f"{fresh_session_id}.jsonl"
+            stale_session.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "uuid": "assistant-stale",
+                        "sessionId": SESSION_ID,
+                        "message": {"role": "assistant", "content": "old answer"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fresh_session.write_text("", encoding="utf-8")
+            prompt_was_pasted = False
+
+            def command_runner(command: list[str], *, input_text: str | None = None):
+                nonlocal prompt_was_pasted
+                if command[:3] == ["tmux", "split-window", "-P"]:
+                    return TmuxCommandResult(returncode=0, stdout="%7\n")
+                if command[:3] == ["tmux", "capture-pane", "-t"]:
+                    return TmuxCommandResult(returncode=0, stdout="Done\n> ")
+                if command[:4] == ["tmux", "display-message", "-p", "-t"]:
+                    return TmuxCommandResult(returncode=0, stdout="4242\n")
+                if command[:2] == ["pgrep", "-P"]:
+                    return TmuxCommandResult(returncode=1)
+                if command[:2] == ["lsof", "-Fn"]:
+                    path = fresh_session if prompt_was_pasted else stale_session
+                    return TmuxCommandResult(returncode=0, stdout=f"n{path}\n")
+                if command[:3] == ["tmux", "paste-buffer", "-d"]:
+                    prompt_was_pasted = True
+                    with fresh_session.open("a", encoding="utf-8") as handle:
+                        handle.write(
+                            json.dumps(
+                                {
+                                    "type": "user",
+                                    "uuid": "user-fresh",
+                                    "sessionId": fresh_session_id,
+                                    "message": {"role": "user", "content": "redacted"},
+                                }
+                            )
+                            + "\n"
+                        )
+                        handle.write(
+                            json.dumps(
+                                {
+                                    "type": "assistant",
+                                    "uuid": "assistant-fresh",
+                                    "parentUuid": "user-fresh",
+                                    "sessionId": fresh_session_id,
+                                    "message": {
+                                        "role": "assistant",
+                                        "stop_reason": "end_turn",
+                                        "content": [{"type": "text", "text": "fresh answer"}],
+                                    },
+                                }
+                            )
+                            + "\n"
+                        )
+                    return TmuxCommandResult(returncode=0)
+                return TmuxCommandResult(returncode=0)
+
+            controller = ClaudeHybridController(
+                command=["claude"],
+                cwd=root,
+                env={},
+                command_runner=command_runner,
+                sleep_fn=lambda seconds: None,
+            )
+
+            result = controller.run_turn(
+                prompt="prompt that opens a fresh Claude transcript",
+                timeout_seconds=5,
+                log_path=root / "turn.log",
+                completion_pattern=None,
+                stop_patterns=[],
+            )
+            log_text = (root / "turn.log").read_text(encoding="utf-8")
+
+        self.assertFalse(result.timed_out)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.session_id, fresh_session_id)
+        self.assertIn("fresh answer", log_text)
+
     def test_controller_waits_for_final_answer_after_tool_use(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -422,7 +539,7 @@ class ClaudeHybridTests(unittest.TestCase):
                             }
                         )
                     return TmuxCommandResult(returncode=0, stdout="Done\n> ")
-                if command[:3] == ["tmux", "list-panes", "-t"]:
+                if command[:4] == ["tmux", "display-message", "-p", "-t"]:
                     return TmuxCommandResult(returncode=0, stdout="4242\n")
                 if command[:2] == ["pgrep", "-P"]:
                     return TmuxCommandResult(returncode=1)
@@ -484,7 +601,7 @@ class ClaudeHybridTests(unittest.TestCase):
                     return TmuxCommandResult(returncode=0, stdout="%7\n")
                 if command[:3] == ["tmux", "capture-pane", "-t"]:
                     return TmuxCommandResult(returncode=0, stdout="Done\n> ")
-                if command[:3] == ["tmux", "list-panes", "-t"]:
+                if command[:4] == ["tmux", "display-message", "-p", "-t"]:
                     return TmuxCommandResult(returncode=0, stdout="4242\n")
                 if command[:2] == ["pgrep", "-P"]:
                     return TmuxCommandResult(returncode=1)
@@ -527,6 +644,215 @@ class ClaudeHybridTests(unittest.TestCase):
 
         self.assertTrue(result.timed_out)
         self.assertEqual(result.stop_reason, "Claude hybrid timeout after 0.01 seconds")
+
+    def test_reads_codex_session_events_and_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / f"rollout-2026-07-07T00-00-00-{SESSION_ID}.jsonl"
+            write_jsonl(
+                path,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {"session_id": SESSION_ID, "cwd": str(root)},
+                    },
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "prompt"},
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "answer"}],
+                        },
+                    },
+                ],
+            )
+
+            tail = read_new_codex_session_events(path)
+
+        self.assertEqual(extract_session_id_from_codex_session(path), SESSION_ID)
+        self.assertEqual(tail.events[0].session_id, SESSION_ID)
+        self.assertTrue(tail.events[1].is_user_event)
+        self.assertTrue(tail.events[2].is_assistant_event)
+
+    def test_codex_assessment_requires_ready_pane_and_session_advance(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / f"rollout-2026-07-07T00-00-00-{SESSION_ID}.jsonl"
+            write_jsonl(
+                path,
+                [
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "prompt"},
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "answer"}],
+                        },
+                    },
+                ],
+            )
+
+            ready = assess_codex_hybrid_signals("READY", session_path=path)
+            running = assess_codex_hybrid_signals("RUN", session_path=path)
+
+        self.assertTrue(ready.ready_to_send_next)
+        self.assertTrue(ready.user_event_seen)
+        self.assertTrue(ready.assistant_event_seen)
+        self.assertEqual(ready.confidence, "high")
+        self.assertFalse(running.ready_to_send_next)
+        self.assertEqual(running.confidence, "running")
+
+    def test_build_codex_hybrid_command_uses_visible_inline_tui(self) -> None:
+        default_agent = AgentConfig(
+            name="codex",
+            kind="codex",
+            interface="hybrid",
+            extra_args=["--ask-for-approval", "never"],
+            model="gpt-5.5",
+        )
+        custom_agent = AgentConfig(
+            name="codex",
+            kind="codex",
+            interface="hybrid",
+            interactive_command=["codex-wrapper", "--profile", "loop"],
+            extra_args=["--ignored"],
+        )
+
+        self.assertEqual(
+            build_codex_hybrid_command(default_agent),
+            ["codex", "--no-alt-screen", "--ask-for-approval", "never", "--model", "gpt-5.5"],
+        )
+        self.assertEqual(
+            build_codex_hybrid_command(custom_agent),
+            ["codex-wrapper", "--profile", "loop"],
+        )
+
+    def test_codex_controller_drives_fake_tmux_until_session_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_root = root / ".codex" / "sessions" / "2026" / "07" / "07"
+            session_root.mkdir(parents=True)
+            session_path = session_root / f"rollout-2026-07-07T00-00-00-{SESSION_ID}.jsonl"
+            write_jsonl(
+                session_path,
+                [{"type": "session_meta", "payload": {"session_id": SESSION_ID, "cwd": str(root)}}],
+            )
+            commands: list[tuple[list[str], str | None]] = []
+            captures = ["codex ready\n> ", "working", "CODEX_DONE\n> "]
+
+            def command_runner(command: list[str], *, input_text: str | None = None):
+                commands.append((command, input_text))
+                if command[:3] == ["tmux", "split-window", "-P"]:
+                    return TmuxCommandResult(returncode=0, stdout="%8\n")
+                if command[:3] == ["tmux", "capture-pane", "-t"]:
+                    if captures:
+                        return TmuxCommandResult(returncode=0, stdout=captures.pop(0))
+                    return TmuxCommandResult(returncode=0, stdout="CODEX_DONE\n> ")
+                if command[:4] == ["tmux", "display-message", "-p", "-t"]:
+                    return TmuxCommandResult(returncode=0, stdout="5252\n")
+                if command[:2] == ["pgrep", "-P"]:
+                    return TmuxCommandResult(returncode=1)
+                if command[:2] == ["lsof", "-Fn"]:
+                    return TmuxCommandResult(returncode=0, stdout=f"n{session_path}\n")
+                if command[:3] == ["tmux", "load-buffer", "-b"]:
+                    self.assertEqual(input_text, "complex prompt\nCODEX_REQUEST")
+                    return TmuxCommandResult(returncode=0)
+                if command[:3] == ["tmux", "paste-buffer", "-d"]:
+                    with session_path.open("a", encoding="utf-8") as handle:
+                        handle.write(
+                            json.dumps(
+                                {
+                                    "type": "event_msg",
+                                    "payload": {
+                                        "type": "user_message",
+                                        "message": "redacted prompt",
+                                    },
+                                }
+                            )
+                            + "\n"
+                        )
+                        handle.write(
+                            json.dumps(
+                                {
+                                    "type": "response_item",
+                                    "payload": {
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [
+                                            {
+                                                "type": "output_text",
+                                                "text": "answer CODEX_DONE",
+                                            }
+                                        ],
+                                    },
+                                }
+                            )
+                            + "\n"
+                        )
+                    return TmuxCommandResult(returncode=0)
+                if command[:3] == ["tmux", "send-keys", "-t"]:
+                    return TmuxCommandResult(returncode=0)
+                return TmuxCommandResult(returncode=0)
+
+            controller = CodexHybridController(
+                command=["codex", "--no-alt-screen"],
+                cwd=root,
+                env={"CODEX_HOME": str(root / ".codex")},
+                command_runner=command_runner,
+                sleep_fn=lambda seconds: None,
+            )
+            result = controller.run_turn(
+                prompt="complex prompt\nCODEX_REQUEST",
+                timeout_seconds=5,
+                log_path=root / "turn.log",
+                completion_pattern=__import__("re").compile("CODEX_DONE"),
+                stop_patterns=[],
+            )
+            log_text = (root / "turn.log").read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.session_id, SESSION_ID)
+        self.assertTrue(result.completion_detected)
+        self.assertGreater(result.output_bytes, 0)
+        self.assertIn("CODEX_DONE", log_text)
+        flattened_args = "\0".join(arg for command, _ in commands for arg in command)
+        self.assertNotIn("complex prompt", flattened_args)
+        self.assertTrue(any(command[:3] == ["tmux", "load-buffer", "-b"] for command, _ in commands))
+
+    def test_codex_controller_blocks_on_workspace_trust_prompt(self) -> None:
+        def command_runner(command: list[str], *, input_text: str | None = None):
+            if command[:3] == ["tmux", "split-window", "-P"]:
+                return TmuxCommandResult(returncode=0, stdout="%8\n")
+            if command[:3] == ["tmux", "capture-pane", "-t"]:
+                return TmuxCommandResult(
+                    returncode=0,
+                    stdout=(
+                        "Do you trust the contents of this directory?\n"
+                        "1. Yes, continue\n"
+                        "2. No, quit\n"
+                        "Press enter to continue\n"
+                    ),
+                )
+            return TmuxCommandResult(returncode=0)
+
+        controller = CodexHybridController(
+            command=["codex", "--no-alt-screen"],
+            cwd=Path("/tmp/project"),
+            env={},
+            command_runner=command_runner,
+            sleep_fn=lambda seconds: None,
+        )
+
+        with self.assertRaisesRegex(ConfigError, "workspace trust"):
+            controller.ensure_started(timeout_seconds=5)
 
 
 if __name__ == "__main__":

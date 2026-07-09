@@ -348,7 +348,7 @@ class LooperCoreTests(unittest.TestCase):
         agents = self.looper.default_agents()
 
         self.assertEqual(agents["claude"].interface, "hybrid")
-        self.assertEqual(agents["codex"].interface, "json")
+        self.assertEqual(agents["codex"].interface, "hybrid")
 
     def test_config_can_force_claude_json_interface(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -366,7 +366,23 @@ interface = "json"
 
         self.assertEqual(loaded.agents["claude"].interface, "json")
 
-    def test_config_rejects_hybrid_for_non_claude_agents(self) -> None:
+    def test_config_can_force_codex_json_interface(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "agent-looper.toml"
+            path.write_text(
+                """
+[agents.codex]
+kind = "codex"
+interface = "json"
+""",
+                encoding="utf-8",
+            )
+
+            loaded = self.looper.load_config(path)
+
+        self.assertEqual(loaded.agents["codex"].interface, "json")
+
+    def test_config_rejects_hybrid_for_non_interactive_agents(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "agent-looper.toml"
             path.write_text(
@@ -379,7 +395,7 @@ first_command = ["agent", "{prompt}"]
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(self.looper.ConfigError, "hybrid.*claude"):
+            with self.assertRaisesRegex(self.looper.ConfigError, "hybrid.*claude or codex"):
                 self.looper.load_config(path)
 
     def test_load_config_falls_back_when_tomllib_is_unavailable(self) -> None:
@@ -1299,6 +1315,72 @@ fresh_session_per_loop = "false"
         self.assertEqual(len(hybrid_calls), 1)
         self.assertEqual(hybrid_calls[0]["prompt"], "hello")
         self.assertEqual(hybrid_calls[0]["session_name"], "hybrid-smoke-loop-0001")
+        self.assertTrue(str(hybrid_calls[0]["log_path"]).endswith("loop-0001__prompt-001.log"))
+
+    def test_run_loop_uses_codex_hybrid_controller_for_hybrid_interface(self) -> None:
+        async def exercise() -> tuple[int, list[dict[str, object]], int]:
+            hybrid_calls: list[dict[str, object]] = []
+            command_calls = 0
+            original_sleep = self.looper.asyncio.sleep
+
+            async def fake_run_command(**kwargs: object) -> object:
+                nonlocal command_calls
+                command_calls += 1
+                return self.looper.ProcessResult(returncode=0)
+
+            async def fake_hybrid_turn(**kwargs: object) -> object:
+                hybrid_calls.append(kwargs)
+                return self.looper.ProcessResult(
+                    returncode=0,
+                    session_id="codex-session-1",
+                    completion_detected=True,
+                    output_bytes=321,
+                )
+
+            async def fake_sleep(seconds: float) -> None:
+                return None
+
+            self.looper.asyncio.sleep = fake_sleep
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    prompt_file = root / "PROMPT.md"
+                    prompt_file.write_text("hello\n", encoding="utf-8")
+                    agent = self.looper.AgentConfig(
+                        name="codex",
+                        kind="codex",
+                        interface="hybrid",
+                        cwd=root,
+                    )
+                    looper = self.looper.LooperConfig(
+                        prompt_file=prompt_file,
+                        log_dir=root / "runs",
+                        max_loops=1,
+                    )
+                    options = self.looper.RunOptions(
+                        agent_name="codex",
+                        config_path=root / "agent-looper.toml",
+                        label="codex-hybrid-smoke",
+                    )
+
+                    result = await self.looper.run_loop(
+                        agent=agent,
+                        looper=looper,
+                        options=options,
+                        run_command_fn=fake_run_command,
+                        run_codex_hybrid_turn_fn=fake_hybrid_turn,
+                    )
+                    return result, hybrid_calls, command_calls
+            finally:
+                self.looper.asyncio.sleep = original_sleep
+
+        result, hybrid_calls, command_calls = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(command_calls, 0)
+        self.assertEqual(len(hybrid_calls), 1)
+        self.assertEqual(hybrid_calls[0]["prompt"], "hello")
+        self.assertEqual(hybrid_calls[0]["session_name"], "codex-hybrid-smoke-loop-0001")
         self.assertTrue(str(hybrid_calls[0]["log_path"]).endswith("loop-0001__prompt-001.log"))
 
     def test_run_loop_does_not_open_transcript_tail_for_claude_hybrid_interface(self) -> None:
@@ -2719,6 +2801,40 @@ class LooperCliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("agent: codex (codex)", result.stdout)
+        self.assertIn("interface: hybrid", result.stdout)
+        self.assertIn("$ codex --no-alt-screen", result.stdout)
+        self.assertIn("dry run complete", result.stdout)
+
+    def test_codex_json_interface_dry_run_uses_exec_json(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workdir = Path(td)
+            prompt_file = workdir / "PROMPT.md"
+            prompt_file.write_text("hello\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(LOOPER_PATH),
+                    "--agent",
+                    "codex",
+                    "--interface",
+                    "json",
+                    "--prompt-file",
+                    str(prompt_file),
+                    "--label",
+                    "smoke",
+                    "--once",
+                    "--dry-run",
+                ],
+                cwd=workdir,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("agent: codex (codex)", result.stdout)
+        self.assertIn("interface: json", result.stdout)
         self.assertIn("$ codex exec --json hello", result.stdout)
         self.assertIn("dry run complete", result.stdout)
 
@@ -3464,7 +3580,7 @@ extra_args = ["--max-turns", "3"]
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("agent: codex (codex)", result.stdout)
         self.assertIn("mode: sequence", result.stdout)
-        self.assertIn("$ codex exec --json 'sequence prompt'", result.stdout)
+        self.assertIn("$ codex --no-alt-screen", result.stdout)
 
 
 if __name__ == "__main__":
