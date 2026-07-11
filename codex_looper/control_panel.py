@@ -8,7 +8,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO, Any
+from typing import Any, TextIO
 
 from .control import (
     append_control_command,
@@ -140,8 +140,7 @@ def run_control_pane_action(
             suffix = f" to {pane}" if pane else ""
             return ControlPaneActionResult(f"sent operator /btw note{suffix}")
         return ControlPaneActionResult(
-            "operator note delivery failed: "
-            + str(result.get("error") or "unknown delivery error")
+            "operator note delivery failed: " + str(result.get("error") or "unknown delivery error")
         )
     if key == "p":
         append_control_command(

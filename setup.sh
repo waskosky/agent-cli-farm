@@ -6,6 +6,33 @@
 codexfarm_setup_main() (
   set -euo pipefail
 
+  local install_deep_history=0
+  local setup_python=""
+  while (( "$#" )); do
+    case "${1:-}" in
+      --with-deep-history)
+        install_deep_history=1
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: setup.sh [--with-deep-history]
+
+Install Codex CLI Farm helpers. The optional flag also installs the
+checksum-pinned tmux-deep-history release used by the automatic history backend.
+EOF
+        exit 0
+        ;;
+      *)
+        echo "Unknown setup option: $1" >&2
+        exit 2
+        ;;
+    esac
+    shift
+  done
+  case "${CODEXFARM_WITH_DEEP_HISTORY:-}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) install_deep_history=1 ;;
+  esac
+
   echo "Setting up Codex CLI Farm..."
 
   have_command() {
@@ -48,12 +75,11 @@ PY
   }
 
   require_python() {
-    local python_bin
-    if ! python_bin="$(find_python)"; then
+    if ! setup_python="$(find_python)"; then
       echo "Python 3.10 or newer is required; install python3.10+ or set CODEXFARM_PYTHON_BIN." >&2
       exit 1
     fi
-    echo "Using Python interpreter: $python_bin"
+    echo "Using Python interpreter: $setup_python"
   }
 
   install_dependencies() {
@@ -229,6 +255,23 @@ EOF
       rm -f "$HOME/bin/$legacy" && echo "Removed legacy command from $HOME/bin: $legacy"
     fi
   done
+
+  if [ "$install_deep_history" -eq 1 ]; then
+    local deep_history_installer_args=()
+    if [ -n "${CODEXFARM_DEEP_HISTORY_LOCK_FILE:-}" ]; then
+      deep_history_installer_args+=(--lock-file "$CODEXFARM_DEEP_HISTORY_LOCK_FILE")
+    fi
+    if [ -n "${CODEXFARM_DEEP_HISTORY_ARCHIVE:-}" ]; then
+      deep_history_installer_args+=(--archive "$CODEXFARM_DEEP_HISTORY_ARCHIVE")
+    fi
+    if [ -n "${CODEXFARM_DEEP_HISTORY_DESTINATION:-}" ]; then
+      deep_history_installer_args+=(--destination "$CODEXFARM_DEEP_HISTORY_DESTINATION")
+    fi
+    echo ""
+    echo "Installing pinned tmux-deep-history integration..."
+    "$setup_python" "$script_dir/integrations/install_tmux_deep_history.py" \
+      "${deep_history_installer_args[@]}"
+  fi
 
   echo ""
   echo "Configuring PATH to include $HOME/bin..."

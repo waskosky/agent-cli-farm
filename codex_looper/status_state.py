@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any
 
 from .state import EVENTS_FILENAME, STATE_FILENAME, _atomic_write_json, _jsonable, utc_iso_stamp
 
@@ -109,7 +110,9 @@ def stopped_state_from_stale(
     return out
 
 
-def repair_stale_state_file(state_path: Path, *, stamp: str | None = None) -> tuple[dict[str, Any], bool, str | None]:
+def repair_stale_state_file(
+    state_path: Path, *, stamp: str | None = None
+) -> tuple[dict[str, Any], bool, str | None]:
     state = _load_state(state_path)
     stale_reason = active_state_stale_reason(state)
     if stale_reason is None:

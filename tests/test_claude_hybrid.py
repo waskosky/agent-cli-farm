@@ -239,7 +239,9 @@ class ClaudeHybridTests(unittest.TestCase):
 
         controller.send_prompt("x" * 60_000)
 
-        self.assertEqual([command[1] for command in commands], ["load-buffer", "paste-buffer", "send-keys"])
+        self.assertEqual(
+            [command[1] for command in commands], ["load-buffer", "paste-buffer", "send-keys"]
+        )
         self.assertEqual(len(sleeps), 1)
         self.assertGreaterEqual(sleeps[0], 1.0)
 
@@ -405,7 +407,9 @@ class ClaudeHybridTests(unittest.TestCase):
         self.assertIn("HYBRID_DONE", log_text)
         flattened_args = "\0".join(arg for command, _ in commands for arg in command)
         self.assertNotIn("complex prompt", flattened_args)
-        self.assertTrue(any(command[:3] == ["tmux", "load-buffer", "-b"] for command, _ in commands))
+        self.assertTrue(
+            any(command[:3] == ["tmux", "load-buffer", "-b"] for command, _ in commands)
+        )
 
     def test_controller_switches_to_new_claude_session_file_after_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -825,7 +829,9 @@ class ClaudeHybridTests(unittest.TestCase):
         self.assertIn("CODEX_DONE", log_text)
         flattened_args = "\0".join(arg for command, _ in commands for arg in command)
         self.assertNotIn("complex prompt", flattened_args)
-        self.assertTrue(any(command[:3] == ["tmux", "load-buffer", "-b"] for command, _ in commands))
+        self.assertTrue(
+            any(command[:3] == ["tmux", "load-buffer", "-b"] for command, _ in commands)
+        )
 
     def test_codex_controller_blocks_on_workspace_trust_prompt(self) -> None:
         def command_runner(command: list[str], *, input_text: str | None = None):

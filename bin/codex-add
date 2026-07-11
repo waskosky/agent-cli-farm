@@ -26,6 +26,7 @@ Options:
 One non-path positional value is treated as a farm name. Use --session to avoid
 ambiguity. Arguments after -- are passed to the provider as data. CODEX_ARGS,
 CLAUDE_ARGS, and GEMINI_ARGS remain trusted shell fragments for compatibility.
+CODEXFARM_HISTORY_BACKEND selects auto, legacy, or deep-history logging.
 EOF
 }
 
@@ -128,6 +129,14 @@ false_value() {
   esac
 }
 
+resolve_executable() {
+  local candidate="$1"
+  case "$candidate" in
+    */*) [ -x "$candidate" ] && printf '%s\n' "$candidate" ;;
+    *) command -v "$candidate" 2>/dev/null ;;
+  esac
+}
+
 detach=0
 dir_arg=
 session_arg=
@@ -222,6 +231,10 @@ TIPS_PROMPT="$(get_env TIPS_PROMPT "")"
 STATE_BASENAME="$(get_env STATE_BASENAME "codexfarm")"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$STATE_BASENAME"
 LOGDIR="$STATE_DIR/logs"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+HISTORY_BACKEND="${CODEXFARM_HISTORY_BACKEND:-auto}"
+DEEP_HISTORY_BIN="${CODEXFARM_DEEP_HISTORY_BIN:-$DATA_HOME/codexfarm/plugins/tmux-deep-history/bin/tmux-deep-history}"
+SELECTED_HISTORY_BACKEND="legacy"
 ANNOTATOR_BIN="$(get_env ANNOTATOR_BIN "$(dirname "$0")/codex-annotator")"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 CONFIG_DIR="$CONFIG_HOME/codexfarm"
@@ -241,6 +254,13 @@ if ! valid_window_name "$NAME"; then
   echo "Invalid window name: $NAME" >&2
   exit 2
 fi
+case "$HISTORY_BACKEND" in
+  auto|legacy|deep-history) ;;
+  *)
+    echo "Invalid CODEXFARM_HISTORY_BACKEND: $HISTORY_BACKEND" >&2
+    exit 2
+    ;;
+esac
 if [ "$install_autoservice_only" -eq 0 ] && [ ! -d "$DIR" ]; then
   echo "Project directory not found: $DIR" >&2
   exit 2
@@ -468,6 +488,62 @@ start_status_annotator() {
   fi
 }
 
+configure_history_backend() {
+  local resolved_bin deep_root installed_root install_error
+  SELECTED_HISTORY_BACKEND="legacy"
+  [ "$HISTORY_BACKEND" != "legacy" ] || return 0
+
+  if ! resolved_bin="$(resolve_executable "$DEEP_HISTORY_BIN")"; then
+    if [ "$HISTORY_BACKEND" = "deep-history" ]; then
+      echo "warning: tmux-deep-history is unavailable; using legacy pane logging" >&2
+    fi
+    return 0
+  fi
+
+  DEEP_HISTORY_BIN="$resolved_bin"
+  if ! tmux set-option -gq '@deep-history-auto-start' off; then
+    echo "warning: unable to disable deep-history auto-start; using legacy pane logging" >&2
+    return 0
+  fi
+  deep_root="$(cd "$(dirname "$DEEP_HISTORY_BIN")/.." && pwd)"
+  installed_root="$(tmux show-options -gqv '@deep-history-root' 2>/dev/null || true)"
+  if [ "$installed_root" != "$deep_root" ]; then
+    if ! install_error=$("$DEEP_HISTORY_BIN" install 2>&1); then
+      echo "warning: unable to initialize tmux-deep-history; using legacy pane logging" >&2
+      [ -z "$install_error" ] || printf '%s\n' "$install_error" >&2
+      return 0
+    fi
+  fi
+  SELECTED_HISTORY_BACKEND="deep-history"
+}
+
+attach_legacy_log_pipe() {
+  local pipe_error quoted_logfile
+  printf -v quoted_logfile '%q' "$LOGFILE"
+  if ! pipe_error=$(tmux pipe-pane -o -t "$SESSION:$WIN" "cat >> $quoted_logfile" 2>&1); then
+    if [ -n "$pipe_error" ]; then
+      echo "warning: unable to attach log pipe; pane may have exited already: $pipe_error" >&2
+    else
+      echo "warning: unable to attach log pipe; pane may have exited already" >&2
+    fi
+  fi
+}
+
+attach_history_logging() {
+  local start_error
+  if [ "$SELECTED_HISTORY_BACKEND" = "deep-history" ]; then
+    if start_error=$(
+      "$DEEP_HISTORY_BIN" start -t "$SESSION:$WIN" --mirror-output "$LOGFILE" 2>&1
+    ); then
+      return 0
+    fi
+    echo "warning: tmux-deep-history could not start; falling back to legacy pane logging" >&2
+    [ -z "$start_error" ] || printf '%s\n' "$start_error" >&2
+    SELECTED_HISTORY_BACKEND="legacy"
+  fi
+  attach_legacy_log_pipe
+}
+
 remain_on_exit_enabled() {
   case "${REMAIN_ON_EXIT:-1}" in
     0|false|FALSE|False|off|OFF|Off|no|NO|No)
@@ -479,16 +555,26 @@ remain_on_exit_enabled() {
   esac
 }
 
-# Setup logging directory
+# Set up the private compatibility-log destination before starting the pane.
 mkdir -p "$LOGDIR"
+chmod 700 "$STATE_DIR" "$LOGDIR" 2>/dev/null || true
 
 maybe_prompt_autoservice
 if [ "$install_autoservice_only" -eq 1 ]; then
   exit 0
 fi
 
+STAMP=$(date +%Y%m%d-%H%M%S)
+LOGFILE="$LOGDIR/$(safe_name "$NAME")_${STAMP}.log"
+( umask 077; : > "$LOGFILE" )
+chmod 600 "$LOGFILE" 2>/dev/null || true
+
 # Create session if it doesn't exist
 tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
+
+# Deep history must be configured before the managed window is created so its
+# global hooks cannot race the farm for tmux's single pane output pipe.
+configure_history_backend
 
 # Start annotator after ensuring tmux is available
 register_managed_session
@@ -525,17 +611,9 @@ if [ "${LOCK_TITLES:-1}" -eq 1 ]; then
   tmux rename-window -t "$SESSION:$WIN" "$NAME" >/dev/null 2>&1 || true
 fi
 
-# Setup logging
-STAMP=$(date +%Y%m%d-%H%M%S)
-LOGFILE="$LOGDIR/$(safe_name "$NAME")_${STAMP}.log"
-printf -v quoted_logfile '%q' "$LOGFILE"
-if ! pipe_error=$(tmux pipe-pane -o -t "$SESSION:$WIN" "cat >> $quoted_logfile" 2>&1); then
-  if [ -n "$pipe_error" ]; then
-    echo "warning: unable to attach log pipe; pane may have exited already: $pipe_error" >&2
-  else
-    echo "warning: unable to attach log pipe; pane may have exited already" >&2
-  fi
-fi
+# Attach exactly one pane pipe. Deep history owns it when available and mirrors
+# its raw stream to LOGFILE so codex-watch remains backward compatible.
+attach_history_logging
 
 # Link to board session if it exists
 tmux has-session -t "$BOARD_SESSION" 2>/dev/null && tmux link-window -s "$SESSION:$WIN" -t "$BOARD_SESSION"
@@ -549,4 +627,5 @@ if [ "$detach" -eq 0 ]; then
   fi
 fi
 
-printf 'Started %s in %s:%s\nLogging to %s\n' "$CMD" "$SESSION" "$WIN" "$LOGFILE"
+printf 'Started %s in %s:%s\nHistory backend: %s\nLogging to %s\n' \
+  "$CMD" "$SESSION" "$WIN" "$SELECTED_HISTORY_BACKEND" "$LOGFILE"

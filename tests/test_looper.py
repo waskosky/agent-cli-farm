@@ -1587,7 +1587,9 @@ fresh_session_per_loop = "false"
         captured: list[str] = []
         loaded = self.looper.LoadedConfig(
             looper=self.looper.LooperConfig(),
-            agents={"claude": self.looper.AgentConfig(name="claude", kind="claude", interface="hybrid")},
+            agents={
+                "claude": self.looper.AgentConfig(name="claude", kind="claude", interface="hybrid")
+            },
         )
 
         def fake_load_config(*args: object, **kwargs: object) -> object:
@@ -2079,7 +2081,9 @@ fresh_session_per_loop = "false"
         self.assertEqual(result, 0)
         self.assertEqual(prompts_seen, ["initial prompt"])
         self.assertEqual(state["status"], "stopped")
-        self.assertEqual(state["stop_reason"], "control stop_after_prompt: operator requested restart")
+        self.assertEqual(
+            state["stop_reason"], "control stop_after_prompt: operator requested restart"
+        )
         self.assertEqual(state["control_last_action"], "stop_after_prompt")
         self.assertIn("control_command_received", [event["event"] for event in events])
 

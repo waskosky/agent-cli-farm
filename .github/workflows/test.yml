@@ -21,10 +21,10 @@ jobs:
         python-version: ["3.10", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -61,3 +61,11 @@ jobs:
       - name: Run isolated demo
         if: matrix.python-version == '3.13'
         run: ./examples/demo.sh
+
+      - name: Install pinned tmux-deep-history release
+        if: matrix.python-version == '3.13'
+        run: python integrations/install_tmux_deep_history.py
+
+      - name: Run deep-history integration
+        if: matrix.python-version == '3.13'
+        run: ./tests/integration/deep_history_smoke.sh

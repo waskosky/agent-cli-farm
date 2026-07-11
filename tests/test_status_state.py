@@ -22,17 +22,13 @@ class StatusStateTest(unittest.TestCase):
 
     def test_active_state_stale_reason_marks_dead_supervisor(self) -> None:
         with mock.patch.object(status_state, "process_is_running", return_value=False):
-            reason = status_state.active_state_stale_reason(
-                {"status": "running", "pid": 12345}
-            )
+            reason = status_state.active_state_stale_reason({"status": "running", "pid": 12345})
 
         self.assertEqual(reason, "supervisor process 12345 is no longer running")
 
     def test_active_state_stale_reason_keeps_live_supervisor_active(self) -> None:
         with mock.patch.object(status_state, "process_is_running", return_value=True):
-            reason = status_state.active_state_stale_reason(
-                {"status": "retrying", "pid": 12345}
-            )
+            reason = status_state.active_state_stale_reason({"status": "retrying", "pid": 12345})
 
         self.assertIsNone(reason)
 
@@ -86,7 +82,9 @@ class StatusStateTest(unittest.TestCase):
             run_dir.mkdir(parents=True)
             state_path = run_dir / "state.json"
             state_path.write_text(
-                json.dumps({"status": "running", "pid": 12345, "updated_at": "2026-07-02T00:00:00Z"}),
+                json.dumps(
+                    {"status": "running", "pid": 12345, "updated_at": "2026-07-02T00:00:00Z"}
+                ),
                 encoding="utf-8",
             )
 

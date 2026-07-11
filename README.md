@@ -5,7 +5,7 @@ A tmux session manager for running and restoring multiple Codex CLI instances, w
 ## Features
 
 - **Automated session management**: Long-lived tmux session that persists across reboots
-- **Centralized logging**: Each Codex pane logs to individual files with timestamps
+- **Durable pane history**: Optional tmux-deep-history integration adds rotated raw/normalized transcripts while preserving timestamped farm logs
 - **Unified monitoring**: Watch all Codex instances from a single consolidated view
 - **Fast navigation**: Optional "board" session for quick switching between instances
 - **Snapshot/restore**: Save a manifest of windows and restore them later
@@ -24,6 +24,7 @@ A tmux session manager for running and restoring multiple Codex CLI instances, w
 - Optional `lsof` so save/restore can find exact live provider session files.
 - Git only for looper backup branches and git-progress circuit breakers.
 - Systemd user services only for autosave/autorestore.
+- Optional network access during `setup.sh --with-deep-history` to download the checksum-pinned plugin release.
 
 `setup.sh` reports missing operating-system dependencies; it does not install packages. Source it when you want the current shell's `PATH` refreshed. The script keeps strict shell options inside helper scopes, so sourcing it should not leak options or functions into your shell.
 
@@ -31,10 +32,11 @@ A tmux session manager for running and restoring multiple Codex CLI instances, w
 
 ### 1. One-time Setup
 
-Run the setup script to install dependencies and create helper scripts (source it to auto-reload your shell):
+Run the setup script to create helper scripts, install the pinned deep-history integration, and
+auto-reload your shell:
 
 ```bash
-source ./setup.sh
+source ./setup.sh --with-deep-history
 ```
 
 This will:
@@ -42,8 +44,11 @@ This will:
 - Create helper scripts in `$HOME/bin/`
 - Set up logging directories
 - Add `$HOME/bin` to your PATH automatically (bash/zsh/fish) and the current session
+- Verify and install the pinned `tmux-deep-history` release under `$XDG_DATA_HOME/codexfarm/plugins/` (or `~/.local/share/codexfarm/plugins/`)
 
 If `tmux` is unavailable, core tmux commands will not work until you install it. If `multitail` is unavailable, `codex-watch` falls back to a simpler `tail` view.
+Omit `--with-deep-history` when you want the legacy flat-log backend only. Re-running the setup
+command is safe; the installed version can change only when this repository's reviewed lock changes.
 
 ### 2. Add Codex, Claude, or Gemini Instances
 
@@ -168,7 +173,8 @@ Notes:
 - On small terminals (phones), `codex-watch` auto-switches to a simpler mode.
 - Force simple mode: `codex-watch --simple` or `CODEX_WATCH_MODE=tail codex-watch`.
 - Force full mode: `codex-watch --mode multitail`.
-- Logs contain output emitted after `tmux pipe-pane` is enabled; old scrollback cannot be recovered into log files.
+- With the installed deep-history backend, one `pipe-pane` owner writes durable segmented history and mirrors the live raw stream into the same flat logs used by `codex-watch`.
+- Flat compatibility logs contain output emitted after the pane pipe is enabled. Deep history separately captures scrollback already visible when recording starts.
 - `codex-watch` discovers log files once at startup. Restart it to include newly-created logs.
 - Multi-file tail output keeps source labels so interleaved lines can still be traced to a window log.
 - First run shows an optional tmux tips prompt; choose Yes to see basics. Answer "Don't show again" to persist your preference. Re-enable temporarily with `CODEX_TIPS_PROMPT=1` or permanently by removing `~/.local/state/codexfarm/no_tips`.
@@ -295,6 +301,9 @@ Common:
 - **`CODEX_LOOPER_PYTHON_BIN`** - Python 3.10+ interpreter for `codex-looper` (default searches `python3`, then versioned `python3.14` through `python3.10`)
 - **`CODEX_ANNOTATOR_PYTHON_BIN`** - Python 3.10+ interpreter for `codex-annotator` (default searches `python3`, then versioned `python3.14` through `python3.10`)
 - **`CODEXFARM_PYTHON_BIN`** - Python 3.10+ interpreter to prefer during `./setup.sh`
+- **`CODEXFARM_WITH_DEEP_HISTORY`** - set to `1` as an alternative to `setup.sh --with-deep-history`
+- **`CODEXFARM_HISTORY_BACKEND`** - `auto` (default), `legacy`, or `deep-history`; auto uses the pinned plugin when installed and otherwise preserves legacy logging
+- **`CODEXFARM_DEEP_HISTORY_BIN`** - override the deep-history executable discovered under the XDG data directory
 - **`CODEX_LOOPER_LAYOUT`** - looper tmux layout: `auto`, `single`, or `split`; farm launches default to `split`
 
 Annotator-specific:
@@ -399,6 +408,8 @@ Run the basic validation script (requires tmux):
 
 ```bash
 ./validate.sh
+CODEXFARM_DEEP_HISTORY_BIN=/path/to/tmux-deep-history/bin/tmux-deep-history \
+  ./tests/integration/deep_history_smoke.sh
 ```
 
 For the static checks used in CI without creating live tmux sessions:
@@ -434,6 +445,7 @@ codex-cli-farm/
 ├── examples/
 │   ├── demo.sh        # End-to-end demo of farm
 │   └── mock-codex     # Fake CLI used by the demo
+├── integrations/      # Pinned deep-history lock and atomic installer
 ├── tests/             # Python unit tests for scripts and looper behavior
 ├── validate.sh        # Basic repo validation script
 └── README.md          # This file
@@ -444,7 +456,7 @@ codex-cli-farm/
 - `tmux` cannot mirror the same live pane in two windows (use linked windows or logs)
 - `tmux` survives client disconnects, but not host reboot or tmux-server exit unless autosave/autorestore recreates windows later.
 - Autosave/autorestore is systemd-user-only.
-- `pipe-pane` logs only new output after activation
+- tmux provides one `pipe-pane` consumer per pane; the deep-history backend owns it and mirrors the stream rather than attaching a competing logger.
 - Manifest `cmd/args` are best-effort when saving from existing panes. Exact session IDs are captured from live processes when `lsof` can see the open session file: Codex under `~/.codex/sessions`, Claude under `~/.claude/projects`, and Gemini under a `.gemini/.../chats` directory. Missing IDs fall back to each tool's latest/continue behavior.
 - A single positional argument to `codex-add` is interpreted as a farm name when it does not look like a path. Use `--session NAME` to force farm selection when needed.
 - Gemini looper support is generic command execution, not a verified resumable protocol.

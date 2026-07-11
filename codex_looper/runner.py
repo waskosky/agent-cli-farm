@@ -506,8 +506,7 @@ async def run_loop(
     print(f"logs: {run_dir}")
     print(f"focus: {focus_reporter.snapshot_summary() or 'not reported yet'}")
     print(
-        "control: "
-        f"codex-looper control focus|stop|note --run-dir {shlex.quote(str(run_dir))} ..."
+        f"control: codex-looper control focus|stop|note --run-dir {shlex.quote(str(run_dir))} ..."
     )
     if use_hybrid:
         print(f"panes: supervisor status/control here; {agent.name} runs in the paired pane")

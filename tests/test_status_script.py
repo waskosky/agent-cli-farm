@@ -153,8 +153,12 @@ esac
             )
             self.assertEqual(stale_result.returncode, 0, stale_result.stderr)
             self.assertIn("stale-smoke: [stale] generic/generic", stale_result.stdout)
-            self.assertIn(f"stale: supervisor process {dead_pid} is no longer running", stale_result.stdout)
-            self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["status"], "running")
+            self.assertIn(
+                f"stale: supervisor process {dead_pid} is no longer running", stale_result.stdout
+            )
+            self.assertEqual(
+                json.loads(state_path.read_text(encoding="utf-8"))["status"], "running"
+            )
             self.assertFalse((run_dir / "events.jsonl").exists())
 
             repair_result = subprocess.run(
@@ -172,7 +176,10 @@ esac
             )
             self.assertEqual(repair_result.returncode, 0, repair_result.stderr)
             self.assertIn("stale-smoke: [stopped] generic/generic", repair_result.stdout)
-            self.assertIn(f"repaired: supervisor process {dead_pid} is no longer running", repair_result.stdout)
+            self.assertIn(
+                f"repaired: supervisor process {dead_pid} is no longer running",
+                repair_result.stdout,
+            )
             self.assertIn("stop: external termination", repair_result.stdout)
             repaired = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(repaired["status"], "stopped")

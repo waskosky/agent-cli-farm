@@ -9,9 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from codex_looper import control
-from codex_looper import control_panel
-from codex_looper import tmux
+from codex_looper import control, control_panel, tmux
 
 
 class ControlPanelTests(unittest.TestCase):

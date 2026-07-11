@@ -23,14 +23,12 @@ for import_root in (SCRIPT_DIR_FOR_IMPORTS.parent, SCRIPT_DIR_FOR_IMPORTS):
         sys.path.insert(0, str(import_root))
         break
 
-from codex_looper.pane_status import (
-    ANSI_CODE_PATTERN,
+from codex_looper.pane_status import (  # noqa: E402
     aggregate_window_state,
     classify_claude_output,
     classify_codex_output,
     is_claude_command,
     is_codex_command,
-    strip_ansi,
 )
 
 DEFAULT_SESSION_PATTERN = os.environ.get("CODEX_ANNOTATOR_SESSION_REGEX", r"^codex")
@@ -66,6 +64,7 @@ IGNORE_PREFIX = os.environ.get("CODEX_ANNOTATOR_IGNORE_PREFIX", "!")
 MEMORY_FLAG_PATTERN = r"\*[0-9]+(?:\.[0-9]+)?\+MB\*\*"
 TMUX_STATE_OPTION = "@codex_state"
 TMUX_LAST_READY_OPTION = "@codex_last_ready"
+
 
 def parse_positive_interval(value: str) -> float:
     try:

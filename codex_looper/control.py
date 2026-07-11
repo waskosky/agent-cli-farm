@@ -7,11 +7,11 @@ import secrets
 import signal
 import subprocess
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .hybrid import TmuxCommandResult, default_command_runner, tmux_prompt_paste_commands
 
@@ -164,7 +164,9 @@ def format_operator_note_for_delivery(note: str, *, delivery: str = "btw") -> st
     normalized_delivery = str(delivery or "btw").strip()
     if normalized_delivery not in OPERATOR_NOTE_DELIVERIES:
         valid = ", ".join(sorted(OPERATOR_NOTE_DELIVERIES))
-        raise ControlError(f"invalid operator note delivery {normalized_delivery!r}; expected one of: {valid}")
+        raise ControlError(
+            f"invalid operator note delivery {normalized_delivery!r}; expected one of: {valid}"
+        )
     text = str(note or "").strip()
     if not text:
         raise ControlError("operator note text is required")
@@ -285,7 +287,10 @@ def select_control_run(
     include_stopped: bool = False,
 ) -> dict[str, Any]:
     if run_dir is not None:
-        state = _load_state(run_dir / "state.json") or {"run_dir": str(run_dir), "label": run_dir.name}
+        state = _load_state(run_dir / "state.json") or {
+            "run_dir": str(run_dir),
+            "label": run_dir.name,
+        }
         state["run_dir"] = str(run_dir)
         return state
 
@@ -312,7 +317,9 @@ def select_control_run(
     return max(candidates, key=_state_sort_key)
 
 
-def _tmux_result(command_runner: CommandRunner, command: list[str], input_text: str | None = None) -> TmuxCommandResult:
+def _tmux_result(
+    command_runner: CommandRunner, command: list[str], input_text: str | None = None
+) -> TmuxCommandResult:
     try:
         return command_runner(command, input_text=input_text)
     except TypeError:
@@ -354,7 +361,10 @@ def _pane_command_matches_agent(pane: Mapping[str, Any], state: Mapping[str, Any
         command_name = Path(command.split()[0]).name if command else ""
         if command_name in candidates:
             return True
-        if any(candidate and re.search(rf"(^|[/\s-]){re.escape(candidate)}($|[\s.-])", command) for candidate in candidates):
+        if any(
+            candidate and re.search(rf"(^|[/\s-]){re.escape(candidate)}($|[\s.-])", command)
+            for candidate in candidates
+        ):
             return True
     return False
 
@@ -456,7 +466,9 @@ def resolve_operator_note_target(
             "label": str(state.get("label") or ""),
             "error": "no matching interactive agent pane found",
         }
-    selected = max(candidates, key=lambda pane: _pane_score(pane, state=state, tmux_session=tmux_session))
+    selected = max(
+        candidates, key=lambda pane: _pane_score(pane, state=state, tmux_session=tmux_session)
+    )
     return {
         "ok": True,
         "source": "tmux_panes",

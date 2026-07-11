@@ -457,7 +457,9 @@ def control_main(argv: list[str] | None = None) -> int:
     timing = stop_parser.add_mutually_exclusive_group()
     timing.add_argument("--after-prompt", action="store_true", help="stop after the current prompt")
     timing.add_argument("--after-loop", action="store_true", help="stop after the current loop")
-    timing.add_argument("--now", action="store_true", help="queue interrupt_now and send SIGINT if possible")
+    timing.add_argument(
+        "--now", action="store_true", help="queue interrupt_now and send SIGINT if possible"
+    )
     stop_parser.add_argument(
         "--force",
         action="store_true",

@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.test_deep_history_installer import build_archive, write_lock
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -63,15 +65,46 @@ class SetupScriptTests(unittest.TestCase):
             (self.bin_dir / command).symlink_to(system_path)
         make_fake_python(self.bin_dir / "python3", 3, 12)
 
-    def run_setup(self) -> subprocess.CompletedProcess[str]:
+    def run_setup(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["/bin/bash", str(REPO_ROOT / "setup.sh")],
+            ["/bin/bash", str(REPO_ROOT / "setup.sh"), *arguments],
             cwd=REPO_ROOT,
             env=self.env,
             text=True,
             capture_output=True,
             check=False,
         )
+
+    def test_help_documents_optional_deep_history_install_without_dependencies(self) -> None:
+        result = self.run_setup("--help")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--with-deep-history", result.stdout)
+
+    def test_with_deep_history_installs_pinned_local_release(self) -> None:
+        (self.bin_dir / "python3").unlink()
+        (self.bin_dir / "python3").symlink_to(sys.executable)
+        make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(self.bin_dir / "multitail", "#!/usr/bin/env bash\nexit 0\n")
+        archive = self.tmpdir / "tmux-deep-history.zip"
+        lock = self.tmpdir / "tmux-deep-history.lock"
+        write_lock(lock, build_archive(archive))
+        self.env["CODEXFARM_DEEP_HISTORY_ARCHIVE"] = str(archive)
+        self.env["CODEXFARM_DEEP_HISTORY_LOCK_FILE"] = str(lock)
+
+        result = self.run_setup("--with-deep-history")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = (
+            Path(self.env["HOME"])
+            / ".local"
+            / "share"
+            / "codexfarm"
+            / "plugins"
+            / "tmux-deep-history"
+        )
+        self.assertTrue((installed / "bin" / "tmux-deep-history").is_file())
+        self.assertIn("Installed tmux-deep-history 0.1.0", result.stdout)
 
     def test_skips_package_manager_when_dependencies_already_exist(self) -> None:
         make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")

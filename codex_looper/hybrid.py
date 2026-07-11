@@ -194,9 +194,7 @@ def parse_claude_session_line(line: str) -> ClaudeSessionEvent | None:
             role = raw_role
         content = message.get("content")
     raw_stop_reason = (
-        message.get("stop_reason")
-        if isinstance(message, dict)
-        else data.get("stop_reason")
+        message.get("stop_reason") if isinstance(message, dict) else data.get("stop_reason")
     )
 
     event_type = data.get("type")
@@ -261,13 +259,11 @@ def parse_codex_session_line(line: str) -> CodexSessionEvent | None:
 
     normalized_payload_type = payload_type if isinstance(payload_type, str) else None
     normalized_role = role if isinstance(role, str) else None
-    is_user_event = (
-        normalized_payload_type == "user_message"
-        or (normalized_payload_type == "message" and normalized_role == "user")
+    is_user_event = normalized_payload_type == "user_message" or (
+        normalized_payload_type == "message" and normalized_role == "user"
     )
-    is_assistant_event = (
-        normalized_payload_type == "agent_message"
-        or (normalized_payload_type == "message" and normalized_role == "assistant")
+    is_assistant_event = normalized_payload_type == "agent_message" or (
+        normalized_payload_type == "message" and normalized_role == "assistant"
     )
     return CodexSessionEvent(
         event_type=event_type if isinstance(event_type, str) else "",
@@ -519,9 +515,7 @@ def tmux_split_window_command(
 ) -> list[str]:
     inherited_source = os.environ if inherited_env is None else inherited_env
     pane_env = {
-        key: value
-        for key in HYBRID_INHERITED_ENV_KEYS
-        if (value := inherited_source.get(key))
+        key: value for key in HYBRID_INHERITED_ENV_KEYS if (value := inherited_source.get(key))
     }
     pane_env.update(env)
 
@@ -619,7 +613,9 @@ class ClaudeHybridController:
         if self.pane_id:
             return
         if self.require_tmux and not os.environ.get("TMUX"):
-            raise ConfigError("Claude hybrid interface requires tmux; use --interface json outside tmux")
+            raise ConfigError(
+                "Claude hybrid interface requires tmux; use --interface json outside tmux"
+            )
         result = self.run_tmux(
             tmux_split_window_command(
                 self.command,
@@ -632,7 +628,9 @@ class ClaudeHybridController:
             detail = (result.stderr or result.stdout or "unknown tmux split-window failure").strip()
             raise ConfigError(f"failed to start Claude hybrid pane: {detail}")
         self.pane_id = result.stdout.strip().splitlines()[-1]
-        self.run_tmux(["tmux", "set-window-option", "-q", "-t", self.pane_id, "remain-on-exit", "on"])
+        self.run_tmux(
+            ["tmux", "set-window-option", "-q", "-t", self.pane_id, "remain-on-exit", "on"]
+        )
         self.wait_until_ready(timeout_seconds=min(self.ready_timeout_seconds, timeout_seconds))
 
     def capture_output(self) -> str:
@@ -745,7 +743,9 @@ class ClaudeHybridController:
             input_text = prompt if command[1:2] == ["load-buffer"] else None
             result = self.run_tmux(command, input_text=input_text)
             if result.returncode != 0:
-                detail = (result.stderr or result.stdout or "unknown tmux prompt paste failure").strip()
+                detail = (
+                    result.stderr or result.stdout or "unknown tmux prompt paste failure"
+                ).strip()
                 raise ConfigError(f"failed to send prompt to Claude hybrid pane: {detail}")
             if command[1:2] == ["paste-buffer"]:
                 self.sleep_fn(prompt_submit_delay_seconds(prompt))
@@ -835,7 +835,9 @@ class ClaudeHybridController:
         if stop_reason:
             return ProcessResult(
                 returncode=0,
-                session_id=extract_session_id_from_claude_session(session_path) if session_path else None,
+                session_id=extract_session_id_from_claude_session(session_path)
+                if session_path
+                else None,
                 stop_reason=stop_reason,
                 retry_after_seconds=retry_after_seconds,
                 retry_kind=retry_kind,
@@ -844,7 +846,9 @@ class ClaudeHybridController:
             )
         return ProcessResult(
             returncode=0,
-            session_id=extract_session_id_from_claude_session(session_path) if session_path else None,
+            session_id=extract_session_id_from_claude_session(session_path)
+            if session_path
+            else None,
             stop_reason=f"Claude hybrid timeout after {timeout_seconds:g} seconds",
             timed_out=True,
             completion_detected=completion_detected,
@@ -875,7 +879,9 @@ class CodexHybridController:
         if self.pane_id:
             return
         if self.require_tmux and not os.environ.get("TMUX"):
-            raise ConfigError("Codex hybrid interface requires tmux; use --interface json outside tmux")
+            raise ConfigError(
+                "Codex hybrid interface requires tmux; use --interface json outside tmux"
+            )
         result = self.run_tmux(
             tmux_split_window_command(
                 self.command,
@@ -888,7 +894,9 @@ class CodexHybridController:
             detail = (result.stderr or result.stdout or "unknown tmux split-window failure").strip()
             raise ConfigError(f"failed to start Codex hybrid pane: {detail}")
         self.pane_id = result.stdout.strip().splitlines()[-1]
-        self.run_tmux(["tmux", "set-window-option", "-q", "-t", self.pane_id, "remain-on-exit", "on"])
+        self.run_tmux(
+            ["tmux", "set-window-option", "-q", "-t", self.pane_id, "remain-on-exit", "on"]
+        )
         self.wait_until_ready(timeout_seconds=min(self.ready_timeout_seconds, timeout_seconds))
 
     def capture_output(self) -> str:
@@ -981,7 +989,9 @@ class CodexHybridController:
             input_text = prompt if command[1:2] == ["load-buffer"] else None
             result = self.run_tmux(command, input_text=input_text)
             if result.returncode != 0:
-                detail = (result.stderr or result.stdout or "unknown tmux prompt paste failure").strip()
+                detail = (
+                    result.stderr or result.stdout or "unknown tmux prompt paste failure"
+                ).strip()
                 raise ConfigError(f"failed to send prompt to Codex hybrid pane: {detail}")
             if command[1:2] == ["paste-buffer"]:
                 self.sleep_fn(prompt_submit_delay_seconds(prompt))
@@ -1064,7 +1074,9 @@ class CodexHybridController:
         if stop_reason:
             return ProcessResult(
                 returncode=0,
-                session_id=extract_session_id_from_codex_session(session_path) if session_path else None,
+                session_id=extract_session_id_from_codex_session(session_path)
+                if session_path
+                else None,
                 stop_reason=stop_reason,
                 retry_after_seconds=retry_after_seconds,
                 retry_kind=retry_kind,
@@ -1073,7 +1085,9 @@ class CodexHybridController:
             )
         return ProcessResult(
             returncode=0,
-            session_id=extract_session_id_from_codex_session(session_path) if session_path else None,
+            session_id=extract_session_id_from_codex_session(session_path)
+            if session_path
+            else None,
             stop_reason=f"Codex hybrid timeout after {timeout_seconds:g} seconds",
             timed_out=True,
             completion_detected=completion_detected,
