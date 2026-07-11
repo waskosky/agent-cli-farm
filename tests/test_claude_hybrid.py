@@ -388,6 +388,7 @@ class ClaudeHybridTests(unittest.TestCase):
                 env={},
                 command_runner=command_runner,
                 sleep_fn=lambda seconds: None,
+                require_tmux=False,
             )
             log_path = root / "turn.log"
 
@@ -486,6 +487,7 @@ class ClaudeHybridTests(unittest.TestCase):
                 env={},
                 command_runner=command_runner,
                 sleep_fn=lambda seconds: None,
+                require_tmux=False,
             )
 
             result = controller.run_turn(
@@ -580,6 +582,7 @@ class ClaudeHybridTests(unittest.TestCase):
                 env={},
                 command_runner=command_runner,
                 sleep_fn=lambda seconds: None,
+                require_tmux=False,
             )
 
             result = controller.run_turn(
@@ -636,6 +639,7 @@ class ClaudeHybridTests(unittest.TestCase):
                 env={},
                 command_runner=command_runner,
                 sleep_fn=lambda seconds: None,
+                require_tmux=False,
             )
 
             result = controller.run_turn(
@@ -812,6 +816,7 @@ class ClaudeHybridTests(unittest.TestCase):
                 env={"CODEX_HOME": str(root / ".codex")},
                 command_runner=command_runner,
                 sleep_fn=lambda seconds: None,
+                require_tmux=False,
             )
             result = controller.run_turn(
                 prompt="complex prompt\nCODEX_REQUEST",
@@ -855,6 +860,7 @@ class ClaudeHybridTests(unittest.TestCase):
             env={},
             command_runner=command_runner,
             sleep_fn=lambda seconds: None,
+            require_tmux=False,
         )
 
         with self.assertRaisesRegex(ConfigError, "workspace trust"):
