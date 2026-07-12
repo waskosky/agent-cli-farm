@@ -146,9 +146,12 @@ exit 98
         self.assertEqual(result.returncode, 0, result.stderr)
         home_bin = Path(self.env["HOME"]) / "bin"
         self.assertTrue((home_bin / "claude-add").exists())
+        self.assertTrue((home_bin / "claude-farm-reboot").exists())
         self.assertTrue((home_bin / "claude-looper").exists())
         self.assertTrue((home_bin / "gemini-add").exists())
+        self.assertTrue((home_bin / "gemini-farm-reboot").exists())
         self.assertTrue((home_bin / "gemini-looper").exists())
+        self.assertTrue((home_bin / "codex-farm-reboot").exists())
 
     def test_setup_examples_show_default_farm_looper_usage(self) -> None:
         make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")

@@ -195,6 +195,22 @@ Restore them later (e.g., after reboot or on SSH login):
 codex-restore -a        # recreates and attaches to the session
 ```
 
+Reboot a running farm through the complete save, stop, and restore sequence:
+
+```bash
+codex-farm-reboot              # reboot the default farm and attach
+codex-farm-reboot --detach     # restore without attaching
+codex-farm-reboot work         # reboot the named "work" farm
+claude-farm-reboot --detach    # use Claude defaults for fallback restore commands
+gemini-farm-reboot --detach    # use Gemini defaults for fallback restore commands
+```
+
+The reboot command saves before stopping anything, stops a linked board before the main
+farm, restores the farm, and recreates the board only when it existed beforehand. Run it
+from a separate terminal or a different tmux session; it refuses to kill the session or
+board that is currently hosting the command. Checkpoint active agent work first because
+exact provider-session discovery is best-effort.
+
 Use `-f` to force re-creation of existing-named windows.
 Saved Codex, Claude, and Gemini windows restore with exact session IDs when `codex-save` can read the live session file from the pane's process tree. If the exact session is unavailable, restore falls back by tool: `codex resume --last`, `claude --continue`, or `gemini --resume latest`.
 Only pane 0 is saved. Split layouts and scrollback are not reconstructed. Missing saved directories fall back to `$HOME` with a warning.
@@ -276,11 +292,12 @@ Tuning and controls:
 - **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
 - **`codex-save [manifest]`** - Snapshot current windows to a manifest (TSV)
 - **`codex-restore [-a] [-f] [manifest]`** - Restore windows from a manifest
+- **`codex-farm-reboot [--detach] [session]`** - Safely save, stop, restore, and optionally attach to a farm
 
 ### Claude and Gemini Wrappers
 
 Claude and Gemini equivalents use the same tmux workflow and accept the same flags:
-`claude-add`, `claude-annotator`, `claude-board`, `claude-looper`, `claude-restore`, `claude-resume`, `claude-save`, `claude-status`, `claude-watch`, `gemini-add`, `gemini-annotator`, `gemini-board`, `gemini-looper`, `gemini-restore`, `gemini-resume`, `gemini-save`, `gemini-status`, `gemini-watch`.
+`claude-add`, `claude-annotator`, `claude-board`, `claude-farm-reboot`, `claude-looper`, `claude-restore`, `claude-resume`, `claude-save`, `claude-status`, `claude-watch`, `gemini-add`, `gemini-annotator`, `gemini-board`, `gemini-farm-reboot`, `gemini-looper`, `gemini-restore`, `gemini-resume`, `gemini-save`, `gemini-status`, `gemini-watch`.
 
 ## Environment Variables
 
@@ -330,6 +347,7 @@ CODEX_CMD="cursor" CODEX_ARGS="--wait" codex-add /my/project
 Flags:
 - `codex-add -d`: start without attaching (useful in SSH automation)
 - `codex-restore -a`: attach after restoring; `-f` to replace same-named windows
+- `codex-farm-reboot -d`: save, stop, and restore without attaching
 
 ## Advanced Usage
 
@@ -382,7 +400,7 @@ Boards link existing tmux windows; they do not duplicate provider processes.
   ```
 
 - One-liners:
-  - Save then restore and attach: `codex-save && codex-restore -a`
+  - Safely reboot and attach: `codex-farm-reboot`
   - Start with a different command: `CODEX_CMD="cursor" CODEX_ARGS="--wait" codex-add -d /path`
   - Start in a named farm without env vars: `codex-add work /path`
   - Watch logs with multitail if available: `codex-watch`
@@ -434,6 +452,7 @@ codex-cli-farm/
 │   ├── codex-annotator.py # Track tmux window status and READY notifications
 │   ├── codex-save     # Save manifest of windows
 │   ├── codex-restore  # Restore windows from manifest
+│   ├── codex-farm-reboot # Save, stop, and restore a farm
 │   ├── codex-watch    # Monitor logs
 │   ├── codex-board    # Navigation helper
 │   ├── codex-resume   # Resume into existing session(s)

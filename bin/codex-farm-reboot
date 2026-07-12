@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+tool_name="${CODEX_TOOL_NAME:-codex}"
+case "$tool_name" in
+  codex|claude|gemini) ;;
+  *)
+    echo "Unsupported farm tool: $tool_name" >&2
+    exit 2
+    ;;
+esac
+script_name="${tool_name}-farm-reboot"
+
+usage() {
+  cat <<EOF
+Usage: $script_name [options] [session]
+
+Save, stop, and restore a tmux farm through the $tool_name helpers.
+
+Options:
+  -s, --session SESSION  Reboot this farm (default: provider/CODEX_SESSION or codexfarm)
+  -a, --attach           Attach or switch to the restored farm (default)
+  -d, --detach           Restore without attaching
+      --no-attach        Alias for --detach
+  -h, --help             Show this help
+
+Run this command outside the target farm and its board session. The saved
+manifest is left intact if a later stop or restore step fails.
+EOF
+}
+
+valid_session_name() {
+  local value="$1"
+  [ -n "$value" ] || return 1
+  case "$value" in
+    *:*|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
+  esac
+  return 0
+}
+
+board_session_name() {
+  local session="$1"
+  if [ "$session" = "codexfarm" ]; then
+    printf '%s' "board"
+  else
+    printf '%s-board' "$session"
+  fi
+}
+
+resolve_executable() {
+  local candidate="$1"
+  case "$candidate" in
+    */*) [ -x "$candidate" ] && printf '%s\n' "$candidate" ;;
+    *) command -v "$candidate" 2>/dev/null ;;
+  esac
+}
+
+attach=1
+session_arg=""
+positionals=()
+while (( "$#" )); do
+  case "${1:-}" in
+    -s|--session)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for $1" >&2
+        exit 2
+      fi
+      session_arg="$2"
+      shift
+      ;;
+    -a|--attach)
+      attach=1
+      ;;
+    -d|--detach|--no-attach)
+      attach=0
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      while (( "$#" )); do
+        positionals+=("$1")
+        shift
+      done
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      positionals+=("$1")
+      ;;
+  esac
+  shift
+done
+
+if [ "${#positionals[@]}" -gt 1 ]; then
+  echo "Unexpected argument: ${positionals[1]}" >&2
+  exit 2
+fi
+if [ -n "$session_arg" ] && [ "${#positionals[@]}" -gt 0 ]; then
+  echo "Session specified multiple times" >&2
+  exit 2
+fi
+
+tool_session=""
+case "$tool_name" in
+  codex) tool_session="${CODEX_SESSION:-}" ;;
+  claude) tool_session="${CLAUDE_SESSION:-}" ;;
+  gemini) tool_session="${GEMINI_SESSION:-}" ;;
+esac
+SESSION="${session_arg:-${positionals[0]:-${tool_session:-${CODEX_SESSION:-codexfarm}}}}"
+if ! valid_session_name "$SESSION"; then
+  echo "Invalid session name: $SESSION" >&2
+  exit 2
+fi
+BOARD_SESSION="$(board_session_name "$SESSION")"
+
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "tmux not found" >&2
+  exit 127
+fi
+
+SAVE_BIN="${CODEX_SAVE_BIN:-$SCRIPT_DIR/${tool_name}-save}"
+RESTORE_BIN="${CODEX_RESTORE_BIN:-$SCRIPT_DIR/${tool_name}-restore}"
+BOARD_BIN="${CODEX_BOARD_BIN:-$SCRIPT_DIR/${tool_name}-board}"
+if ! SAVE_BIN="$(resolve_executable "$SAVE_BIN")"; then
+  echo "$tool_name save helper not found" >&2
+  exit 127
+fi
+if ! RESTORE_BIN="$(resolve_executable "$RESTORE_BIN")"; then
+  echo "$tool_name restore helper not found" >&2
+  exit 127
+fi
+if ! BOARD_BIN="$(resolve_executable "$BOARD_BIN")"; then
+  echo "$tool_name board helper not found" >&2
+  exit 127
+fi
+
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "Farm session '$SESSION' is not running" >&2
+  exit 1
+fi
+
+current_session=""
+if [ -n "${TMUX:-}" ]; then
+  current_session="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"
+fi
+case "$current_session" in
+  "$SESSION"|"$BOARD_SESSION")
+    echo "Cannot reboot '$SESSION' from inside '$current_session'." >&2
+    echo "Run $script_name from another terminal or a different tmux session." >&2
+    exit 2
+    ;;
+esac
+
+board_was_running=0
+if tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
+  board_was_running=1
+fi
+
+printf 'Saving farm %s...\n' "$SESSION"
+if ! CODEX_TOOL_NAME="$tool_name" CODEX_SESSION="$SESSION" "$SAVE_BIN"; then
+  echo "Save failed; farm '$SESSION' was not stopped." >&2
+  exit 1
+fi
+
+if [ "$board_was_running" -eq 1 ]; then
+  printf 'Stopping board %s...\n' "$BOARD_SESSION"
+  if ! tmux kill-session -t "$BOARD_SESSION"; then
+    echo "Unable to stop board '$BOARD_SESSION'; farm '$SESSION' was not stopped." >&2
+    exit 1
+  fi
+fi
+
+printf 'Stopping farm %s...\n' "$SESSION"
+if ! tmux kill-session -t "$SESSION"; then
+  echo "Unable to stop farm '$SESSION'; the saved manifest remains available." >&2
+  if [ "$board_was_running" -eq 1 ]; then
+    CODEX_TOOL_NAME="$tool_name" CODEX_SESSION="$SESSION" \
+      "$BOARD_BIN" link "$SESSION" >/dev/null 2>&1 || \
+      echo "warning: board '$BOARD_SESSION' could not be restored" >&2
+  fi
+  exit 1
+fi
+
+printf 'Restoring farm %s...\n' "$SESSION"
+if ! CODEX_TOOL_NAME="$tool_name" CODEX_SESSION="$SESSION" "$RESTORE_BIN"; then
+  printf "Restore failed for '%s'; retry with: CODEX_SESSION=%q %q\n" \
+    "$SESSION" "$SESSION" "$RESTORE_BIN" >&2
+  exit 1
+fi
+
+if [ "$board_was_running" -eq 1 ]; then
+  printf 'Restoring board %s...\n' "$BOARD_SESSION"
+  if ! CODEX_TOOL_NAME="$tool_name" CODEX_SESSION="$SESSION" "$BOARD_BIN" link "$SESSION"; then
+    echo "Farm '$SESSION' was restored, but board '$BOARD_SESSION' could not be relinked." >&2
+    exit 1
+  fi
+fi
+
+printf 'Farm %s reboot complete.\n' "$SESSION"
+if [ "$attach" -eq 0 ]; then
+  exit 0
+fi
+
+if [ -n "$current_session" ]; then
+  exec tmux switch-client -t "$SESSION"
+fi
+exec tmux attach -t "$SESSION"

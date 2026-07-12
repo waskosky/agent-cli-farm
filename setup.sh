@@ -192,7 +192,7 @@ EOF
 
   local scripts_to_copy=()
   local wrapper_tools=(claude gemini)
-  local wrapper_suffixes=(add annotator board restore resume save status watch looper)
+  local wrapper_suffixes=(add annotator board farm-reboot restore resume save status watch looper)
   local skipped=()
   local copied=()
   local missing=()
@@ -306,6 +306,7 @@ EOF
   echo "  codex-add work /path/project # Start a project in the 'work' farm"
   echo "  codex-add -d /path/project   # Start without attaching"
   echo "  codex-save                   # Snapshot current windows to manifest"
+  echo "  codex-farm-reboot            # Save, restart, and restore the default farm"
   echo "  codex-restore -a             # Restore windows and attach"
   echo "  codex-resume                 # Attach/switch to existing session"
   echo "  codex-resume work --board    # Jump to the board for the 'work' farm"

@@ -109,6 +109,7 @@ check_static_behavior() {
     echo "Checking help and argument validation..."
     require_output "codex-add help" "Usage:" "$repo_root/bin/codex-add" --help
     require_output "codex-board help" "Usage:" "$repo_root/bin/codex-board" --help
+    require_output "codex-farm-reboot help" "Usage:" "$repo_root/bin/codex-farm-reboot" --help
     require_output "codex-status help" "Usage:" "$repo_root/bin/codex-status" --help
     require_output "codex-looper help" "Tiny coding-agent looper" "$repo_root/bin/codex-looper" --help
     require_output "codex-watch help" "Usage:" "$repo_root/bin/codex-watch" --help
@@ -185,11 +186,12 @@ EOF
     [ "$mode" = "600" ]
     echo "[OK] manifest header and owner-only mode"
 
-    tmux kill-session -t "$main_session"
-    CODEX_SESSION="$main_session" "$repo_root/bin/codex-restore" "$manifest" >/dev/null
+    CODEX_SESSION="$main_session" "$repo_root/bin/codex-farm-reboot" --detach >/dev/null
     tmux has-session -t "$main_session"
     tmux list-windows -t "$main_session" -F '#{window_name}' | grep -q "validate-test"
-    echo "[OK] restore rebuilds farm window"
+    tmux has-session -t "$board_session"
+    tmux list-windows -t "$board_session" -F '#{window_name}' | grep -q "validate-test"
+    echo "[OK] farm reboot rebuilds windows and relinks board"
 }
 
 check_script_syntax
