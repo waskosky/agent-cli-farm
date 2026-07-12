@@ -75,6 +75,7 @@ from .hybrid import (
     parse_codex_session_line,
     read_new_claude_session_events,
     read_new_codex_session_events,
+    reset_hybrid_controller,
     tmux_prompt_paste_commands,
     tmux_split_window_command,
 )
@@ -273,6 +274,7 @@ __all__ = [
     "read_config_raw",
     "read_new_claude_session_events",
     "read_new_codex_session_events",
+    "reset_hybrid_controller",
     "render_header",
     "render_template",
     "repo_root",

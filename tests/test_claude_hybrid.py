@@ -17,6 +17,7 @@ from codex_looper.hybrid import (
     prompt_submit_delay_seconds,
     read_new_claude_session_events,
     read_new_codex_session_events,
+    reset_hybrid_controller,
     tmux_prompt_paste_commands,
     tmux_split_window_command,
 )
@@ -196,6 +197,64 @@ class ClaudeHybridTests(unittest.TestCase):
         self.assertFalse(assessment.ready_to_send_next)
         self.assertEqual(assessment.confidence, "running")
         self.assertEqual(assessment.session_id, SESSION_ID)
+
+    def test_terminal_assistant_event_overrides_stale_running_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / f"{SESSION_ID}.jsonl"
+            write_jsonl(
+                path,
+                [
+                    {
+                        "type": "user",
+                        "uuid": "user-1",
+                        "sessionId": SESSION_ID,
+                        "message": {"role": "user", "content": "redacted prompt"},
+                    },
+                    {
+                        "type": "assistant",
+                        "uuid": "assistant-1",
+                        "parentUuid": "user-1",
+                        "sessionId": SESSION_ID,
+                        "message": {
+                            "role": "assistant",
+                            "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "finished"}],
+                        },
+                    },
+                ],
+            )
+
+            assessment = assess_claude_hybrid_signals("RUN", session_path=path)
+
+        self.assertTrue(assessment.ready_to_send_next)
+        self.assertEqual(assessment.confidence, "high")
+        self.assertIn("terminal assistant event", assessment.reason)
+
+    def test_reset_hybrid_controller_kills_pane_and_clears_session_tracking(self) -> None:
+        commands: list[list[str]] = []
+
+        def command_runner(command: list[str], *, input_text: str | None = None):
+            commands.append(command)
+            return TmuxCommandResult(returncode=0)
+
+        controller = ClaudeHybridController(
+            command=["claude"],
+            cwd=Path("/tmp"),
+            env={},
+            command_runner=command_runner,
+            require_tmux=False,
+            pane_id="%7",
+            session_path=Path("/tmp/old-session.jsonl"),
+        )
+        prior_started_at = controller.started_at
+
+        previous_pane_id = reset_hybrid_controller(controller)
+
+        self.assertEqual(previous_pane_id, "%7")
+        self.assertEqual(commands, [["tmux", "kill-pane", "-t", "%7"]])
+        self.assertIsNone(controller.pane_id)
+        self.assertIsNone(controller.session_path)
+        self.assertGreaterEqual(controller.started_at, prior_started_at)
 
     def test_tmux_prompt_paste_commands_keep_prompt_out_of_shell_argv(self) -> None:
         prompt = "line 1\nline 2 with 'quotes' and $(rm -rf nope)"

@@ -361,6 +361,7 @@ async def run_loop(
     display_tmux_message_fn: Any | None = None,
     start_tmux_log_pane_fn: Any | None = None,
     update_current_log_pointer_fn: Any | None = None,
+    reset_hybrid_controller_fn: Any | None = None,
     sleep_fn: Any | None = None,
 ) -> int:
     return await _runner.run_loop(
@@ -374,6 +375,7 @@ async def run_loop(
         display_tmux_message_fn=display_tmux_message_fn or display_tmux_message,
         start_tmux_log_pane_fn=start_tmux_log_pane_fn or start_tmux_log_pane,
         update_current_log_pointer_fn=update_current_log_pointer_fn or update_current_log_pointer,
+        reset_hybrid_controller_fn=(reset_hybrid_controller_fn or _runner.reset_hybrid_controller),
         sleep_fn=sleep_fn or asyncio.sleep,
     )
 

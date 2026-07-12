@@ -59,6 +59,10 @@ class AnnotatorStatusTests(unittest.TestCase):
         output = "\u2736 Flibbertigibbeting\u2026"
         self.assertEqual(self.mod.classify_claude_output(output), "RUN")
 
+    def test_claude_idle_prompt_overrides_stale_processing_spinner(self):
+        output = "\u2736 Flibbertigibbeting\u2026\nCompleted the task.\n> "
+        self.assertEqual(self.mod.classify_claude_output(output), "READY")
+
     def test_claude_ready_without_processing_marker(self):
         output = "Output line without prompt"
         self.assertEqual(self.mod.classify_claude_output(output), "READY")

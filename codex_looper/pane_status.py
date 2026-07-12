@@ -100,10 +100,10 @@ def classify_claude_output(output: str | None) -> str:
     tail_output = tail_lines(clean)
     if re.search(CLAUDE_WAITING_PROMPT_PATTERN, tail_output, re.MULTILINE):
         return "READY"
-    if re.search(CLAUDE_PROCESSING_PATTERN, tail_output, re.MULTILINE):
-        return "RUN"
     if re.search(CLAUDE_IDLE_PROMPT_AT_END_PATTERN, tail_output, re.MULTILINE):
         return "READY"
+    if re.search(CLAUDE_PROCESSING_PATTERN, tail_output, re.MULTILINE):
+        return "RUN"
     return "READY"
 
 

@@ -30,6 +30,7 @@ DEFAULT_HYBRID_PASTE_SUBMIT_DELAY_SECONDS = 0.25
 HYBRID_PASTE_SUBMIT_BYTES_PER_SECOND = 50_000
 MAX_HYBRID_PASTE_SUBMIT_DELAY_SECONDS = 2.0
 HYBRID_INHERITED_ENV_KEYS = ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_HOME")
+CLAUDE_NONTERMINAL_STOP_REASONS = frozenset({"tool_use", "pause_turn"})
 
 
 @dataclass(frozen=True)
@@ -320,6 +321,10 @@ def assess_claude_hybrid_signals(
         if event.role == "assistant" or event.event_type == "assistant"
     ]
     last_assistant_stop_reason = assistant_events[-1].stop_reason if assistant_events else None
+    terminal_assistant_event_seen = bool(
+        last_assistant_stop_reason
+        and last_assistant_stop_reason not in CLAUDE_NONTERMINAL_STOP_REASONS
+    )
     assistant_event_seen = any(
         event.role == "assistant" or event.event_type == "assistant" for event in tail.events
     )
@@ -343,6 +348,20 @@ def assess_claude_hybrid_signals(
             reason="pane state is ERR",
         )
     if normalized_state == "RUN":
+        if terminal_assistant_event_seen:
+            return ClaudeHybridAssessment(
+                pane_state=normalized_state,
+                session_id=session_id,
+                next_offset=tail.offset,
+                event_count=len(tail.events),
+                last_event_type=last_event_type,
+                last_role=last_role,
+                assistant_event_seen=assistant_event_seen,
+                user_event_seen=user_event_seen,
+                ready_to_send_next=True,
+                confidence="high",
+                reason="terminal assistant event overrides stale pane activity",
+            )
         return ClaudeHybridAssessment(
             pane_state=normalized_state,
             session_id=session_id,
@@ -1093,3 +1112,27 @@ class CodexHybridController:
             completion_detected=completion_detected,
             output_bytes=output_bytes,
         )
+
+
+HybridController = ClaudeHybridController | CodexHybridController
+
+
+def reset_hybrid_controller(controller: HybridController) -> str | None:
+    """End the current interactive process so the next turn starts a new session."""
+    previous_pane_id = controller.pane_id
+    if previous_pane_id:
+        result = controller.run_tmux(["tmux", "kill-pane", "-t", previous_pane_id])
+        detail = (result.stderr or result.stdout or "").strip()
+        pane_missing = any(
+            marker in detail.lower()
+            for marker in ("can't find pane", "no such pane", "can't find window")
+        )
+        if result.returncode != 0 and not pane_missing:
+            raise ConfigError(
+                f"failed to reset hybrid pane {previous_pane_id}: "
+                f"{detail or f'exit {result.returncode}'}"
+            )
+    controller.pane_id = None
+    controller.session_path = None
+    controller.started_at = time.time()
+    return previous_pane_id

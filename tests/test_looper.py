@@ -1317,6 +1317,124 @@ fresh_session_per_loop = "false"
         self.assertEqual(hybrid_calls[0]["session_name"], "hybrid-smoke-loop-0001")
         self.assertTrue(str(hybrid_calls[0]["log_path"]).endswith("loop-0001__prompt-001.log"))
 
+    def test_run_loop_resets_hybrid_controller_between_fresh_loops(self) -> None:
+        async def exercise() -> tuple[
+            int, list[dict[str, object]], list[object], dict[str, object]
+        ]:
+            hybrid_calls: list[dict[str, object]] = []
+            reset_calls: list[object] = []
+
+            async def fake_hybrid_turn(**kwargs: object) -> object:
+                hybrid_calls.append(kwargs)
+                return self.looper.ProcessResult(
+                    returncode=0,
+                    session_id=f"claude-session-{len(hybrid_calls)}",
+                    output_bytes=100,
+                )
+
+            def fake_reset(controller: object) -> str:
+                reset_calls.append(controller)
+                return "%old"
+
+            async def fake_sleep(seconds: float) -> None:
+                return None
+
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                prompt_file = root / "PROMPT.md"
+                prompt_file.write_text("hello\n", encoding="utf-8")
+                agent = self.looper.AgentConfig(
+                    name="claude",
+                    kind="claude",
+                    interface="hybrid",
+                    cwd=root,
+                )
+                looper = self.looper.LooperConfig(
+                    prompt_file=prompt_file,
+                    log_dir=root / "runs",
+                    fresh_session_per_loop=True,
+                    max_loops=2,
+                    sleep_seconds=0.01,
+                )
+                options = self.looper.RunOptions(
+                    agent_name="claude",
+                    config_path=root / "agent-looper.toml",
+                    label="fresh-hybrid-smoke",
+                )
+
+                result = await self.looper.run_loop(
+                    agent=agent,
+                    looper=looper,
+                    options=options,
+                    run_claude_hybrid_turn_fn=fake_hybrid_turn,
+                    reset_hybrid_controller_fn=fake_reset,
+                    sleep_fn=fake_sleep,
+                )
+                run_dir = next((root / "runs").glob("*fresh-hybrid-smoke*"))
+                state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+                return result, hybrid_calls, reset_calls, state
+
+        result, hybrid_calls, reset_calls, state = asyncio.run(exercise())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(hybrid_calls), 2)
+        self.assertEqual(len(reset_calls), 1)
+        self.assertIs(reset_calls[0], hybrid_calls[0]["controller"])
+        self.assertIs(hybrid_calls[0]["controller"], hybrid_calls[1]["controller"])
+        self.assertEqual(
+            [call["session_name"] for call in hybrid_calls],
+            ["fresh-hybrid-smoke-loop-0001", "fresh-hybrid-smoke-loop-0002"],
+        )
+        self.assertEqual([call["session_id"] for call in hybrid_calls], ["", ""])
+        self.assertEqual(state["previous_hybrid_pane_id"], "%old")
+
+    def test_run_loop_records_hybrid_timeout_as_error(self) -> None:
+        async def exercise() -> tuple[int, dict[str, object]]:
+            async def fake_hybrid_turn(**kwargs: object) -> object:
+                return self.looper.ProcessResult(
+                    returncode=0,
+                    stop_reason="Claude hybrid timeout after 5 seconds",
+                    timed_out=True,
+                )
+
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                prompt_file = root / "PROMPT.md"
+                prompt_file.write_text("hello\n", encoding="utf-8")
+                agent = self.looper.AgentConfig(
+                    name="claude",
+                    kind="claude",
+                    interface="hybrid",
+                    cwd=root,
+                )
+                looper = self.looper.LooperConfig(
+                    prompt_file=prompt_file,
+                    log_dir=root / "runs",
+                    max_loops=1,
+                )
+                options = self.looper.RunOptions(
+                    agent_name="claude",
+                    config_path=root / "agent-looper.toml",
+                    label="hybrid-timeout-smoke",
+                )
+
+                result = await self.looper.run_loop(
+                    agent=agent,
+                    looper=looper,
+                    options=options,
+                    run_claude_hybrid_turn_fn=fake_hybrid_turn,
+                )
+                run_dir = next((root / "runs").glob("*hybrid-timeout-smoke*"))
+                state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+                return result, state
+
+        result, state = asyncio.run(exercise())
+
+        self.assertEqual(result, 124)
+        self.assertEqual(state["status"], "error")
+        self.assertEqual(state["exit_code"], 124)
+        self.assertTrue(state["timed_out"])
+
     def test_run_loop_uses_codex_hybrid_controller_for_hybrid_interface(self) -> None:
         async def exercise() -> tuple[int, list[dict[str, object]], int]:
             hybrid_calls: list[dict[str, object]] = []

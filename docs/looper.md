@@ -57,7 +57,10 @@ Identify one safe cleanup. Do not modify files.
 If the cleanup is obvious, implement it and run a fast check.
 ```
 
-Prompts in one sequence share the same agent session. After a full sequence completes, the default behavior is to start a fresh session for the next loop.
+Prompts in one sequence share the same agent session. After a full sequence
+completes, the default behavior is to start a fresh session for the next loop.
+For hybrid Codex and Claude agents, this means terminating the prior TTY pane
+and starting a new agent process while preserving the supervisor pane.
 
 By default, the supervisor reloads `prompt_file` before each loop. Editing `PROMPT.md` or `prompts.md` while a looper is running affects the next loop without restarting the supervisor. Set `[looper].reload_prompt_each_loop = false` only when a run must keep the exact startup prompt text.
 
@@ -80,7 +83,7 @@ codex-looper --dry-run --once --label preview
 
 Use `--once` or `--max-loops N` for bounded runs. Without either, the looper repeats until a stop condition occurs. The `run` subcommand is optional: in an initialized directory, `codex-looper` and `codex-looper run` are equivalent. Non-dry-run commands launch through the default farm unless `--local` is set.
 
-`--timeout` is a per-prompt wall-clock limit for the local agent process. The default is 7200 seconds. Short values such as `90` seconds can stop a long Claude/Codex tool call even when the provider is still working; raise it on the command line or in `[looper].timeout_seconds` for heavier prompts.
+`--timeout` is a per-prompt wall-clock limit for the local agent process. The default is 7200 seconds. Short values such as `90` seconds can stop a long Claude/Codex tool call even when the provider is still working; raise it on the command line or in `[looper].timeout_seconds` for heavier prompts. A timeout records the run as `error` and exits with status 124.
 
 ## CLI Options
 
@@ -165,8 +168,8 @@ Agent defaults:
 
 | Agent | Command behavior |
 | --- | --- |
-| `codex` | Default hybrid: start a visible `codex --no-alt-screen` TTY pane once, paste each prompt, and detect turn completion from pane readiness plus Codex session JSONL advancement. With `interface = "json"`: first prompt uses `codex exec --json <prompt>`; later prompts resume by Codex thread ID when available, otherwise `resume --last`. |
-| `claude` | Default hybrid: start a visible `claude` TTY pane once, paste each prompt, and detect turn completion from pane readiness plus Claude session JSONL advancement. With `interface = "json"`: first prompt uses `claude -p --output-format stream-json --verbose --name <session> <prompt>`; later prompts use `--resume <session>`. |
+| `codex` | Default hybrid: start a visible `codex --no-alt-screen` TTY pane, paste prompts, and detect turn completion from pane readiness plus Codex session JSONL advancement. With `fresh_session_per_loop = true`, replace the pane/process between loops; otherwise reuse it. With `interface = "json"`: first prompt uses `codex exec --json <prompt>`; later prompts resume by Codex thread ID when available, otherwise `resume --last`. |
+| `claude` | Default hybrid: start a visible `claude` TTY pane, paste prompts, and detect turn completion from Claude session JSONL terminal events plus pane readiness. With `fresh_session_per_loop = true`, replace the pane/process between loops; otherwise reuse it. With `interface = "json"`: first prompt uses `claude -p --output-format stream-json --verbose --name <session> <prompt>`; later prompts use `--resume <session>`. |
 | `gemini` | Generic default: `gemini -p <prompt>` for every prompt. Override this if your Gemini CLI supports a better noninteractive/resume mode. |
 
 Built-in Codex and Claude agents accept `model` and `effort` config sugar. These fields are appended after `extra_args` as `--model <value>` and `--effort <value>`:

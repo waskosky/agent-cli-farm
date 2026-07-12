@@ -29,6 +29,7 @@ from .hybrid import (
     CodexHybridController,
     build_claude_hybrid_command,
     build_codex_hybrid_command,
+    reset_hybrid_controller,
 )
 from .models import (
     TMUX_STATE_OPTION,
@@ -76,6 +77,7 @@ SetTmuxWindowOptionFn = Callable[[str, str], None]
 DisplayTmuxMessageFn = Callable[[str], None]
 StartTmuxLogPaneFn = Callable[[Path, RunOptions], bool]
 UpdateCurrentLogPointerFn = Callable[..., None]
+ResetHybridControllerFn = Callable[[ClaudeHybridController | CodexHybridController], str | None]
 SleepFn = Callable[[float], Awaitable[None]]
 FOCUS_REFRESH_SECONDS = 2.0
 
@@ -338,6 +340,7 @@ async def run_loop(
     display_tmux_message_fn: DisplayTmuxMessageFn = display_tmux_message,
     start_tmux_log_pane_fn: StartTmuxLogPaneFn = start_tmux_log_pane,
     update_current_log_pointer_fn: UpdateCurrentLogPointerFn = update_current_log_pointer,
+    reset_hybrid_controller_fn: ResetHybridControllerFn = reset_hybrid_controller,
     sleep_fn: SleepFn = asyncio.sleep,
 ) -> int:
     looper = resolve_prompt_defaults(looper, cwd=Path.cwd())
@@ -550,6 +553,25 @@ async def run_loop(
                 set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, reason[:250])
                 return stop_run(reason=reason, exit_code=2, status="error")
 
+        if use_hybrid and looper.fresh_session_per_loop and loop_number > 1:
+            hybrid_controller = (
+                claude_hybrid_controller
+                if claude_hybrid_controller is not None
+                else codex_hybrid_controller
+            )
+            if hybrid_controller is None:
+                raise ConfigError("hybrid controller was not initialized")
+            previous_pane_id = reset_hybrid_controller_fn(hybrid_controller)
+            print(f"reset hybrid pane for fresh loop session: {previous_pane_id or 'not started'}")
+            state.record(
+                "hybrid_session_reset",
+                status="running",
+                previous_hybrid_pane_id=previous_pane_id,
+                hybrid_pane_id=None,
+                hybrid_pane_pid=None,
+                current_session_id="",
+            )
+
         loop_started_at = time.monotonic()
         loop_output_bytes = 0
         loop_log_paths: list[Path] = []
@@ -731,6 +753,7 @@ async def run_loop(
                     returncode=result.returncode,
                     last_output_bytes=result.output_bytes,
                     completion_detected=result.completion_detected,
+                    timed_out=result.timed_out,
                     stop_reason=result.stop_reason,
                     retry_kind=result.retry_kind,
                     retry_after_seconds=result.retry_after_seconds,
@@ -788,9 +811,14 @@ async def run_loop(
 
                     print(f"\nSTOP: {result.stop_reason}")
                     print(f"last log: {log_path}")
-                    set_tmux_window_option_fn(TMUX_STATE_OPTION, "READY")
+                    terminal_state = "ERR" if result.timed_out else "READY"
+                    set_tmux_window_option_fn(TMUX_STATE_OPTION, terminal_state)
                     set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, result.stop_reason[:250])
-                    return stop_run(reason=result.stop_reason, exit_code=0)
+                    return stop_run(
+                        reason=result.stop_reason,
+                        exit_code=124 if result.timed_out else 0,
+                        status="error" if result.timed_out else "stopped",
+                    )
 
                 if result.returncode not in (0, None) and not looper.ignore_nonzero:
                     reason = f"command exited with code {result.returncode}"
