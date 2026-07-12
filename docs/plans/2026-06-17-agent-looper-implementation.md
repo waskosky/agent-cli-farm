@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add a tmux-friendly prompt sequence looper for Codex and Claude that fits the existing Codex CLI Farm install and wrapper model.
+**Goal:** Add a tmux-friendly prompt sequence looper for Codex and Claude that fits the existing Agent CLI Farm install and wrapper model.
 
 **Architecture:** Implement the looper as a standard-library Python script in `bin/codex-looper.py`, with a small shell launcher in `bin/codex-looper`. Keep the existing `codex-add` tmux workflow as the owner of farm sessions, board linking, pipe-pane logs, and annotator startup; the looper itself runs prompt sequences and can optionally launch into a farm window via `codex-add`.
 

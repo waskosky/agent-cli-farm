@@ -77,7 +77,7 @@ def release_url(lock: dict[str, str]) -> str:
 
 
 def download(url: str, destination: Path) -> None:
-    request = urllib.request.Request(url, headers={"User-Agent": "codex-cli-farm-setup"})
+    request = urllib.request.Request(url, headers={"User-Agent": "agent-cli-farm-setup"})
     try:
         with (
             urllib.request.urlopen(request, timeout=60) as response,

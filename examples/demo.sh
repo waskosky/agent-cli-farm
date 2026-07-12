@@ -55,7 +55,7 @@ mkdir -p "$project1" "$project2"
 printf '# Demo Project 1\n' > "$project1/README.md"
 printf '# Demo Project 2\n' > "$project2/README.md"
 
-echo "=== Codex CLI Farm Demo ==="
+echo "=== Agent CLI Farm Demo ==="
 echo "session: $session"
 echo ""
 

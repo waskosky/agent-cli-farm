@@ -95,4 +95,4 @@ for _ in $(seq 1 100); do
 done
 grep -q '"status": "closed"' "$RUN_DIR/metadata.json"
 
-printf '%s\n' 'codex-cli-farm deep-history integration test passed'
+printf '%s\n' 'agent-cli-farm deep-history integration test passed'

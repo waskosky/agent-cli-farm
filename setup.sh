@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Codex CLI Farm Setup Script
+# Agent CLI Farm Setup Script
 # Installs helper scripts for managing coding-agent instances in tmux.
 
 codexfarm_setup_main() (
@@ -17,7 +17,7 @@ codexfarm_setup_main() (
         cat <<'EOF'
 Usage: setup.sh [--with-deep-history]
 
-Install Codex CLI Farm helpers. The optional flag also installs the
+Install Agent CLI Farm helpers. The optional flag also installs the
 checksum-pinned tmux-deep-history release used by the automatic history backend.
 EOF
         exit 0
@@ -33,7 +33,7 @@ EOF
     1|true|TRUE|True|yes|YES|Yes|on|ON|On) install_deep_history=1 ;;
   esac
 
-  echo "Setting up Codex CLI Farm..."
+  echo "Setting up Agent CLI Farm..."
 
   have_command() {
     command -v "$1" >/dev/null 2>&1
@@ -146,7 +146,7 @@ EOF
         && ! grep -qsE 'set -gx PATH .*\$HOME/bin' "$rc"; then
         {
           echo ""
-          echo "# Added by Codex CLI Farm setup"
+          echo "# Added by Agent CLI Farm setup"
           echo "set -gx PATH \$HOME/bin \$PATH"
         } >> "$rc"
         echo "  Updated: $rc (fish PATH)"
@@ -160,7 +160,7 @@ EOF
         && ! grep -qs 'export PATH="\$HOME/bin:\$PATH"' "$rc"; then
         {
           echo ""
-          echo "# Added by Codex CLI Farm setup"
+          echo "# Added by Agent CLI Farm setup"
           echo "export PATH=\"\$HOME/bin:\$PATH\""
         } >> "$rc"
         echo "  Updated: $rc"
@@ -170,7 +170,7 @@ EOF
     fi
 
     {
-      echo "# Created by Codex CLI Farm setup"
+      echo "# Created by Agent CLI Farm setup"
       if [ "$shell_name" != "zsh" ]; then
         echo "# This file is sourced by your shell on startup"
       fi

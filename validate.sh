@@ -42,7 +42,7 @@ main_session="codexfarm-validate-$$"
 board_session="${main_session}-board"
 state_basename="codexfarm-validate-$$"
 
-echo "=== Codex CLI Farm Validation ==="
+echo "=== Agent CLI Farm Validation ==="
 echo "repo: $repo_root"
 echo "temp: $tmp_root"
 echo ""

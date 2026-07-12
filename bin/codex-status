@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# List and manage Codex CLI farm sessions
+# List and manage Agent CLI Farm sessions
 # Usage: codex-status [--session SESSION] [sessions|windows|activity|logs|loopers]
 
 SCRIPT_PATH="${BASH_SOURCE[0]}"

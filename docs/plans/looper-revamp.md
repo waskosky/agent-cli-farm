@@ -5,7 +5,7 @@ Status: **implemented and merged to `main`** (2026-06-22). Execution plan:
 
 Follow-up status:
 
-- `codex-cli-farm` implementation shipped on `main` through `50f7a6d`.
+- `agent-cli-farm` implementation shipped on `main` through `50f7a6d`.
 - `waskosky/rai` migration shipped on `main` through `7f363e59`: `rai-loop`
   now defaults to a repo-local `codex-looper` preset, with the previous Ralph
   implementation preserved as an explicit fallback.
@@ -30,7 +30,7 @@ keep depending on vendored ralph for the "smart" half. Grow `codex-looper` so it
 **default** is the simple, good model — *one prompt file, looped endlessly,
 fresh context each loop* — and make everything else opt-in. This supersedes the
 "keep two engines / don't merge" recommendation in the rai repo's
-`scripts/rai-loop/codex-cli-farm-comparison.md`.
+`scripts/rai-loop/agent-cli-farm-comparison.md`.
 
 Ownership is the crux: ralph is third-party (extending it = forking); this repo is
 ours, in Python we already maintain, and it already has the farm + multi-tool +
@@ -157,5 +157,5 @@ optional structured `---STATUS---` block ralph uses is just one such convention.
 ## Cross-references
 
 - rai-loop today: `waskosky/rai` → `scripts/rai-loop/README.md` (+
-  `codex-cli-farm-comparison.md`).
+  `agent-cli-farm-comparison.md`).
 - This repo's looper doc: [`../looper.md`](../looper.md).

@@ -1,12 +1,16 @@
-# Codex CLI Farm
+# Agent CLI Farm
 
-A tmux session manager for running and restoring multiple Codex CLI instances, with Claude and Gemini wrappers, logging, and monitoring built in.
+A tmux session manager for running and restoring Codex, Claude, Gemini, and custom coding-agent CLIs, with logging and monitoring built in.
+
+This project was formerly named **Codex CLI Farm**. Existing `codex-*` commands,
+`CODEX_*` environment variables, and `codexfarm` state paths remain supported for
+backward compatibility.
 
 ## Features
 
 - **Automated session management**: Long-lived tmux session that persists across reboots
 - **Durable pane history**: Optional tmux-deep-history integration adds rotated raw/normalized transcripts while preserving timestamped farm logs
-- **Unified monitoring**: Watch all Codex instances from a single consolidated view
+- **Unified monitoring**: Watch all agent instances from a single consolidated view
 - **Fast navigation**: Optional "board" session for quick switching between instances
 - **Snapshot/restore**: Save a manifest of windows and restore them later
 - **Status updates**: Tracks RUN/READY/ERR in tmux metadata and notifies when a window becomes READY
@@ -439,7 +443,7 @@ VALIDATE_SKIP_TMUX=1 ./validate.sh
 ## File Structure
 
 ```
-codex-cli-farm/
+agent-cli-farm/
 ├── .editorconfig      # Shared editor whitespace defaults
 ├── .github/workflows/ # CI for lint, shell checks, tests, validate, demo
 ├── pyproject.toml     # Ruff and test tooling configuration

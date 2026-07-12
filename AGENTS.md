@@ -1,4 +1,4 @@
-# Codex CLI Farm - Agent Status Maintenance
+# Agent CLI Farm - Agent Status Maintenance
 
 ## Source of truth
 

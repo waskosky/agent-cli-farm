@@ -217,7 +217,7 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
         "--farm-session",
         nargs="?",
         const="",
-        help="launch this looper in a Codex CLI Farm tmux session; omit NAME to use the default",
+        help="launch this looper in an Agent CLI Farm tmux session; omit NAME to use the default",
     )
     parser.add_argument(
         "--farm-attach", action="store_true", help="attach after launching with --farm-session"

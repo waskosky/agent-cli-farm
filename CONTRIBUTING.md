@@ -1,6 +1,6 @@
 # Contributing
 
-Codex CLI Farm is a small tmux-focused utility repo. Keep changes boring,
+Agent CLI Farm is a small tmux-focused utility repo. Keep changes boring,
 portable, and directly covered by tests.
 
 ## Runtime Baseline
