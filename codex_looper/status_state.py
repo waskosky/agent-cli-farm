@@ -98,9 +98,9 @@ def process_identity(pid: int) -> str | None:
             start_time = _parse_linux_proc_start_time(stat_text)
             if start_time:
                 try:
-                    boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
-                        encoding="utf-8"
-                    ).strip()
+                    boot_id = (
+                        Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+                    )
                 except (FileNotFoundError, PermissionError, OSError):
                     boot_id = "unknown-boot"
                 return f"linux-proc:{boot_id}:{start_time}"

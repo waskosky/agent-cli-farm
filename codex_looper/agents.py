@@ -27,9 +27,7 @@ def agent_extra_args(agent: AgentConfig) -> list[str]:
         args.extend(["--model", agent.model])
     if agent.effort:
         if agent.kind == "codex":
-            args.extend(
-                ["--config", f"model_reasoning_effort={json.dumps(agent.effort)}"]
-            )
+            args.extend(["--config", f"model_reasoning_effort={json.dumps(agent.effort)}"])
         elif agent.kind == "claude":
             args.extend(["--effort", agent.effort])
     return args

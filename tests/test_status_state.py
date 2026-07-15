@@ -24,9 +24,7 @@ class StatusStateTest(unittest.TestCase):
         fields = ["S", *[str(value) for value in range(1, 19)], "424242"]
 
         self.assertEqual(
-            status_state._parse_linux_proc_start_time(
-                "123 (cmd with ) paren) " + " ".join(fields)
-            ),
+            status_state._parse_linux_proc_start_time("123 (cmd with ) paren) " + " ".join(fields)),
             "424242",
         )
 
