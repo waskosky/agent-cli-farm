@@ -220,6 +220,16 @@ Saved Codex, Claude, and Gemini windows restore with exact session IDs when `cod
 Only pane 0 is saved. Split layouts and scrollback are not reconstructed. Missing saved directories fall back to `$HOME` with a warning.
 Manifests are written owner-only and via atomic replacement, but they are still trusted executable input because restore launches the recorded commands.
 
+Check installed-helper freshness and manifest resume coverage without printing session IDs:
+
+```bash
+codex-doctor
+CODEX_SESSION=work codex-doctor
+codex-doctor --source /path/to/agent-cli-farm /path/to/manifest.tsv
+```
+
+The doctor exits nonzero for stale or missing installed helpers, malformed or unsafe manifests, blank commands, and provider fallbacks that could resume the wrong conversation.
+
 If tmux sessions are already running (no manifest needed):
 ```bash
 codex-resume            # joins the main Codex session if present
@@ -294,6 +304,7 @@ Tuning and controls:
 - **`codex-status [--session SESSION] [sessions|windows|activity|logs|loopers]`** - Show status information; `loopers --repair-stale-loopers` marks active state files stopped when their supervisor process is gone
 - **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
 - **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
+- **`codex-doctor [--session NAME] [--source DIR] [manifest]`** - Check installed-helper freshness and manifest resume coverage without displaying session IDs
 - **`codex-save [manifest]`** - Snapshot current windows to a manifest (TSV)
 - **`codex-restore [-a] [-f] [manifest]`** - Restore windows from a manifest
 - **`codex-farm-reboot [--detach] [session]`** - Safely save, stop, restore, and optionally attach to a farm
@@ -430,6 +441,7 @@ Run the basic validation script (requires tmux):
 
 ```bash
 ./validate.sh
+./tests/integration/session_resume_smoke.sh
 CODEXFARM_DEEP_HISTORY_BIN=/path/to/tmux-deep-history/bin/tmux-deep-history \
   ./tests/integration/deep_history_smoke.sh
 ```
@@ -454,6 +466,7 @@ agent-cli-farm/
 │   ├── codex-add      # Add new Codex instances
 │   ├── codex-annotator  # Bash wrapper for annotator
 │   ├── codex-annotator.py # Track tmux window status and READY notifications
+│   ├── codex-doctor   # Diagnose installed-helper and manifest drift
 │   ├── codex-save     # Save manifest of windows
 │   ├── codex-restore  # Restore windows from manifest
 │   ├── codex-farm-reboot # Save, stop, and restore a farm

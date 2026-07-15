@@ -62,6 +62,10 @@ jobs:
         if: matrix.python-version == '3.13'
         run: ./examples/demo.sh
 
+      - name: Run exact session resume integration
+        if: matrix.python-version == '3.13'
+        run: ./tests/integration/session_resume_smoke.sh
+
       - name: Install pinned tmux-deep-history release
         if: matrix.python-version == '3.13'
         run: python integrations/install_tmux_deep_history.py

@@ -183,7 +183,7 @@ EOF
   require_python
   install_dependencies
 
-  local script_source script_dir shell_name updated_any primary_rc
+  local script_source script_dir shell_name updated_any primary_rc install_source_marker
   script_source="${BASH_SOURCE[0]}"
   script_dir="$(cd "$(dirname "$script_source")" && pwd)"
 
@@ -233,6 +233,12 @@ EOF
     cp -f "$script_dir"/codex_looper/*.py "$HOME/bin/codex_looper/"
     copied+=("codex_looper/")
   fi
+
+  # Remember the checkout used for this install so codex-doctor can detect
+  # copied helpers that have fallen behind their source files.
+  install_source_marker="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/install-source"
+  (umask 077; printf '%s\n' "$script_dir" > "$install_source_marker")
+  chmod 600 "$install_source_marker" 2>/dev/null || true
 
   if [ "${#missing[@]}" -gt 0 ]; then
     for wrapper in "${missing[@]}"; do
@@ -307,6 +313,7 @@ EOF
   echo "  codex-add -d /path/project   # Start without attaching"
   echo "  codex-save                   # Snapshot current windows to manifest"
   echo "  codex-farm-reboot            # Save, restart, and restore the default farm"
+  echo "  codex-doctor                 # Check installed helpers and saved resume coverage"
   echo "  codex-restore -a             # Restore windows and attach"
   echo "  codex-resume                 # Attach/switch to existing session"
   echo "  codex-resume work --board    # Jump to the board for the 'work' farm"

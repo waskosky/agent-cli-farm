@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# Diagnose installed-helper drift and restore-manifest session coverage.
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--session NAME] [--source DIR] [manifest-path]
+
+Check the installed Agent CLI Farm helpers and a saved restore manifest.
+Exact provider session IDs are counted but never printed.
+EOF
+}
+
+DEFAULT_SESSION="codexfarm"
+SESSION="${CODEX_SESSION:-$DEFAULT_SESSION}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/codexfarm"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm"
+INSTALL_DIR="${CODEXFARM_INSTALL_DIR:-$HOME/bin}"
+SOURCE_DIR="${CODEXFARM_SOURCE_DIR:-}"
+SOURCE_MARKER="$STATE_DIR/install-source"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+issues=0
+
+ok() {
+  printf '[OK] %s\n' "$1"
+}
+
+info() {
+  printf '[INFO] %s\n' "$1"
+}
+
+problem() {
+  printf '[FAIL] %s\n' "$1"
+  issues=$((issues + 1))
+}
+
+warning() {
+  printf '[WARN] %s\n' "$1"
+  issues=$((issues + 1))
+}
+
+safe_name() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+default_manifest_path_for_session() {
+  local session="$1"
+  if [ "$session" = "$DEFAULT_SESSION" ]; then
+    printf '%s/manifest.tsv' "$CONFIG_DIR"
+  else
+    printf '%s/manifests/%s.tsv' "$CONFIG_DIR" "$(safe_name "$session")"
+  fi
+}
+
+resolve_source_dir() {
+  local candidate="${SOURCE_DIR:-}"
+
+  if [ -z "$candidate" ] && [ -f "$SCRIPT_DIR/../setup.sh" ]; then
+    candidate="$SCRIPT_DIR/.."
+  fi
+  if [ -z "$candidate" ] && [ -r "$SOURCE_MARKER" ]; then
+    IFS= read -r candidate < "$SOURCE_MARKER" || candidate=""
+  fi
+  [ -n "$candidate" ] || return 1
+  [ -d "$candidate/bin" ] && [ -f "$candidate/setup.sh" ] || return 1
+  (cd "$candidate" && pwd)
+}
+
+check_installed_helpers() {
+  local source_dir="$1"
+  local source_file relative installed_file
+  local checked=0
+  local mismatched=0
+  local mismatch_names=""
+
+  if ! command -v cmp >/dev/null 2>&1; then
+    problem "cmp is required to compare installed helpers"
+    return
+  fi
+
+  for source_file in \
+    "$source_dir"/bin/codex-* \
+    "$source_dir"/bin/claude-* \
+    "$source_dir"/bin/gemini-* \
+    "$source_dir"/bin/add_high_memory_warning.sh \
+    "$source_dir"/codex_looper/*.py
+  do
+    [ -f "$source_file" ] || continue
+    case "$source_file" in
+      "$source_dir"/codex_looper/*)
+        relative="codex_looper/${source_file##*/}"
+        ;;
+      *)
+        relative="${source_file##*/}"
+        ;;
+    esac
+    installed_file="$INSTALL_DIR/$relative"
+    checked=$((checked + 1))
+    if [ ! -f "$installed_file" ] || ! cmp -s "$source_file" "$installed_file"; then
+      mismatched=$((mismatched + 1))
+      mismatch_names="${mismatch_names}${mismatch_names:+, }$relative"
+    fi
+  done
+
+  if [ "$checked" -eq 0 ]; then
+    problem "no installable helpers found under $source_dir"
+  elif [ "$mismatched" -gt 0 ]; then
+    problem "$mismatched of $checked installed helpers are missing or stale: $mismatch_names"
+  else
+    ok "all $checked installed helpers match $source_dir"
+  fi
+}
+
+check_manifest() {
+  local manifest="$1"
+  local header=""
+  local stats rows malformed blank exact fallback provider_invalid other
+  local mode=""
+
+  if [ ! -f "$manifest" ]; then
+    problem "manifest not found: $manifest"
+    return
+  fi
+
+  IFS= read -r header < "$manifest" || header=""
+  if [ "$header" != $'name\tdir\tcmd\targs' ]; then
+    problem "malformed manifest header: $manifest"
+    return
+  fi
+
+  if ! command -v awk >/dev/null 2>&1; then
+    problem "awk is required to inspect the manifest"
+    return
+  fi
+
+  if ! stats="$(awk -F '\t' '
+    NR == 1 { next }
+    {
+      rows++
+      if (NF != 4) malformed++
+      cmd = $3
+      args = $4
+      if (cmd == "") {
+        blank++
+      } else if (cmd == "codex") {
+        if (args == "resume --last") fallback++
+        else {
+          session_id = substr(args, 8)
+          if (index(args, "resume ") == 1 && session_id !~ /^--/ && session_id !~ /[[:space:]]/) exact++
+          else provider_invalid++
+        }
+      } else if (cmd == "claude") {
+        if (args == "--continue") fallback++
+        else {
+          session_id = substr(args, 10)
+          if (index(args, "--resume ") == 1 && session_id !~ /^-/ && session_id !~ /[[:space:]]/) exact++
+          else provider_invalid++
+        }
+      } else if (cmd == "gemini") {
+        if (args == "--resume latest") fallback++
+        else {
+          session_id = substr(args, 10)
+          if (index(args, "--resume ") == 1 && session_id !~ /^-/ && session_id !~ /[[:space:]]/) exact++
+          else provider_invalid++
+        }
+      } else {
+        other++
+      }
+    }
+    END {
+      printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\n", \
+        rows + 0, malformed + 0, blank + 0, exact + 0, fallback + 0, \
+        provider_invalid + 0, other + 0
+    }
+  ' "$manifest")"; then
+    problem "unable to inspect manifest rows: $manifest"
+    return
+  fi
+  IFS=$'\t' read -r rows malformed blank exact fallback provider_invalid other <<EOF
+$stats
+EOF
+
+  info "manifest rows: $rows; exact provider sessions: $exact; fallback: $fallback; blank commands: $blank; other commands: $other"
+  if [ "$rows" -eq 0 ]; then
+    warning "manifest contains no saved windows"
+  fi
+  if [ "$malformed" -gt 0 ]; then
+    problem "manifest contains $malformed malformed row(s)"
+  fi
+  if [ "$blank" -gt 0 ]; then
+    problem "manifest contains $blank blank command(s); save again before restoring"
+  fi
+  if [ "$fallback" -gt 0 ]; then
+    warning "manifest contains $fallback provider fallback(s); exact sessions may not restore"
+  fi
+  if [ "$provider_invalid" -gt 0 ]; then
+    problem "manifest contains $provider_invalid provider command(s) with invalid resume arguments"
+  fi
+  if [ "$rows" -gt 0 ] && [ "$malformed" -eq 0 ] && [ "$blank" -eq 0 ] \
+    && [ "$fallback" -eq 0 ] && [ "$provider_invalid" -eq 0 ]; then
+    ok "manifest resume data is healthy"
+  fi
+
+  mode="$(stat -c '%a' "$manifest" 2>/dev/null || stat -f '%Lp' "$manifest" 2>/dev/null || true)"
+  if [ -z "$mode" ]; then
+    warning "unable to determine manifest permissions"
+  elif [ "$mode" != "600" ]; then
+    warning "manifest permissions are $mode; expected 600"
+  else
+    ok "manifest permissions are owner-only (600)"
+  fi
+}
+
+check_runtime() {
+  local window_count
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    problem "tmux is not installed"
+    return
+  fi
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    if window_count="$(tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null \
+      | awk '$0 != "home" { count++ } END { print count + 0 }')"; then
+      ok "tmux session $SESSION is running with $window_count managed window(s)"
+    else
+      warning "unable to list windows in tmux session $SESSION"
+    fi
+  else
+    info "tmux session $SESSION is not currently running"
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user is-enabled --quiet codex-autosave.timer >/dev/null 2>&1; then
+    ok "codex autosave timer is enabled"
+  elif [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/codex-autosave.timer" ]; then
+    info "codex autosave timer is installed but not enabled"
+  else
+    info "codex autosave timer is not installed (optional)"
+  fi
+}
+
+session_seen=0
+source_seen=0
+manifest_path=""
+while (( "$#" )); do
+  case "${1:-}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --session)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --session" >&2
+        exit 2
+      fi
+      if [ "$session_seen" -eq 1 ]; then
+        echo "Session specified multiple times" >&2
+        exit 2
+      fi
+      SESSION="$2"
+      session_seen=1
+      shift 2
+      ;;
+    --source)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --source" >&2
+        exit 2
+      fi
+      if [ "$source_seen" -eq 1 ]; then
+        echo "Source specified multiple times" >&2
+        exit 2
+      fi
+      SOURCE_DIR="$2"
+      source_seen=1
+      shift 2
+      ;;
+    --)
+      shift
+      while (( "$#" )); do
+        if [ -n "$manifest_path" ]; then
+          echo "Unexpected argument: $1" >&2
+          exit 2
+        fi
+        manifest_path="$1"
+        shift
+      done
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      if [ -n "$manifest_path" ]; then
+        echo "Unexpected argument: $1" >&2
+        exit 2
+      fi
+      manifest_path="$1"
+      shift
+      ;;
+  esac
+done
+
+case "$SESSION" in
+  ""|*[!A-Za-z0-9_.-]*)
+    echo "Invalid session name: $SESSION" >&2
+    exit 2
+    ;;
+esac
+
+manifest_path="${manifest_path:-$(default_manifest_path_for_session "$SESSION")}"
+
+echo "Agent CLI Farm doctor"
+if resolved_source="$(resolve_source_dir)"; then
+  check_installed_helpers "$resolved_source"
+else
+  warning "source checkout unavailable; run setup.sh again or pass --source DIR"
+fi
+check_manifest "$manifest_path"
+check_runtime
+
+if [ "$issues" -eq 0 ]; then
+  echo "Doctor result: healthy"
+  exit 0
+fi
+
+echo "Doctor result: $issues issue(s) found"
+exit 1
