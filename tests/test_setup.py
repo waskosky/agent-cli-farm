@@ -134,8 +134,12 @@ exit 98
         self.assertFalse(self.pkg_log.exists(), "package manager should not be called")
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-add").exists())
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-looper").exists())
+        self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-doctor").exists())
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-memoryflag").exists())
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "add_high_memory_warning.sh").exists())
+        source_marker = Path(self.env["XDG_STATE_HOME"]) / "codexfarm" / "install-source"
+        self.assertEqual(source_marker.read_text(encoding="utf-8").strip(), str(REPO_ROOT))
+        self.assertEqual(stat.S_IMODE(source_marker.stat().st_mode), 0o600)
 
     def test_installs_claude_and_gemini_wrappers(self) -> None:
         make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")

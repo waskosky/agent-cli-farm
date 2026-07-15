@@ -27,6 +27,7 @@ CODEX_ANNOTATOR_AUTOSTART=0 python3 -m unittest discover -s tests -v
 VALIDATE_SKIP_TMUX=1 ./validate.sh
 ./validate.sh
 ./examples/demo.sh
+./tests/integration/session_resume_smoke.sh
 CODEXFARM_DEEP_HISTORY_BIN=/path/to/tmux-deep-history/bin/tmux-deep-history \
   ./tests/integration/deep_history_smoke.sh
 ```

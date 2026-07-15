@@ -110,6 +110,7 @@ check_static_behavior() {
     require_output "codex-add help" "Usage:" "$repo_root/bin/codex-add" --help
     require_output "codex-board help" "Usage:" "$repo_root/bin/codex-board" --help
     require_output "codex-farm-reboot help" "Usage:" "$repo_root/bin/codex-farm-reboot" --help
+    require_output "codex-doctor help" "Usage:" "$repo_root/bin/codex-doctor" --help
     require_output "codex-status help" "Usage:" "$repo_root/bin/codex-status" --help
     require_output "codex-looper help" "Tiny coding-agent looper" "$repo_root/bin/codex-looper" --help
     require_output "codex-watch help" "Usage:" "$repo_root/bin/codex-watch" --help
