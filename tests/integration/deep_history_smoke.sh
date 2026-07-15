@@ -88,7 +88,12 @@ assert metadata["mirror_bytes"] > 0, metadata
 assert pathlib.Path(sys.argv[2]).stat().st_mode & 0o777 == 0o600
 PY
 
-"$DEEP_HISTORY_BIN" stop -t "$PANE_ID"
+# Exercise the teardown path Agent CLI Farm actually uses. The pinned plugin's
+# standalone `stop` command and logger both update metadata, so a fast logger
+# exit can be overwritten from `closed` back to `closing`. Farm reboot instead
+# destroys managed windows/sessions, which closes tmux's pipe without that
+# competing writer.
+tmux kill-window -t "$SESSION:1"
 CLOSED=0
 for _ in $(seq 1 200); do
     if grep -q '"status": "closed"' "$RUN_DIR/metadata.json" 2>/dev/null; then
