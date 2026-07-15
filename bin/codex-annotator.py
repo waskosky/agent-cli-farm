@@ -119,6 +119,7 @@ class PaneInfo:
     current_command: str
     dead: bool
     start_command: str = ""
+    process_pid: str = ""
 
 
 def log(msg: str, *, verbose: bool) -> None:
@@ -213,7 +214,10 @@ def window_pane_states(wid: str, *, verbose: bool) -> list[PaneInfo] | None:
             "-t",
             wid,
             "-F",
-            "#{pane_id}\t#{pane_current_command}\t#{pane_dead}\t#{pane_start_command}",
+            (
+                "#{pane_id}\t#{pane_current_command}\t#{pane_dead}\t"
+                "#{pane_start_command}\t#{pane_pid}"
+            ),
         ],
         verbose=verbose,
     )
@@ -223,18 +227,23 @@ def window_pane_states(wid: str, *, verbose: bool) -> list[PaneInfo] | None:
     for line in output.splitlines():
         if line.count("\t") < 2:
             continue
-        parts = line.split("\t", 3)
+        parts = line.split("\t", 4)
         if len(parts) == 3:
             pid, cmd, dead = parts
             start_command = cmd
-        else:
+            process_pid = ""
+        elif len(parts) == 4:
             pid, cmd, dead, start_command = parts
+            process_pid = ""
+        else:
+            pid, cmd, dead, start_command, process_pid = parts
         panes.append(
             PaneInfo(
                 pid=pid.strip(),
                 current_command=cmd.strip(),
                 dead=dead.strip() in {"1", "true", "True"},
                 start_command=start_command.strip(),
+                process_pid=process_pid.strip(),
             )
         )
     return panes
@@ -257,6 +266,50 @@ def is_looper_command(cmd: str) -> bool:
     )
 
 
+def process_tree_command_context(root_pid: str) -> str:
+    """Return command names/argv for a pane process and its descendants."""
+    if not root_pid.isdigit():
+        return ""
+
+    try:
+        process = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,comm=,args="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=1,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return ""
+    if process.returncode != 0:
+        return ""
+
+    process_commands: dict[str, str] = {}
+    child_pids: dict[str, list[str]] = {}
+    for line in process.stdout.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 3:
+            continue
+        pid, parent_pid, command = parts[:3]
+        args = parts[3] if len(parts) == 4 else ""
+        process_commands[pid] = f"{command} {args}".strip()
+        child_pids.setdefault(parent_pid, []).append(pid)
+
+    pending = [root_pid]
+    seen = {root_pid}
+    commands: list[str] = []
+    while pending and len(seen) <= 256:
+        pid = pending.pop(0)
+        command = process_commands.get(pid)
+        if command:
+            commands.append(command)
+        for child in child_pids.get(pid, []):
+            if child not in seen:
+                seen.add(child)
+                pending.append(child)
+    return " ".join(commands)
+
+
 def classify_pane(
     pane: PaneInfo,
     running_regex: re.Pattern,
@@ -268,10 +321,26 @@ def classify_pane(
     command_context = f"{pane.current_command} {pane.start_command}".strip()
     if is_looper_command(command_context):
         return "RUN"
-    if is_codex_command(command_context):
+    provider_context = command_context
+    current_command_parts = pane.current_command.split()
+    current_command_name = (
+        Path(current_command_parts[0]).name.lower() if current_command_parts else ""
+    )
+    if (
+        pane.process_pid
+        and current_command_name in {"node", "nodejs"}
+        and not is_codex_command(provider_context)
+        and not is_claude_command(provider_context)
+    ):
+        descendant_context = process_tree_command_context(pane.process_pid)
+        if descendant_context:
+            provider_context = f"{provider_context} {descendant_context}".strip()
+    if is_looper_command(provider_context):
+        return "RUN"
+    if is_codex_command(provider_context):
         output = capture_pane_output(pane.pid, verbose=verbose)
         return classify_codex_output(output)
-    if is_claude_command(command_context):
+    if is_claude_command(provider_context):
         output = capture_pane_output(pane.pid, verbose=verbose)
         return classify_claude_output(output)
     if running_regex.search(command_context):

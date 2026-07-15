@@ -89,7 +89,7 @@ session_file_matches_tool() {
   local tool="$1"
   local path="$2"
   case "$tool:$path" in
-    codex:*/.codex/sessions/*.jsonl)
+    codex:*/.codex/sessions/*.jsonl|codex:*/sessions/*/rollout-*.jsonl)
       return 0
       ;;
     claude:*/.claude/projects/*.jsonl)
@@ -134,14 +134,54 @@ descendant_pids() {
   done
 }
 
-session_id_from_lsof() {
+session_id_from_procfs() {
+  local tool="$1"
+  local pid="$2"
+  local descriptor path session_id
+  local proc_root="${CODEX_PROC_ROOT:-/proc}"
+  [ -d "$proc_root/$pid/fd" ] || return 1
+
+  for descriptor in "$proc_root/$pid/fd"/*; do
+    [ -e "$descriptor" ] || [ -L "$descriptor" ] || continue
+    path="$(readlink "$descriptor" 2>/dev/null || true)"
+    path="${path% (deleted)}"
+    if session_file_matches_tool "$tool" "$path"; then
+      session_id="$(session_id_from_path "$path" || true)"
+      if [ -n "$session_id" ]; then
+        printf '%s' "$session_id"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+session_id_from_process_files() {
   local tool="$1"
   local pane_pid="$2"
+  local provider_pid="${3:-}"
   local pid line path session_id
+  local pids=()
   [ -n "$pane_pid" ] || return 1
-  command -v lsof >/dev/null 2>&1 || return 1
 
-  while IFS= read -r pid; do
+  if [ -n "$provider_pid" ]; then
+    pids+=("$provider_pid")
+  else
+    while IFS= read -r pid; do
+      [ -n "$pid" ] && pids+=("$pid")
+    done < <(descendant_pids "$pane_pid")
+  fi
+
+  for pid in "${pids[@]}"; do
+    session_id="$(session_id_from_procfs "$tool" "$pid" || true)"
+    if [ -n "$session_id" ]; then
+      printf '%s' "$session_id"
+      return 0
+    fi
+  done
+
+  command -v lsof >/dev/null 2>&1 || return 1
+  for pid in "${pids[@]}"; do
     [ -z "$pid" ] && continue
     while IFS= read -r line; do
       case "$line" in
@@ -157,7 +197,7 @@ session_id_from_lsof() {
           ;;
       esac
     done < <(lsof -Fn -p "$pid" 2>/dev/null || true)
-  done < <(descendant_pids "$pane_pid")
+  done
 
   return 1
 }
@@ -176,11 +216,87 @@ tool_from_command() {
   return 1
 }
 
+tool_from_process_argv() {
+  local token base
+  local tokens=()
+  read -r -a tokens <<< "$1"
+  for token in "${tokens[@]}"; do
+    token="${token#\"}"
+    token="${token%\"}"
+    token="${token#\'}"
+    token="${token%\'}"
+    base="${token##*/}"
+    case "$base" in
+      codex|claude|gemini)
+        printf '%s' "$base"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+tool_from_process_tree() {
+  local pane_pid="$1"
+  local pid value tool
+  [ -n "$pane_pid" ] || return 1
+  command -v ps >/dev/null 2>&1 || return 1
+
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    value="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+    tool="$(tool_from_command "$value" || true)"
+    if [ -n "$tool" ]; then
+      printf '%s' "$tool"
+      return 0
+    fi
+
+    value="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    tool="$(tool_from_process_argv "$value" || true)"
+    if [ -n "$tool" ]; then
+      printf '%s' "$tool"
+      return 0
+    fi
+  done < <(descendant_pids "$pane_pid")
+
+  return 1
+}
+
+provider_pid_from_process_tree() {
+  local tool="$1"
+  local pane_pid="$2"
+  local pid value detected fallback=""
+  [ -n "$pane_pid" ] || return 1
+  command -v ps >/dev/null 2>&1 || return 1
+
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    value="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+    detected="$(tool_from_command "$value" || true)"
+    if [ "$detected" = "$tool" ]; then
+      printf '%s' "$pid"
+      return 0
+    fi
+
+    if [ -z "$fallback" ]; then
+      value="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+      detected="$(tool_from_process_argv "$value" || true)"
+      if [ "$detected" = "$tool" ]; then
+        fallback="$pid"
+      fi
+    fi
+  done < <(descendant_pids "$pane_pid")
+
+  [ -n "$fallback" ] || return 1
+  printf '%s' "$fallback"
+}
+
 resume_args_for_pane() {
   local tool="$1"
   local pane_pid="$2"
+  local provider_pid="${3:-}"
   local session_id
-  session_id="$(session_id_from_lsof "$tool" "$pane_pid" || true)"
+  session_id="$(session_id_from_process_files "$tool" "$pane_pid" "$provider_pid" || true)"
   case "$tool" in
     codex)
       if [ -n "$session_id" ]; then
@@ -323,23 +439,34 @@ while IFS=$'\n' read -r idx; do
   [ "$name" = "home" ] && continue
   # Prefer the first pane's path
   dir=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_current_path}')
-  # Best-effort: starting command (may be sh/bash)
+  # Best-effort: starting command (often sh/bash for a long-lived pane)
   cmd=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_start_command}')
+  current_cmd=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_current_command}')
   pane_pid=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_pid}')
   args=
   tool="$(tool_from_command "$cmd" || true)"
+  if [ -z "$tool" ]; then
+    tool="$(tool_from_command "$current_cmd" || true)"
+  fi
+  if [ -z "$tool" ]; then
+    tool="$(tool_from_process_tree "$pane_pid" || true)"
+  fi
+  provider_pid=""
+  if [ -n "$tool" ]; then
+    provider_pid="$(provider_pid_from_process_tree "$tool" "$pane_pid" || true)"
+  fi
   case "$tool" in
     codex)
       cmd="codex"
-      args="$(resume_args_for_pane "$tool" "$pane_pid")"
+      args="$(resume_args_for_pane "$tool" "$pane_pid" "$provider_pid")"
       ;;
     claude)
       cmd="claude"
-      args="$(resume_args_for_pane "$tool" "$pane_pid")"
+      args="$(resume_args_for_pane "$tool" "$pane_pid" "$provider_pid")"
       ;;
     gemini)
       cmd="gemini"
-      args="$(resume_args_for_pane "$tool" "$pane_pid")"
+      args="$(resume_args_for_pane "$tool" "$pane_pid" "$provider_pid")"
       ;;
     *)
       cmd=$(trim_command_field "$cmd")

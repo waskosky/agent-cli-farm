@@ -127,6 +127,35 @@ class ControlStopTargetTests(unittest.TestCase):
         self.assertEqual([result.stage for result in results], ["interrupt", "terminate"])
 
 
+class ControlRunSelectionTests(unittest.TestCase):
+    def test_stopped_runs_require_include_stopped(self) -> None:
+        tempdir = tempfile.TemporaryDirectory(prefix="control-selection-test-")
+        self.addCleanup(tempdir.cleanup)
+        state_root = Path(tempdir.name)
+        run_dir = state_root / "stopped-run"
+        run_dir.mkdir()
+        (run_dir / "state.json").write_text(
+            json.dumps(
+                {
+                    "status": "stopped",
+                    "label": "stopped",
+                    "run_dir": str(run_dir),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(control.ControlError, "no matching looper run"):
+            control.select_control_run(state_root=state_root, label="stopped")
+
+        selected = control.select_control_run(
+            state_root=state_root,
+            label="stopped",
+            include_stopped=True,
+        )
+        self.assertEqual(selected["run_dir"], str(run_dir))
+
+
 class ControlFocusTests(unittest.TestCase):
     def test_append_focus_update_compacts_summary_and_reads_latest(self) -> None:
         tempdir = tempfile.TemporaryDirectory(prefix="control-focus-test-")
@@ -192,6 +221,36 @@ class ControlCliTests(unittest.TestCase):
         self.assertEqual(record["action"], "interrupt_now")
         force_stop.assert_called_once()
         repair.assert_called_once_with(run_dir / "state.json")
+
+    def test_force_stop_repairs_stale_state_before_signaling(self) -> None:
+        tempdir = tempfile.TemporaryDirectory(prefix="control-cli-stale-test-")
+        self.addCleanup(tempdir.cleanup)
+        run_dir = Path(tempdir.name) / "run"
+        run_dir.mkdir()
+        state = {"status": "running", "pid": 100, "run_dir": str(run_dir)}
+        (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        output = io.StringIO()
+
+        with (
+            mock.patch.object(cli, "force_stop_from_state", return_value=[]) as force_stop,
+            mock.patch.object(
+                cli,
+                "repair_stale_state_file",
+                return_value=(
+                    {**state, "status": "stopped"},
+                    True,
+                    "supervisor process 100 is no longer running",
+                ),
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            status = cli.control_main(
+                ["stop", "--run-dir", str(run_dir), "--force", "--grace-seconds", "0"]
+            )
+
+        self.assertEqual(status, 0)
+        force_stop.assert_not_called()
+        self.assertIn("repaired stale looper state", output.getvalue())
 
     def test_force_stop_rejects_safe_boundary_flags(self) -> None:
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):

@@ -98,6 +98,62 @@ class AnnotatorStatusTests(unittest.TestCase):
             "READY",
         )
 
+    def test_shell_launched_codex_uses_descendant_prompt_classification(self):
+        pane = self.mod.PaneInfo(
+            pid="%1",
+            current_command="node",
+            start_command="",
+            process_pid="100",
+            dead=False,
+        )
+        self.mod.process_tree_command_context = (
+            lambda process_pid: "codex /usr/local/bin/codex --no-alt-screen"
+        )
+        self.mod.capture_pane_output = lambda pane_id, *, verbose: "work complete\n\u276f\n"
+
+        self.assertEqual(
+            self.mod.classify_pane(pane, self.mod.re.compile(r"node"), verbose=False),
+            "READY",
+        )
+
+    def test_process_tree_context_stays_within_requested_pane_tree(self):
+        class ProcessResult:
+            returncode = 0
+            stdout = (
+                "100 1 bash bash\n"
+                "101 100 node node /usr/local/bin/codex\n"
+                "999 1 node node /usr/local/bin/claude\n"
+            )
+
+        original_run = self.mod.subprocess.run
+        self.mod.subprocess.run = lambda *args, **kwargs: ProcessResult()
+        try:
+            context = self.mod.process_tree_command_context("100")
+        finally:
+            self.mod.subprocess.run = original_run
+
+        self.assertIn("/usr/local/bin/codex", context)
+        self.assertNotIn("/usr/local/bin/claude", context)
+
+    def test_idle_shell_does_not_scan_process_tree_each_poll(self):
+        pane = self.mod.PaneInfo(
+            pid="%1",
+            current_command="bash",
+            start_command="",
+            process_pid="100",
+            dead=False,
+        )
+
+        def unexpected_scan(process_pid):
+            raise AssertionError(f"unexpected process scan for {process_pid}")
+
+        self.mod.process_tree_command_context = unexpected_scan
+
+        self.assertEqual(
+            self.mod.classify_pane(pane, self.mod.re.compile(r"node"), verbose=False),
+            "READY",
+        )
+
     def test_node_launched_claude_uses_prompt_classification(self):
         pane = self.mod.PaneInfo(
             pid="%1",

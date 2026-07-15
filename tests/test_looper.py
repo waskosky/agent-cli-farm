@@ -239,8 +239,8 @@ class LooperCoreTests(unittest.TestCase):
                 "workspace-write",
                 "--model",
                 "gpt-5.4",
-                "--effort",
-                "high",
+                "--config",
+                'model_reasoning_effort="high"',
                 "do it",
             ],
         )
@@ -734,6 +734,37 @@ fresh_session_per_loop = "false"
         self.assertTrue(result.timed_out)
         self.assertEqual(result.stop_reason, "local timeout after 0.01 seconds")
         self.assertTrue(transport.closed)
+
+    def test_timeout_cleans_up_descendant_that_inherits_output_pipes(self) -> None:
+        async def exercise() -> tuple[object, float]:
+            child_script = "import time; time.sleep(5)"
+            parent_script = (
+                "import subprocess, sys; "
+                "subprocess.Popen([sys.executable, '-c', " + repr(child_script) + "])"
+            )
+            with tempfile.TemporaryDirectory() as td:
+                started_at = asyncio.get_running_loop().time()
+                result = await asyncio.wait_for(
+                    self.looper.run_command(
+                        command=[sys.executable, "-c", parent_script],
+                        cwd=Path(td),
+                        env={},
+                        timeout_seconds=0.05,
+                        log_path=Path(td) / "run.log",
+                        agent_kind="generic",
+                        patterns=[],
+                        scan_stdout=False,
+                        kill_on_stop_pattern=True,
+                        stream_output=False,
+                    ),
+                    timeout=2,
+                )
+                return result, asyncio.get_running_loop().time() - started_at
+
+        result, elapsed = asyncio.run(exercise())
+
+        self.assertLess(elapsed, 2)
+        self.assertIsNotNone(result.returncode)
 
     def test_run_command_drains_jsonl_line_larger_than_asyncio_default_limit(self) -> None:
         async def exercise() -> tuple[object, str, int]:

@@ -574,19 +574,23 @@ def control_main(argv: list[str] | None = None) -> int:
         return 0
 
     print(f"queued {record['action']} for {target} at {run_dir}")
+    if args.force or args.now:
+        state_path = run_dir / "state.json"
+        try:
+            state, repaired, stale_reason = repair_stale_state_file(state_path)
+        except Exception as exc:
+            print(f"stale-state repair failed: {exc}", file=sys.stderr)
+            return 2
+        else:
+            if repaired and stale_reason:
+                print(f"repaired stale looper state: {stale_reason}")
+                return 0
+
     if args.force:
         results = force_stop_from_state(state, grace_seconds=args.grace_seconds)
         detail = format_stop_signal_results(results)
         if detail:
             print(detail)
-        state_path = run_dir / "state.json"
-        try:
-            _, repaired, stale_reason = repair_stale_state_file(state_path)
-        except Exception as exc:
-            print(f"stale-state repair failed: {exc}", file=sys.stderr)
-        else:
-            if repaired and stale_reason:
-                print(f"repaired stale looper state: {stale_reason}")
     elif args.now:
         detail = interrupt_from_state(state)
         if detail:

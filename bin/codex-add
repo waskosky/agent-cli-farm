@@ -565,8 +565,10 @@ if [ "$install_autoservice_only" -eq 1 ]; then
 fi
 
 STAMP=$(date +%Y%m%d-%H%M%S)
-LOGFILE="$LOGDIR/$(safe_name "$NAME")_${STAMP}.log"
-( umask 077; : > "$LOGFILE" )
+log_seed=$(mktemp "$LOGDIR/.codexfarm-log.XXXXXX")
+log_token="${log_seed##*.codexfarm-log.}"
+LOGFILE="$LOGDIR/$(safe_name "$NAME")_${STAMP}_${log_token}.log"
+mv "$log_seed" "$LOGFILE"
 chmod 600 "$LOGFILE" 2>/dev/null || true
 
 # Create session if it doesn't exist

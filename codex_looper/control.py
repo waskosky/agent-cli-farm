@@ -304,13 +304,11 @@ def select_control_run(
             or Path(str(state.get("run_dir") or "")).name == label
         ]
     if not include_stopped:
-        active = [
+        candidates = [
             state
             for state in candidates
             if str(state.get("status") or "") in {"running", "retrying"}
         ]
-        if active:
-            candidates = active
     if not candidates:
         target = label or str(state_root)
         raise ControlError(f"no matching looper run found for {target}")

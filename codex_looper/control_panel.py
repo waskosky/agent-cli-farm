@@ -162,7 +162,13 @@ def run_control_pane_action(
             action="interrupt_now",
             reason="control pane: interrupt now",
         )
-        detail = interrupt_from_state(_state_for_signals(run_dir))
+        try:
+            state, repaired, stale_reason = repair_stale_state_file(run_dir / STATE_FILENAME)
+        except Exception as exc:
+            return ControlPaneActionResult(f"stale-state repair failed: {exc}")
+        if repaired and stale_reason:
+            return ControlPaneActionResult(f"repaired stale looper state: {stale_reason}")
+        detail = interrupt_from_state(state)
         return ControlPaneActionResult(detail or "queued interrupt_now")
     if key == "f":
         append_control_command(
@@ -170,18 +176,17 @@ def run_control_pane_action(
             action="interrupt_now",
             reason="control pane: force stop",
         )
+        try:
+            state, repaired, stale_reason = repair_stale_state_file(run_dir / STATE_FILENAME)
+        except Exception as exc:
+            return ControlPaneActionResult(f"stale-state repair failed: {exc}")
+        if repaired and stale_reason:
+            return ControlPaneActionResult(f"repaired stale looper state: {stale_reason}")
         results = force_stop_from_state(
-            _state_for_signals(run_dir),
+            state,
             grace_seconds=force_grace_seconds,
         )
         detail = format_stop_signal_results(results) or "queued force stop"
-        try:
-            _, repaired, stale_reason = repair_stale_state_file(run_dir / STATE_FILENAME)
-        except Exception as exc:
-            detail = f"{detail}\nstale-state repair failed: {exc}"
-        else:
-            if repaired and stale_reason:
-                detail = f"{detail}\nrepaired stale looper state: {stale_reason}"
         return ControlPaneActionResult(detail)
     if key == "r":
         try:

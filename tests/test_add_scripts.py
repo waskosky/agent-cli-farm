@@ -138,6 +138,28 @@ esac
         ]
         self.assertEqual(title_lock_commands, [], f"Unexpected title locks: {commands}")
 
+    def test_codex_add_uses_unique_logs_for_same_name_and_second(self):
+        target_dir = self.tmpdir / "same-name"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        make_executable(
+            self.tmpdir / "date",
+            "#!/usr/bin/env bash\nprintf '20260715-120000\\n'\n",
+        )
+        env = self.env.copy()
+        env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
+
+        for _ in range(2):
+            subprocess.run(
+                [REPO_ROOT / "bin" / "codex-add", "-d", str(target_dir)],
+                check=True,
+                env=env,
+            )
+
+        log_files = list((Path(env["XDG_STATE_HOME"]) / "codexfarm" / "logs").glob("*.log"))
+        self.assertEqual(len(log_files), 2)
+        self.assertEqual(len({path.name for path in log_files}), 2)
+        self.assertTrue(all(path.stat().st_mode & 0o777 == 0o600 for path in log_files))
+
     def test_codex_add_keeps_window_after_command_exit_by_default(self):
         target_dir = self.tmpdir / "proj-remain"
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -524,6 +546,10 @@ class SaveScriptTests(unittest.TestCase):
             "/home/test/.codex/sessions/2026/05/11/"
             "rollout-2026-05-11T03-23-27-019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4.jsonl"
         )
+        self.codex_session_path = codex_session_path
+        self.custom_codex_session_path = codex_session_path.replace(
+            "/home/test/.codex", "/srv/custom-codex-home"
+        )
         claude_session_path = (
             "/home/test/.claude/projects/-tmp-project/54f5b65c-a31c-4aa1-b91b-896b35e2a759.jsonl"
         )
@@ -571,7 +597,9 @@ case "$1" in
         ;;
       *:1.0'|#{pane_current_path}') printf '/tmp/project\\n' ;;
       *:1.0'|#{pane_start_command}')
-        if [ "${WRAPPED_CODEX_START:-0}" = "1" ]; then
+        if [ "${SHELL_STARTED_CODEX:-0}" = "1" ]; then
+          printf '\\n'
+        elif [ "${WRAPPED_CODEX_START:-0}" = "1" ]; then
           printf 'tmux set-window-option -q remain-on-exit on >/dev/null 2>&1 || true; exec codex\\n'
         elif [ "${QUOTED_CODEX_START:-0}" = "1" ]; then
           printf '"codex "\\n'
@@ -579,14 +607,17 @@ case "$1" in
           printf 'codex\\n'
         fi
         ;;
+      *:1.0'|#{pane_current_command}') printf 'node\\n' ;;
       *:1.0'|#{pane_pid}') printf '100\\n' ;;
       *:2'|#{window_name}') printf 'claude-proj\\n' ;;
       *:2.0'|#{pane_current_path}') printf '/tmp/claude-project\\n' ;;
       *:2.0'|#{pane_start_command}') printf 'claude\\n' ;;
+      *:2.0'|#{pane_current_command}') printf 'node\\n' ;;
       *:2.0'|#{pane_pid}') printf '200\\n' ;;
       *:3'|#{window_name}') printf 'gemini-proj\\n' ;;
       *:3.0'|#{pane_current_path}') printf '/tmp/gemini-project\\n' ;;
       *:3.0'|#{pane_start_command}') printf 'gemini\\n' ;;
+      *:3.0'|#{pane_current_command}') printf 'node\\n' ;;
       *:3.0'|#{pane_pid}') printf '300\\n' ;;
       *) exit 1 ;;
     esac
@@ -630,6 +661,29 @@ esac
         make_executable(self.tmpdir / "tmux", tmux_stub)
         make_executable(self.tmpdir / "pgrep", pgrep_stub)
         make_executable(self.tmpdir / "lsof", lsof_stub)
+        make_executable(
+            self.tmpdir / "ps",
+            """#!/usr/bin/env bash
+set -euo pipefail
+pid=""
+format=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p) pid="$2"; shift 2 ;;
+    -o) format="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "${SHELL_STARTED_CODEX:-0}" = "1" ]; then
+  case "$pid|$format" in
+    100'|comm=') printf 'bash\\n' ;;
+    100'|args=') printf 'bash\\n' ;;
+    101'|comm=') printf 'codex\\n' ;;
+    101'|args=') printf '/usr/local/bin/codex\\n' ;;
+  esac
+fi
+""",
+        )
 
         self.env = os.environ.copy()
         self.env["PATH"] = f"{self.tmpdir}:{self.env.get('PATH', '')}"
@@ -659,6 +713,27 @@ esac
             rows,
         )
         self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o600)
+
+    def test_codex_save_finds_custom_home_session_for_shell_started_codex(self):
+        env = self.env.copy()
+        env["SHELL_STARTED_CODEX"] = "1"
+        env["NO_CODEX_SESSION"] = "1"
+        proc_fd_dir = self.tmpdir / "proc" / "101" / "fd"
+        proc_fd_dir.mkdir(parents=True)
+        (proc_fd_dir / "7").symlink_to(self.custom_codex_session_path)
+        env["CODEX_PROC_ROOT"] = str(self.tmpdir / "proc")
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        rows = self.manifest.read_text(encoding="utf-8").splitlines()
+        self.assertIn(
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+            rows,
+        )
 
     def test_codex_save_strips_stacked_status_and_memory_prefixes(self):
         env = self.env.copy()
@@ -777,6 +852,17 @@ case "$1" in
     exit 1
     ;;
   list-windows)
+    format=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -F) format="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ "${REQUIRE_REAL_TAB:-0}" = "1" ] && [ "$format" != $'#{window_id}\\t#{window_name}' ]; then
+      printf 'list-windows format does not contain a real tab\\n' >&2
+      exit 64
+    fi
     if [ -n "${TMUX_WINDOWS_OUTPUT:-}" ]; then
       printf '%s\n' "${TMUX_WINDOWS_OUTPUT}"
     fi
@@ -830,6 +916,16 @@ exit 0
         self.assertFalse(
             any(cmd and cmd[0] == "send-keys" for cmd in self.read_tmux_commands()),
             "restore should launch the resume command instead of typing it into a running CLI",
+        )
+
+    def test_codex_restore_requests_tab_delimited_window_fields(self):
+        env = self.env.copy()
+        env["REQUIRE_REAL_TAB"] = "1"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=env,
         )
 
     def test_codex_restore_adds_legacy_codex_resume_last(self):

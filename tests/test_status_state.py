@@ -20,6 +20,16 @@ class StatusStateTest(unittest.TestCase):
             "S",
         )
 
+    def test_parse_linux_proc_start_time_handles_parentheses_in_command_name(self) -> None:
+        fields = ["S", *[str(value) for value in range(1, 19)], "424242"]
+
+        self.assertEqual(
+            status_state._parse_linux_proc_start_time(
+                "123 (cmd with ) paren) " + " ".join(fields)
+            ),
+            "424242",
+        )
+
     def test_active_state_stale_reason_marks_dead_supervisor(self) -> None:
         with mock.patch.object(status_state, "process_is_running", return_value=False):
             reason = status_state.active_state_stale_reason({"status": "running", "pid": 12345})
@@ -31,6 +41,21 @@ class StatusStateTest(unittest.TestCase):
             reason = status_state.active_state_stale_reason({"status": "retrying", "pid": 12345})
 
         self.assertIsNone(reason)
+
+    def test_active_state_stale_reason_rejects_reused_supervisor_pid(self) -> None:
+        with (
+            mock.patch.object(status_state, "process_is_running", return_value=True),
+            mock.patch.object(status_state, "process_identity", return_value="current-token"),
+        ):
+            reason = status_state.active_state_stale_reason(
+                {
+                    "status": "running",
+                    "pid": 12345,
+                    "pid_identity": "original-token",
+                }
+            )
+
+        self.assertEqual(reason, "supervisor process 12345 identity changed")
 
     def test_repair_stale_state_file_records_stopped_state_and_event(self) -> None:
         with mock.patch.object(status_state, "process_is_running", return_value=False):

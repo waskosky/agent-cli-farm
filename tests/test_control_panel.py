@@ -51,7 +51,18 @@ class ControlPanelTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with mock.patch.object(control_panel, "interrupt_from_state", return_value="interrupted"):
+        with (
+            mock.patch.object(
+                control_panel,
+                "repair_stale_state_file",
+                return_value=(
+                    {"status": "running", "pid": 123, "run_dir": str(run_dir)},
+                    False,
+                    None,
+                ),
+            ),
+            mock.patch.object(control_panel, "interrupt_from_state", return_value="interrupted"),
+        ):
             result = control_panel.run_control_pane_action("i", run_dir=run_dir)
 
         self.assertEqual(result.message, "interrupted")

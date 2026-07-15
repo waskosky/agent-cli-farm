@@ -63,6 +63,7 @@ from .retry import (
     transient_retry_limit_reached,
 )
 from .state import LooperStateRecorder
+from .status_state import process_identity
 from .tmux import (
     display_tmux_message,
     set_tmux_window_option,
@@ -423,6 +424,7 @@ async def run_loop(
             "control_last_reason": None,
             "control_last_id": None,
             "pid": os.getpid(),
+            "pid_identity": process_identity(os.getpid()),
             "child_pid": None,
             "child_pgid": None,
             "hybrid_pane_id": None,
