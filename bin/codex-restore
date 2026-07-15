@@ -82,7 +82,7 @@ existing_window_target() {
       printf '%s' "$target"
       return 0
     fi
-  done < <(tmux list-windows -t "$session" -F '#{window_id}\t#{window_name}')
+  done < <(tmux list-windows -t "$session" -F $'#{window_id}\t#{window_name}')
 
   return 1
 }

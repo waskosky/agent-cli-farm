@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +58,16 @@ def _parse_linux_proc_state(stat_text: str) -> str | None:
     return fields[0]
 
 
+def _parse_linux_proc_start_time(stat_text: str) -> str | None:
+    command_end = stat_text.rfind(")")
+    if command_end < 0:
+        return None
+    fields = stat_text[command_end + 1 :].strip().split()
+    if len(fields) <= 19:
+        return None
+    return fields[19]
+
+
 def _linux_proc_state(pid: int) -> str | None:
     try:
         stat_text = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
@@ -79,6 +90,37 @@ def process_is_running(pid: int) -> bool:
     return True
 
 
+def process_identity(pid: int) -> str | None:
+    """Return a stable creation token so a reused PID is not mistaken for a run."""
+    if os.name == "posix":
+        try:
+            stat_text = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+            start_time = _parse_linux_proc_start_time(stat_text)
+            if start_time:
+                try:
+                    boot_id = (
+                        Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+                    )
+                except (FileNotFoundError, PermissionError, OSError):
+                    boot_id = "unknown-boot"
+                return f"linux-proc:{boot_id}:{start_time}"
+        except (FileNotFoundError, PermissionError, OSError):
+            pass
+
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=1,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    started_at = result.stdout.strip()
+    return f"ps-lstart:{started_at}" if result.returncode == 0 and started_at else None
+
+
 def active_state_stale_reason(state: Mapping[str, Any]) -> str | None:
     status = str(state.get("status") or "")
     if status not in ACTIVE_RUN_STATUSES:
@@ -86,9 +128,14 @@ def active_state_stale_reason(state: Mapping[str, Any]) -> str | None:
     supervisor_pid = _coerce_pid(state.get("pid"))
     if supervisor_pid is None:
         return "active looper state has no supervisor pid"
-    if process_is_running(supervisor_pid):
-        return None
-    return f"supervisor process {supervisor_pid} is no longer running"
+    if not process_is_running(supervisor_pid):
+        return f"supervisor process {supervisor_pid} is no longer running"
+    expected_identity = str(state.get("pid_identity") or "")
+    if expected_identity:
+        current_identity = process_identity(supervisor_pid)
+        if current_identity and current_identity != expected_identity:
+            return f"supervisor process {supervisor_pid} identity changed"
+    return None
 
 
 def stopped_state_from_stale(

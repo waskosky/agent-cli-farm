@@ -31,13 +31,35 @@ def _safe_stream_write(stream: TextIO, text: str) -> None:
 
 
 async def _terminate_process_group(process: asyncio.subprocess.Process) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except Exception:
+            if process.returncode is not None:
+                return
+            process.terminate()
+
+        deadline = asyncio.get_running_loop().time() + 10
+        while process.returncode is None and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            if process.returncode is None:
+                process.kill()
+        if process.returncode is None:
+            await process.wait()
+        return
+
     if process.returncode is not None:
         return
     try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGTERM)
-        else:
-            process.terminate()
+        process.terminate()
     except ProcessLookupError:
         return
     except Exception:
@@ -50,10 +72,7 @@ async def _terminate_process_group(process: asyncio.subprocess.Process) -> None:
         pass
 
     try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
+        process.kill()
     except ProcessLookupError:
         return
     except Exception:
@@ -196,7 +215,17 @@ async def run_command(
             result.stop_reason = f"local timeout after {timeout_seconds:g} seconds"
         await terminate_process_group(process)
     finally:
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        stream_tasks = asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        try:
+            await asyncio.wait_for(asyncio.shield(stream_tasks), timeout=1)
+        except asyncio.TimeoutError:
+            await terminate_process_group(process)
+            try:
+                await asyncio.wait_for(asyncio.shield(stream_tasks), timeout=1)
+            except asyncio.TimeoutError:
+                stdout_task.cancel()
+                stderr_task.cancel()
+                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         if not stop_task.done():
             stop_task.cancel()
             await asyncio.gather(stop_task, return_exceptions=True)

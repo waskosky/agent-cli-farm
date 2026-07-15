@@ -74,7 +74,7 @@ codex-looper --mode sequence --prompt-file prompts.md --once
 claude-looper --complete-on 'EXIT_SIGNAL:\s*true' --plan-file fix_plan.md --backup
 codex-looper --cb-no-progress 3 --cb-output-decline 2 --backup --backup-keep 20
 codex-looper --preset rai
-codex-looper --once --label gpt5-high -- --model gpt-5.4 --effort high
+codex-looper --once --label gpt5-high -- --model gpt-5.4 --config 'model_reasoning_effort="high"'
 claude-looper --once --label smoke -- --dangerously-skip-permissions
 codex-looper --farm-session work --label cleanup --cwd /path/to/project
 codex-looper --local --once --label local-preview
@@ -172,7 +172,7 @@ Agent defaults:
 | `claude` | Default hybrid: start a visible `claude` TTY pane, paste prompts, and detect turn completion from Claude session JSONL terminal events plus pane readiness. With `fresh_session_per_loop = true`, replace the pane/process between loops; otherwise reuse it. With `interface = "json"`: first prompt uses `claude -p --output-format stream-json --verbose --name <session> <prompt>`; later prompts use `--resume <session>`. |
 | `gemini` | Generic default: `gemini -p <prompt>` for every prompt. Override this if your Gemini CLI supports a better noninteractive/resume mode. |
 
-Built-in Codex and Claude agents accept `model` and `effort` config sugar. These fields are appended after `extra_args` as `--model <value>` and `--effort <value>`:
+Built-in Codex and Claude agents accept `model` and `effort` config sugar. `model` is appended after `extra_args` as `--model <value>`. Claude receives effort as `--effort <value>`; Codex receives it through `--config model_reasoning_effort="<value>"`, which is the Codex CLI's supported form:
 
 ```toml
 [agents.codex]

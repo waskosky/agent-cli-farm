@@ -89,10 +89,18 @@ assert pathlib.Path(sys.argv[2]).stat().st_mode & 0o777 == 0o600
 PY
 
 "$DEEP_HISTORY_BIN" stop -t "$PANE_ID"
-for _ in $(seq 1 100); do
-    grep -q '"status": "closed"' "$RUN_DIR/metadata.json" 2>/dev/null && break
+CLOSED=0
+for _ in $(seq 1 200); do
+    if grep -q '"status": "closed"' "$RUN_DIR/metadata.json" 2>/dev/null; then
+        CLOSED=1
+        break
+    fi
     sleep 0.05
 done
-grep -q '"status": "closed"' "$RUN_DIR/metadata.json"
+if [[ "$CLOSED" != "1" ]]; then
+    printf '%s\n' 'deep-history metadata did not close within 10 seconds' >&2
+    cat "$RUN_DIR/metadata.json" >&2 || true
+    exit 1
+fi
 
 printf '%s\n' 'agent-cli-farm deep-history integration test passed'

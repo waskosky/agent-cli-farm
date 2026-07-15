@@ -58,6 +58,15 @@ class RunTmuxStub:
 
 
 class AnnotatorWindowTests(unittest.TestCase):
+    def test_window_panes_capture_process_pid_for_descendant_detection(self):
+        annotator = load_annotator_module()
+        annotator.run_tmux = lambda cmd, *, verbose=False: "%1\tnode\t0\t\t123\n"
+
+        panes = annotator.window_pane_states("@1", verbose=False)
+
+        self.assertIsNotNone(panes)
+        self.assertEqual(panes[0].process_pid, "123")
+
     def test_annotates_windows_and_leaves_sessions(self):
         annotator = load_annotator_module()
         stub = RunTmuxStub()

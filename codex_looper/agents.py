@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from string import Formatter
 
 from .models import AgentConfig, CommandContext, CommandTemplateError
@@ -25,7 +26,10 @@ def agent_extra_args(agent: AgentConfig) -> list[str]:
     if agent.model:
         args.extend(["--model", agent.model])
     if agent.effort:
-        args.extend(["--effort", agent.effort])
+        if agent.kind == "codex":
+            args.extend(["--config", f"model_reasoning_effort={json.dumps(agent.effort)}"])
+        elif agent.kind == "claude":
+            args.extend(["--effort", agent.effort])
     return args
 
 
