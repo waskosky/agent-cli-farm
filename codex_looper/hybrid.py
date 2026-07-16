@@ -162,6 +162,48 @@ def extract_session_id_from_codex_session(path: Path, *, max_lines: int = 50) ->
     return None
 
 
+def _codex_session_metadata(
+    path: Path, *, max_lines: int = 20
+) -> tuple[float | None, Path | None]:
+    """Read the session start time and cwd without trusting the file mtime."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for index, line in enumerate(handle):
+                if index >= max_lines:
+                    break
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("type") != "session_meta":
+                    continue
+                payload = data.get("payload")
+                if not isinstance(payload, dict):
+                    return None, None
+
+                raw_started_at = payload.get("timestamp") or data.get("timestamp")
+                started_at = None
+                if isinstance(raw_started_at, (int, float)):
+                    started_at = float(raw_started_at)
+                elif isinstance(raw_started_at, str) and raw_started_at:
+                    try:
+                        parsed = datetime.fromisoformat(raw_started_at.replace("Z", "+00:00"))
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=timezone.utc)
+                        started_at = parsed.timestamp()
+                    except ValueError:
+                        pass
+
+                raw_cwd = payload.get("cwd")
+                session_cwd = Path(raw_cwd).expanduser() if isinstance(raw_cwd, str) else None
+                return started_at, session_cwd
+    except OSError:
+        return None, None
+    return None, None
+
+
 def _content_types_from_value(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         return ("text",) if value else ()
@@ -609,6 +651,14 @@ def _codex_trust_prompt_detected(output: str) -> bool:
     return "trust" in clean and "directory" in clean and "press enter to continue" in clean
 
 
+def _codex_update_prompt_detected(output: str) -> bool:
+    clean = strip_ansi(output).lower()
+    return all(
+        marker in clean
+        for marker in ("update available", "update now", "skip", "press enter to continue")
+    )
+
+
 @dataclass
 class ClaudeHybridController:
     command: list[str]
@@ -928,6 +978,7 @@ class CodexHybridController:
 
     def wait_until_ready(self, *, timeout_seconds: float) -> None:
         deadline = time.monotonic() + timeout_seconds
+        update_prompt_snapshot: str | None = None
         while time.monotonic() < deadline:
             output = self.capture_output()
             if _codex_trust_prompt_detected(output):
@@ -935,6 +986,19 @@ class CodexHybridController:
                     "Codex hybrid pane is waiting for workspace trust; answer it manually, "
                     "pre-trust the workspace, or pass --dangerously-bypass-hook-trust, then rerun"
                 )
+            if _codex_update_prompt_detected(output) and update_prompt_snapshot is None:
+                update_prompt_snapshot = strip_ansi(output)
+                result = self.run_tmux(
+                    ["tmux", "send-keys", "-t", self.pane_id or "", "2", "Enter"]
+                )
+                if result.returncode != 0:
+                    detail = (result.stderr or result.stdout or "unknown tmux failure").strip()
+                    raise ConfigError(f"failed to skip Codex update prompt: {detail}")
+                self.sleep_fn(1.0)
+                continue
+            if update_prompt_snapshot is not None and strip_ansi(output) == update_prompt_snapshot:
+                self.sleep_fn(1.0)
+                continue
             if output.strip() and classify_codex_output(output) == "READY":
                 return
             self.sleep_fn(1.0)
@@ -991,14 +1055,31 @@ class CodexHybridController:
                         return self.session_path
         if not sessions_root.exists():
             return None
-        candidates = [
-            path
-            for path in sessions_root.glob("**/*.jsonl")
-            if path.stat().st_mtime >= self.started_at - 2
-        ]
-        if not candidates:
+        metadata_candidates: list[tuple[float, Path]] = []
+        unknown_candidates: list[Path] = []
+        expected_cwd = self.cwd.resolve()
+        for path in sessions_root.glob("**/*.jsonl"):
+            try:
+                if path.stat().st_mtime < self.started_at - 2:
+                    continue
+            except OSError:
+                continue
+            session_started_at, session_cwd = _codex_session_metadata(path)
+            if session_started_at is None:
+                unknown_candidates.append(path)
+                continue
+            if session_started_at < self.started_at - 2:
+                continue
+            if session_cwd is not None and session_cwd.resolve() != expected_cwd:
+                continue
+            metadata_candidates.append((session_started_at, path))
+
+        if metadata_candidates:
+            self.session_path = max(metadata_candidates, key=lambda item: item[0])[1]
+        elif unknown_candidates:
+            self.session_path = max(unknown_candidates, key=lambda path: path.stat().st_mtime)
+        else:
             return None
-        self.session_path = max(candidates, key=lambda path: path.stat().st_mtime)
         return self.session_path
 
     def send_prompt(self, prompt: str) -> None:

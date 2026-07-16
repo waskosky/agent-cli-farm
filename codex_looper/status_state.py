@@ -117,7 +117,7 @@ def process_identity(pid: int) -> str | None:
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None
-    started_at = result.stdout.strip()
+    started_at = (result.stdout or "").strip()
     return f"ps-lstart:{started_at}" if result.returncode == 0 and started_at else None
 
 

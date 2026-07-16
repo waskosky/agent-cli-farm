@@ -352,10 +352,12 @@ def _pane_command_matches_agent(pane: Mapping[str, Any], state: Mapping[str, Any
     }
     candidates.update(INTERACTIVE_AGENT_COMMANDS)
     commands = [
-        str(pane.get("pane_current_command") or "").strip().lower(),
-        str(pane.get("pane_start_command") or "").strip().lower(),
+        str(pane.get("pane_current_command") or "").strip().strip("'\"").lower(),
+        str(pane.get("pane_start_command") or "").strip().strip("'\"").lower(),
     ]
     for command in commands:
+        if re.search(r"(?:^|[/\s])codex[-_]looper(?:\.py)?(?:$|[\s])", command):
+            continue
         command_name = Path(command.split()[0]).name if command else ""
         if command_name in candidates:
             return True

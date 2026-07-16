@@ -3276,6 +3276,59 @@ class LooperCliTests(unittest.TestCase):
             note_record = json.loads((run_dir / "operator_notes.jsonl").read_text(encoding="utf-8"))
             self.assertEqual(note_record["status"], "failed")
 
+    def test_operator_note_pane_scan_ignores_codex_looper_supervisor(self) -> None:
+        looper = load_looper_module()
+        root = Path("/tmp/project")
+        pane_lines = "\n".join(
+            [
+                "\t".join(
+                    [
+                        "LOOPER-rai",
+                        "LOOPER-rai",
+                        "%24",
+                        "Python",
+                        "exec /tools/bin/codex-looper --label LOOPER-rai",
+                        "111",
+                        str(root),
+                        "1",
+                    ]
+                ),
+                "\t".join(
+                    [
+                        "LOOPER-rai",
+                        "LOOPER-rai",
+                        "%25",
+                        "node",
+                        '"codex --no-alt-screen --model gpt-5.6-sol"',
+                        "222",
+                        str(root),
+                        "0",
+                    ]
+                ),
+            ]
+        )
+
+        def fake_runner(command: list[str], input_text: str | None = None) -> object:
+            self.assertEqual(command[:3], ["tmux", "list-panes", "-a"])
+            return looper.TmuxCommandResult(returncode=0, stdout=pane_lines)
+
+        result = looper.resolve_operator_note_target(
+            state={
+                "run_dir": "/tmp/run",
+                "label": "LOOPER-rai",
+                "agent_kind": "codex",
+                "agent_name": "codex",
+                "agent_cwd": str(root),
+            },
+            tmux_session="LOOPER-rai",
+            allow_pane_scan=True,
+            command_runner=fake_runner,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["paneId"], "%25")
+        self.assertEqual(result["paneCommand"], "node")
+
     def test_control_note_records_for_latest_matching_run(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

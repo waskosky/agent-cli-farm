@@ -1,6 +1,8 @@
 import json
 import tempfile
+import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from codex_looper.hybrid import (
@@ -897,6 +899,61 @@ class ClaudeHybridTests(unittest.TestCase):
             any(command[:3] == ["tmux", "load-buffer", "-b"] for command, _ in commands)
         )
 
+    def test_codex_session_discovery_ignores_recently_modified_older_session(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_root = root / ".codex" / "sessions" / "2026" / "07" / "16"
+            session_root.mkdir(parents=True)
+            started_at = time.time()
+            current_path = session_root / f"rollout-current-{SESSION_ID}.jsonl"
+            old_path = session_root / "rollout-old-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"
+            current_timestamp = datetime.fromtimestamp(
+                started_at + 1, tz=timezone.utc
+            ).isoformat()
+            old_timestamp = datetime.fromtimestamp(
+                started_at - 3600, tz=timezone.utc
+            ).isoformat()
+            write_jsonl(
+                current_path,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "session_id": SESSION_ID,
+                            "timestamp": current_timestamp,
+                            "cwd": str(root),
+                        },
+                    }
+                ],
+            )
+            write_jsonl(
+                old_path,
+                [
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "session_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                            "timestamp": old_timestamp,
+                            "cwd": str(root),
+                        },
+                    }
+                ],
+            )
+
+            controller = CodexHybridController(
+                command=["codex", "--no-alt-screen"],
+                cwd=root,
+                env={"CODEX_HOME": str(root / ".codex")},
+                command_runner=lambda command, input_text=None: TmuxCommandResult(returncode=1),
+                sleep_fn=lambda seconds: None,
+                require_tmux=False,
+                started_at=started_at,
+            )
+
+            discovered = controller.discover_session_path()
+
+        self.assertEqual(discovered, current_path.resolve())
+
     def test_codex_controller_blocks_on_workspace_trust_prompt(self) -> None:
         def command_runner(command: list[str], *, input_text: str | None = None):
             if command[:3] == ["tmux", "split-window", "-P"]:
@@ -924,6 +981,42 @@ class ClaudeHybridTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ConfigError, "workspace trust"):
             controller.ensure_started(timeout_seconds=5)
+
+    def test_codex_controller_skips_update_prompt_before_becoming_ready(self) -> None:
+        update_prompt = (
+            "Update available! 0.144.4 -> 0.144.5\n"
+            "1. Update now\n"
+            "2. Skip\n"
+            "Press enter to continue\n"
+        )
+        captures = [update_prompt, update_prompt, "\u203a \n"]
+        commands: list[list[str]] = []
+
+        def command_runner(command: list[str], *, input_text: str | None = None):
+            commands.append(command)
+            if command[:3] == ["tmux", "split-window", "-P"]:
+                return TmuxCommandResult(returncode=0, stdout="%9\n")
+            if command[:3] == ["tmux", "capture-pane", "-t"]:
+                return TmuxCommandResult(returncode=0, stdout=captures.pop(0))
+            return TmuxCommandResult(returncode=0)
+
+        controller = CodexHybridController(
+            command=["codex", "--no-alt-screen"],
+            cwd=Path("/tmp/project"),
+            env={},
+            command_runner=command_runner,
+            sleep_fn=lambda seconds: None,
+            require_tmux=False,
+        )
+
+        controller.ensure_started(timeout_seconds=5)
+
+        skip_commands = [
+            command
+            for command in commands
+            if command[:3] == ["tmux", "send-keys", "-t"]
+        ]
+        self.assertEqual(skip_commands, [["tmux", "send-keys", "-t", "%9", "2", "Enter"]])
 
 
 if __name__ == "__main__":

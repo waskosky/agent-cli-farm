@@ -14,6 +14,19 @@ class StatusStateTest(unittest.TestCase):
         with mock.patch.object(status_state, "_linux_proc_state", return_value="Z"):
             self.assertFalse(status_state.process_is_running(12345))
 
+    def test_process_identity_treats_missing_ps_output_as_unavailable(self) -> None:
+        with (
+            mock.patch.object(status_state.Path, "read_text", side_effect=FileNotFoundError),
+            mock.patch.object(
+                status_state.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=0, stdout=None),
+            ),
+        ):
+            identity = status_state.process_identity(12345)
+
+        self.assertIsNone(identity)
+
     def test_parse_linux_proc_state_handles_parentheses_in_command_name(self) -> None:
         self.assertEqual(
             status_state._parse_linux_proc_state("123 (cmd with ) paren) S 1 2 3"),
