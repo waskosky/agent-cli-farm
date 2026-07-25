@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 import subprocess
 import sys
@@ -18,6 +19,22 @@ def build_archive(path: Path, *, unsafe_name: str | None = None) -> str:
         "tmux-deep-history/VERSION": (b"0.1.0\n", 0o644),
         "tmux-deep-history/tmux-deep-history.tmux": (b"#!/usr/bin/env bash\n", 0o755),
         "tmux-deep-history/bin/tmux-deep-history": (b"#!/usr/bin/env bash\n", 0o755),
+        "tmux-deep-history/src/tmux_deep_history/__init__.py": (b"", 0o644),
+        "tmux-deep-history/src/tmux_deep_history/tmux.py": (
+            b"class TmuxError(RuntimeError):\n"
+            b"    pass\n"
+            b"class PaneInfo:\n"
+            b"    def __init__(self, **values):\n"
+            b"        self.__dict__.update(values)\n"
+            b"class Tmux:\n"
+            b"    def start_pipe(self, target, command, *, only_if_none=True):\n"
+            b"        pass\n",
+            0o644,
+        ),
+        "tmux-deep-history/src/tmux_deep_history/cli.py": (
+            b"import sys\nprint('arguments=' + ' '.join(sys.argv[1:]))\n",
+            0o644,
+        ),
     }
     if unsafe_name is not None:
         files[unsafe_name] = (b"unsafe\n", 0o644)
@@ -70,12 +87,67 @@ class DeepHistoryInstallerTests(unittest.TestCase):
             cli = destination / "bin" / "tmux-deep-history"
             self.assertTrue(cli.is_file())
             self.assertNotEqual(cli.stat().st_mode & 0o111, 0)
+            self.assertTrue((destination / "bin" / "tmux-deep-history-upstream").is_file())
+            configured_python = destination / "bin" / ".codexfarm-python"
+            self.assertEqual(
+                configured_python.read_text(encoding="utf-8").strip(),
+                str(Path(sys.executable).resolve()),
+            )
+            self.assertEqual(configured_python.stat().st_mode & 0o777, 0o600)
+            launched = subprocess.run(
+                [cli, "status"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(launched.returncode, 0, launched.stderr)
+            self.assertEqual(launched.stdout.strip(), "arguments=status")
 
             (destination / "obsolete.txt").write_text("old\n", encoding="utf-8")
             second = self.run_installer(archive=archive, lock=lock, destination=destination)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertFalse((destination / "obsolete.txt").exists())
             self.assertEqual((destination / "VERSION").read_text(encoding="utf-8"), "0.1.0\n")
+
+    def test_launcher_falls_back_to_supported_versioned_python(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "release.zip"
+            lock = root / "release.lock"
+            destination = root / "data" / "tmux-deep-history"
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            write_lock(lock, build_archive(archive))
+
+            result = self.run_installer(archive=archive, lock=lock, destination=destination)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            (destination / "bin" / ".codexfarm-python").unlink()
+
+            (fake_bin / "python3").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            (fake_bin / "python3").chmod(0o755)
+            (fake_bin / "python3.12").write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$0\" > \"$SELECTED_PYTHON_LOG\"\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "python3.12").chmod(0o755)
+            selected = root / "selected-python"
+            env = os.environ.copy()
+            env.pop("TMUX_DEEP_HISTORY_PYTHON", None)
+            env.pop("CODEXFARM_DEEP_HISTORY_PYTHON_BIN", None)
+            env.pop("CODEXFARM_PYTHON_BIN", None)
+            env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+            env["SELECTED_PYTHON_LOG"] = str(selected)
+
+            launched = subprocess.run(
+                [destination / "bin" / "tmux-deep-history", "status"],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(launched.returncode, 0, launched.stderr)
+            self.assertEqual(selected.read_text(encoding="utf-8").strip(), str(fake_bin / "python3.12"))
 
     def test_checksum_failure_preserves_previous_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

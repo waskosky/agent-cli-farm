@@ -17,6 +17,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 PROJECT_NAME = "tmux-deep-history"
+LAUNCHER_NAME = "tmux_deep_history_launcher.sh"
 LOCK_KEYS = {"repository", "version", "sha256"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){2}(?:[-+][A-Za-z0-9.-]+)?$")
@@ -123,7 +124,11 @@ def extract_release(archive_path: Path, destination: Path) -> Path:
 
 
 def install_release(
-    *, lock_path: Path, destination: Path, archive_path: Path | None = None
+    *,
+    lock_path: Path,
+    destination: Path,
+    archive_path: Path | None = None,
+    launcher_path: Path | None = None,
 ) -> tuple[Path, str]:
     lock = read_lock(lock_path)
     destination = Path(os.path.abspath(os.fspath(destination.expanduser())))
@@ -169,6 +174,20 @@ def install_release(
         if not os.access(required[1], os.X_OK):
             raise InstallError("release CLI entrypoint is not executable")
 
+        launcher = launcher_path or Path(__file__).resolve().with_name(LAUNCHER_NAME)
+        if not launcher.is_file():
+            raise InstallError(f"deep-history compatibility launcher is missing: {launcher}")
+        upstream_cli = required[1].with_name(f"{PROJECT_NAME}-upstream")
+        try:
+            os.replace(required[1], upstream_cli)
+            shutil.copyfile(launcher, required[1])
+            required[1].chmod(0o755)
+            configured_python = required[1].with_name(".codexfarm-python")
+            configured_python.write_text(f"{Path(sys.executable).resolve()}\n", encoding="utf-8")
+            configured_python.chmod(0o600)
+        except OSError as exc:
+            raise InstallError(f"unable to install deep-history compatibility launcher: {exc}") from exc
+
         backup = work_dir / "previous-install"
         had_previous = destination.exists() or destination.is_symlink()
         if had_previous:
@@ -198,7 +217,9 @@ def main() -> int:
     args = parse_args()
     try:
         destination, version = install_release(
-            lock_path=args.lock_file, destination=args.destination, archive_path=args.archive
+            lock_path=args.lock_file,
+            destination=args.destination,
+            archive_path=args.archive,
         )
     except InstallError as exc:
         print(f"tmux-deep-history installation failed: {exc}", file=sys.stderr)
