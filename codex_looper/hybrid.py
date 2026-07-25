@@ -162,9 +162,7 @@ def extract_session_id_from_codex_session(path: Path, *, max_lines: int = 50) ->
     return None
 
 
-def _codex_session_metadata(
-    path: Path, *, max_lines: int = 20
-) -> tuple[float | None, Path | None]:
+def _codex_session_metadata(path: Path, *, max_lines: int = 20) -> tuple[float | None, Path | None]:
     """Read the session start time and cwd without trusting the file mtime."""
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -185,7 +183,7 @@ def _codex_session_metadata(
 
                 raw_started_at = payload.get("timestamp") or data.get("timestamp")
                 started_at = None
-                if isinstance(raw_started_at, (int, float)):
+                if isinstance(raw_started_at, int | float):
                     started_at = float(raw_started_at)
                 elif isinstance(raw_started_at, str) and raw_started_at:
                     try:

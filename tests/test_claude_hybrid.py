@@ -907,12 +907,8 @@ class ClaudeHybridTests(unittest.TestCase):
             started_at = time.time()
             current_path = session_root / f"rollout-current-{SESSION_ID}.jsonl"
             old_path = session_root / "rollout-old-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"
-            current_timestamp = datetime.fromtimestamp(
-                started_at + 1, tz=timezone.utc
-            ).isoformat()
-            old_timestamp = datetime.fromtimestamp(
-                started_at - 3600, tz=timezone.utc
-            ).isoformat()
+            current_timestamp = datetime.fromtimestamp(started_at + 1, tz=timezone.utc).isoformat()
+            old_timestamp = datetime.fromtimestamp(started_at - 3600, tz=timezone.utc).isoformat()
             write_jsonl(
                 current_path,
                 [
@@ -1012,9 +1008,7 @@ class ClaudeHybridTests(unittest.TestCase):
         controller.ensure_started(timeout_seconds=5)
 
         skip_commands = [
-            command
-            for command in commands
-            if command[:3] == ["tmux", "send-keys", "-t"]
+            command for command in commands if command[:3] == ["tmux", "send-keys", "-t"]
         ]
         self.assertEqual(skip_commands, [["tmux", "send-keys", "-t", "%9", "2", "Enter"]])
 

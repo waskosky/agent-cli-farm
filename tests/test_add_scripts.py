@@ -278,7 +278,7 @@ esac
         make_executable(
             deep_history,
             "#!/usr/bin/env bash\n"
-            f"printf 'python=%s command=%s\\n' \"${{TMUX_DEEP_HISTORY_PYTHON:-}}\" \"$*\" >> {deep_history_log}\n"
+            f'printf \'python=%s command=%s\\n\' "${{TMUX_DEEP_HISTORY_PYTHON:-}}" "$*" >> {deep_history_log}\n'
             "exit 0\n",
         )
         env = self.env.copy()
@@ -303,8 +303,7 @@ esac
         )
         self.assertTrue(
             any(
-                "@deep-history-seamless-pageup on" in " ".join(command)
-                for command in tmux_commands
+                "@deep-history-seamless-pageup on" in " ".join(command) for command in tmux_commands
             )
         )
         deep_commands = []
@@ -324,8 +323,7 @@ esac
         )
         self.assertTrue(
             any(
-                command[:4]
-                == ["set-environment", "-g", "TMUX_DEEP_HISTORY_PYTHON", sys.executable]
+                command[:4] == ["set-environment", "-g", "TMUX_DEEP_HISTORY_PYTHON", sys.executable]
                 for command in tmux_commands
             )
         )

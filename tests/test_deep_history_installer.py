@@ -126,7 +126,7 @@ class DeepHistoryInstallerTests(unittest.TestCase):
             (fake_bin / "python3").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
             (fake_bin / "python3").chmod(0o755)
             (fake_bin / "python3.12").write_text(
-                "#!/bin/sh\nprintf '%s\\n' \"$0\" > \"$SELECTED_PYTHON_LOG\"\n",
+                '#!/bin/sh\nprintf \'%s\\n\' "$0" > "$SELECTED_PYTHON_LOG"\n',
                 encoding="utf-8",
             )
             (fake_bin / "python3.12").chmod(0o755)
@@ -147,7 +147,9 @@ class DeepHistoryInstallerTests(unittest.TestCase):
             )
 
             self.assertEqual(launched.returncode, 0, launched.stderr)
-            self.assertEqual(selected.read_text(encoding="utf-8").strip(), str(fake_bin / "python3.12"))
+            self.assertEqual(
+                selected.read_text(encoding="utf-8").strip(), str(fake_bin / "python3.12")
+            )
 
     def test_checksum_failure_preserves_previous_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

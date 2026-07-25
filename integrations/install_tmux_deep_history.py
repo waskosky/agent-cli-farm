@@ -186,7 +186,9 @@ def install_release(
             configured_python.write_text(f"{Path(sys.executable).resolve()}\n", encoding="utf-8")
             configured_python.chmod(0o600)
         except OSError as exc:
-            raise InstallError(f"unable to install deep-history compatibility launcher: {exc}") from exc
+            raise InstallError(
+                f"unable to install deep-history compatibility launcher: {exc}"
+            ) from exc
 
         backup = work_dir / "previous-install"
         had_previous = destination.exists() or destination.is_symlink()
