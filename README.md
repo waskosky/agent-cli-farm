@@ -9,7 +9,7 @@ backward compatibility.
 ## Features
 
 - **Automated session management**: Long-lived tmux session that persists across reboots
-- **Durable pane history**: Optional tmux-deep-history integration adds rotated raw/normalized transcripts while preserving timestamped farm logs
+- **Durable pane history**: Optional tmux-deep-history integration adds rotated raw/normalized transcripts, a seamless Page Up handoff beyond tmux's in-memory buffer, and compatible timestamped farm logs
 - **Unified monitoring**: Watch all agent instances from a single consolidated view
 - **Fast navigation**: Optional "board" session for quick switching between instances
 - **Snapshot/restore**: Save a manifest of windows and restore them later
@@ -53,6 +53,13 @@ This will:
 If `tmux` is unavailable, core tmux commands will not work until you install it. If `multitail` is unavailable, `codex-watch` falls back to a simpler `tail` view.
 Omit `--with-deep-history` when you want the legacy flat-log backend only. Re-running the setup
 command is safe; the installed version can change only when this repository's reviewed lock changes.
+
+Deep history is intentionally opt-in because terminal transcripts can contain commands, private
+paths, credentials, and other sensitive output. Once installed, the default `auto` backend starts
+recording current tmux panes and enables the plugin's global tmux hooks for panes created afterward.
+Set `CODEXFARM_HISTORY_BACKEND=legacy` when launching a pane to turn those hooks off and use only
+the flat compatibility log. If the plugin is absent, `codex-add` reports the legacy fallback
+instead of silently making deep history look active.
 
 ### 2. Add Codex, Claude, or Gemini Instances
 
@@ -179,6 +186,8 @@ Notes:
 - Force full mode: `codex-watch --mode multitail`.
 - With the installed deep-history backend, one `pipe-pane` owner writes durable segmented history and mirrors the live raw stream into the same flat logs used by `codex-watch`.
 - Flat compatibility logs contain output emitted after the pane pipe is enabled. Deep history separately captures scrollback already visible when recording starts.
+- Deep history is not a literal extension of tmux's internal grid. Use `Prefix + [` for recent copy-mode history; when Page Up reaches the absolute top, the farm's default seamless handoff opens the older disk transcript in a popup. `Prefix + H` opens the full Deep History menu, and `Alt-u` opens older history directly from copy mode. Mouse-wheel scrolling remains inside tmux's native buffer and does not cross the disk-history boundary.
+- Plugin installation raises tmux's global history limit from its usual 2,000 rows to 50,000 for panes created afterward. Existing panes keep their original in-memory limit, but `codex-add` backfills deep-history recording for existing tmux panes unless another output pipe already owns one. Recreate panes (or save and reboot the farm) only when you also want the larger in-memory limit.
 - `codex-watch` discovers log files once at startup. Restart it to include newly-created logs.
 - Multi-file tail output keeps source labels so interleaved lines can still be traced to a window log.
 - First run shows an optional tmux tips prompt; choose Yes to see basics. Answer "Don't show again" to persist your preference. Re-enable temporarily with `CODEX_TIPS_PROMPT=1` or permanently by removing `~/.local/state/codexfarm/no_tips`.
@@ -336,6 +345,8 @@ Common:
 - **`CODEXFARM_WITH_DEEP_HISTORY`** - set to `1` as an alternative to `setup.sh --with-deep-history`
 - **`CODEXFARM_HISTORY_BACKEND`** - `auto` (default), `legacy`, or `deep-history`; auto uses the pinned plugin when installed and otherwise preserves legacy logging
 - **`CODEXFARM_DEEP_HISTORY_BIN`** - override the deep-history executable discovered under the XDG data directory
+- **`CODEXFARM_DEEP_HISTORY_PYTHON_BIN`** - override the Python 3.10+ interpreter used by deep-history hooks and loggers (default searches supported `python3` and versioned commands)
+- **`CODEXFARM_DEEP_HISTORY_SEAMLESS_PAGEUP`** - set to `0` to keep tmux's ordinary Page Up behavior at the top of copy mode instead of opening the older disk transcript (default `1`)
 - **`CODEX_LOOPER_LAYOUT`** - looper tmux layout: `auto`, `single`, or `split`; farm launches default to `split`
 
 Annotator-specific:

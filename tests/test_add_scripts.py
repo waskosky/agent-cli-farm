@@ -3,7 +3,9 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -31,6 +33,12 @@ case "$1" in
     ;;
   new-window)
     echo "1"
+    exit 0
+    ;;
+  list-panes)
+    if [[ -n "${TMUX_LIST_PANES_OUTPUT:-}" ]]; then
+      printf '%b\n' "$TMUX_LIST_PANES_OUTPUT"
+    fi
     exit 0
     ;;
   *)
@@ -243,18 +251,40 @@ esac
         self.assertIn("Started codex in codexfarm:1", result.stdout)
         self.assertIn("warning: unable to attach log pipe", result.stderr)
 
-    def test_codex_add_uses_deep_history_as_single_pipe_owner(self):
+    def test_codex_add_auto_backend_reports_missing_deep_history(self):
+        target_dir = self.tmpdir / "proj-auto-history-fallback"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        env = self.env.copy()
+        env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "-d", str(target_dir)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("tmux-deep-history is not installed", result.stderr)
+        self.assertIn("setup.sh --with-deep-history", result.stderr)
+        self.assertIn("History backend: legacy", result.stdout)
+
+    def test_codex_add_auto_uses_deep_history_as_single_pipe_owner(self):
         target_dir = self.tmpdir / "proj-deep-history"
         target_dir.mkdir(parents=True, exist_ok=True)
         deep_history_log = self.tmpdir / "deep-history.log"
         deep_history = self.tmpdir / "tmux-deep-history"
         make_executable(
             deep_history,
-            f"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> {deep_history_log}\nexit 0\n",
+            "#!/usr/bin/env bash\n"
+            f'printf \'python=%s command=%s\\n\' "${{TMUX_DEEP_HISTORY_PYTHON:-}}" "$*" >> {deep_history_log}\n'
+            "exit 0\n",
         )
         env = self.env.copy()
-        env["CODEXFARM_HISTORY_BACKEND"] = "deep-history"
         env["CODEXFARM_DEEP_HISTORY_BIN"] = str(deep_history)
+        env["CODEXFARM_DEEP_HISTORY_PYTHON_BIN"] = sys.executable
+        env["TMUX_LIST_PANES_OUTPUT"] = "0:"
         env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
 
         result = subprocess.run(
@@ -271,9 +301,48 @@ esac
         self.assertTrue(
             any("@deep-history-auto-start off" in " ".join(command) for command in tmux_commands)
         )
-        deep_commands = deep_history_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(deep_commands[0], "install")
-        self.assertIn("start -t codexfarm:1 --mirror-output", deep_commands[1])
+        self.assertTrue(
+            any(
+                "@deep-history-seamless-pageup on" in " ".join(command) for command in tmux_commands
+            )
+        )
+        deep_commands = []
+        for _ in range(100):
+            deep_commands = deep_history_log.read_text(encoding="utf-8").splitlines()
+            if len(deep_commands) >= 3:
+                break
+            time.sleep(0.01)
+        self.assertEqual(deep_commands[0], f"python={sys.executable} command=install")
+        self.assertIn(
+            f"python={sys.executable} command=start -t codexfarm:1 --mirror-output",
+            deep_commands[1],
+        )
+        self.assertEqual(deep_commands[2], f"python={sys.executable} command=start-all")
+        self.assertTrue(
+            any("@deep-history-auto-start on" in " ".join(command) for command in tmux_commands)
+        )
+        self.assertTrue(
+            any(
+                command[:4] == ["set-environment", "-g", "TMUX_DEEP_HISTORY_PYTHON", sys.executable]
+                for command in tmux_commands
+            )
+        )
+        self.assertTrue(
+            any(
+                command[:5]
+                == [
+                    "set-environment",
+                    "-t",
+                    "codexfarm",
+                    "TMUX_DEEP_HISTORY_PYTHON",
+                    sys.executable,
+                ]
+                for command in tmux_commands
+            )
+        )
+        new_window = next(command for command in tmux_commands if command[0] == "new-window")
+        self.assertIn("-e", new_window)
+        self.assertIn(f"TMUX_DEEP_HISTORY_PYTHON={sys.executable}", new_window)
         self.assertIn("History backend: deep-history", result.stdout)
         log_files = list((Path(env["XDG_STATE_HOME"]) / "codexfarm" / "logs").glob("*.log"))
         self.assertEqual(len(log_files), 1)
@@ -307,6 +376,12 @@ esac
         self.assertIn("falling back to legacy pane logging", result.stderr)
         self.assertIn("simulated start failure", result.stderr)
         self.assertIn("History backend: legacy", result.stdout)
+        self.assertFalse(
+            any(
+                "@deep-history-auto-start on" in " ".join(command)
+                for command in self.read_tmux_commands()
+            )
+        )
 
     def test_codex_add_rejects_invalid_history_backend(self):
         target_dir = self.tmpdir / "proj-invalid-history"
@@ -324,6 +399,47 @@ esac
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("Invalid CODEXFARM_HISTORY_BACKEND", result.stderr)
+
+    def test_codex_add_legacy_backend_disables_deep_history_hooks(self):
+        target_dir = self.tmpdir / "proj-legacy-history"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        env = self.env.copy()
+        env["CODEXFARM_HISTORY_BACKEND"] = "legacy"
+        env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "-d", str(target_dir)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("History backend: legacy", result.stdout)
+        self.assertTrue(
+            any(
+                "@deep-history-auto-start off" in " ".join(command)
+                for command in self.read_tmux_commands()
+            )
+        )
+
+    def test_codex_add_rejects_invalid_deep_history_pageup_setting(self):
+        target_dir = self.tmpdir / "proj-invalid-history-pageup"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        env = self.env.copy()
+        env["CODEXFARM_DEEP_HISTORY_SEAMLESS_PAGEUP"] = "sometimes"
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "-d", str(target_dir)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Invalid CODEXFARM_DEEP_HISTORY_SEAMLESS_PAGEUP", result.stderr)
 
     def test_gemini_add_uses_named_session(self):
         target_dir = self.tmpdir / "proj-gemini"

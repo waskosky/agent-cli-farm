@@ -137,6 +137,33 @@ resolve_executable() {
   esac
 }
 
+python_is_supported() {
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
+    >/dev/null 2>&1
+}
+
+resolve_deep_history_python() {
+  local candidate resolved
+  for candidate in \
+    "${CODEXFARM_DEEP_HISTORY_PYTHON_BIN:-}" \
+    "${TMUX_DEEP_HISTORY_PYTHON:-}" \
+    "${CODEXFARM_PYTHON_BIN:-}" \
+    python3.14 \
+    python3.13 \
+    python3.12 \
+    python3.11 \
+    python3.10 \
+    python3
+  do
+    [ -n "$candidate" ] || continue
+    if resolved="$(resolve_executable "$candidate")" && python_is_supported "$resolved"; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  done
+  return 1
+}
+
 detach=0
 dir_arg=
 session_arg=
@@ -234,6 +261,8 @@ LOGDIR="$STATE_DIR/logs"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 HISTORY_BACKEND="${CODEXFARM_HISTORY_BACKEND:-auto}"
 DEEP_HISTORY_BIN="${CODEXFARM_DEEP_HISTORY_BIN:-$DATA_HOME/codexfarm/plugins/tmux-deep-history/bin/tmux-deep-history}"
+DEEP_HISTORY_PYTHON_BIN=""
+DEEP_HISTORY_SEAMLESS_PAGEUP="${CODEXFARM_DEEP_HISTORY_SEAMLESS_PAGEUP:-on}"
 SELECTED_HISTORY_BACKEND="legacy"
 ANNOTATOR_BIN="$(get_env ANNOTATOR_BIN "$(dirname "$0")/codex-annotator")"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -258,6 +287,18 @@ case "$HISTORY_BACKEND" in
   auto|legacy|deep-history) ;;
   *)
     echo "Invalid CODEXFARM_HISTORY_BACKEND: $HISTORY_BACKEND" >&2
+    exit 2
+    ;;
+esac
+case "$DEEP_HISTORY_SEAMLESS_PAGEUP" in
+  1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+    DEEP_HISTORY_SEAMLESS_PAGEUP=on
+    ;;
+  0|false|FALSE|False|no|NO|No|off|OFF|Off)
+    DEEP_HISTORY_SEAMLESS_PAGEUP=off
+    ;;
+  *)
+    echo "Invalid CODEXFARM_DEEP_HISTORY_SEAMLESS_PAGEUP: $DEEP_HISTORY_SEAMLESS_PAGEUP" >&2
     exit 2
     ;;
 esac
@@ -489,30 +530,58 @@ start_status_annotator() {
 }
 
 configure_history_backend() {
-  local resolved_bin deep_root installed_root install_error
+  local resolved_bin resolved_python deep_root installed_root install_error
+  local desired_integration installed_integration table
   SELECTED_HISTORY_BACKEND="legacy"
-  [ "$HISTORY_BACKEND" != "legacy" ] || return 0
+  if [ "$HISTORY_BACKEND" = "legacy" ]; then
+    # The plugin's hooks are global. Explicit legacy mode must disable them
+    # before creating the pane or they can claim tmux's single output pipe.
+    tmux set-option -gq '@deep-history-auto-start' off >/dev/null 2>&1 || true
+    return 0
+  fi
 
   if ! resolved_bin="$(resolve_executable "$DEEP_HISTORY_BIN")"; then
     if [ "$HISTORY_BACKEND" = "deep-history" ]; then
       echo "warning: tmux-deep-history is unavailable; using legacy pane logging" >&2
+    else
+      echo "warning: tmux-deep-history is not installed; using legacy pane logging" >&2
+      echo "warning: rerun setup.sh --with-deep-history, or set CODEXFARM_HISTORY_BACKEND=legacy to opt out" >&2
     fi
     return 0
   fi
 
   DEEP_HISTORY_BIN="$resolved_bin"
-  if ! tmux set-option -gq '@deep-history-auto-start' off; then
-    echo "warning: unable to disable deep-history auto-start; using legacy pane logging" >&2
+  if ! resolved_python="$(resolve_deep_history_python)"; then
+    echo "warning: tmux-deep-history requires Python 3.10 or newer; using legacy pane logging" >&2
+    return 0
+  fi
+  DEEP_HISTORY_PYTHON_BIN="$resolved_python"
+  if ! tmux set-option -gq '@deep-history-auto-start' off \
+    || ! tmux set-option -gq '@deep-history-seamless-pageup' "$DEEP_HISTORY_SEAMLESS_PAGEUP" \
+    || ! tmux set-environment -g TMUX_DEEP_HISTORY_PYTHON "$DEEP_HISTORY_PYTHON_BIN" \
+    || ! tmux set-environment -t "$SESSION" TMUX_DEEP_HISTORY_PYTHON "$DEEP_HISTORY_PYTHON_BIN"; then
+    echo "warning: unable to configure tmux-deep-history; using legacy pane logging" >&2
     return 0
   fi
   deep_root="$(cd "$(dirname "$DEEP_HISTORY_BIN")/.." && pwd)"
   installed_root="$(tmux show-options -gqv '@deep-history-root' 2>/dev/null || true)"
-  if [ "$installed_root" != "$deep_root" ]; then
-    if ! install_error=$("$DEEP_HISTORY_BIN" install 2>&1); then
+  # Bump this marker whenever farm-managed plugin bindings/options change.
+  desired_integration="2:$DEEP_HISTORY_SEAMLESS_PAGEUP"
+  installed_integration="$(tmux show-options -gqv '@codexfarm-deep-history-integration' 2>/dev/null || true)"
+  if [ "$installed_root" != "$deep_root" ] || [ "$installed_integration" != "$desired_integration" ]; then
+    if ! install_error=$(TMUX_DEEP_HISTORY_PYTHON="$DEEP_HISTORY_PYTHON_BIN" \
+      "$DEEP_HISTORY_BIN" install 2>&1); then
       echo "warning: unable to initialize tmux-deep-history; using legacy pane logging" >&2
       [ -z "$install_error" ] || printf '%s\n' "$install_error" >&2
       return 0
     fi
+    if [ "$DEEP_HISTORY_SEAMLESS_PAGEUP" = "off" ]; then
+      for table in copy-mode copy-mode-vi; do
+        tmux bind-key -T "$table" PPage send-keys -X page-up >/dev/null 2>&1 || true
+      done
+    fi
+    tmux set-option -gq '@codexfarm-deep-history-integration' "$desired_integration" \
+      >/dev/null 2>&1 || true
   fi
   SELECTED_HISTORY_BACKEND="deep-history"
 }
@@ -533,7 +602,8 @@ attach_history_logging() {
   local start_error
   if [ "$SELECTED_HISTORY_BACKEND" = "deep-history" ]; then
     if start_error=$(
-      "$DEEP_HISTORY_BIN" start -t "$SESSION:$WIN" --mirror-output "$LOGFILE" 2>&1
+      TMUX_DEEP_HISTORY_PYTHON="$DEEP_HISTORY_PYTHON_BIN" \
+        "$DEEP_HISTORY_BIN" start -t "$SESSION:$WIN" --mirror-output "$LOGFILE" 2>&1
     ); then
       return 0
     fi
@@ -542,6 +612,26 @@ attach_history_logging() {
     SELECTED_HISTORY_BACKEND="legacy"
   fi
   attach_legacy_log_pipe
+}
+
+enable_history_auto_start() {
+  local pane_states
+  [ "$SELECTED_HISTORY_BACKEND" = "deep-history" ] || return 0
+  if ! tmux set-option -gq '@deep-history-auto-start' on; then
+    echo "warning: unable to enable automatic deep-history recording" >&2
+    return 0
+  fi
+  pane_states="$(tmux list-panes -a -F '#{pane_pipe}:#{@deep-history-owned}' 2>/dev/null || true)"
+  if ! printf '%s\n' "$pane_states" | grep -q '^0:'; then
+    return 0
+  fi
+  # The plugin's hooks are global, so bring every existing tmux pane under the
+  # same policy too. This can be slow with many panes, so do it asynchronously;
+  # an existing foreign pipe is reported and left untouched.
+  (
+    TMUX_DEEP_HISTORY_PYTHON="$DEEP_HISTORY_PYTHON_BIN" \
+      "$DEEP_HISTORY_BIN" start-all >/dev/null 2>&1 || true
+  ) &
 }
 
 remain_on_exit_enabled() {
@@ -598,7 +688,12 @@ if remain_on_exit_enabled; then
   WINDOW_CMDLINE="tmux set-window-option -q remain-on-exit on >/dev/null 2>&1 || true; exec $CMDLINE"
 fi
 
-WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" "$WINDOW_CMDLINE")
+if [ "$SELECTED_HISTORY_BACKEND" = "deep-history" ]; then
+  WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" \
+    -e "TMUX_DEEP_HISTORY_PYTHON=$DEEP_HISTORY_PYTHON_BIN" "$WINDOW_CMDLINE")
+else
+  WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" "$WINDOW_CMDLINE")
+fi
 
 if remain_on_exit_enabled; then
   tmux set-window-option -t "$SESSION:$WIN" remain-on-exit on >/dev/null 2>&1 || true
@@ -616,6 +711,7 @@ fi
 # Attach exactly one pane pipe. Deep history owns it when available and mirrors
 # its raw stream to LOGFILE so codex-watch remains backward compatible.
 attach_history_logging
+enable_history_auto_start
 
 # Link to board session if it exists
 tmux has-session -t "$BOARD_SESSION" 2>/dev/null && tmux link-window -s "$SESSION:$WIN" -t "$BOARD_SESSION"

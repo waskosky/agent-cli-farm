@@ -275,8 +275,12 @@ EOF
     fi
     echo ""
     echo "Installing pinned tmux-deep-history integration..."
-    "$setup_python" "$script_dir/integrations/install_tmux_deep_history.py" \
-      "${deep_history_installer_args[@]}"
+    if [ "${#deep_history_installer_args[@]}" -gt 0 ]; then
+      "$setup_python" "$script_dir/integrations/install_tmux_deep_history.py" \
+        "${deep_history_installer_args[@]}"
+    else
+      "$setup_python" "$script_dir/integrations/install_tmux_deep_history.py"
+    fi
   fi
 
   echo ""
@@ -346,7 +350,7 @@ if [ -n "${BASH_SOURCE:-}" ] && [ "${BASH_SOURCE[0]:-}" != "$0" ]; then
 fi
 
 if [ "$codexfarm_setup_is_sourced" -eq 1 ]; then
-  CODEXFARM_SETUP_SOURCED=1 codexfarm_setup_main
+  CODEXFARM_SETUP_SOURCED=1 codexfarm_setup_main "$@"
   case ":$PATH:" in
     *:"$HOME/bin":*) ;;
     *) export PATH="$HOME/bin:$PATH" ;;

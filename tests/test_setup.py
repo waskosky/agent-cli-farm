@@ -81,6 +81,42 @@ class SetupScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--with-deep-history", result.stdout)
 
+    def test_sourced_setup_forwards_deep_history_flag(self) -> None:
+        (self.bin_dir / "python3").unlink()
+        (self.bin_dir / "python3").symlink_to(sys.executable)
+        make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(self.bin_dir / "multitail", "#!/usr/bin/env bash\nexit 0\n")
+        archive = self.tmpdir / "tmux-deep-history.zip"
+        lock = self.tmpdir / "tmux-deep-history.lock"
+        write_lock(lock, build_archive(archive))
+        self.env["CODEXFARM_DEEP_HISTORY_ARCHIVE"] = str(archive)
+        self.env["CODEXFARM_DEEP_HISTORY_LOCK_FILE"] = str(lock)
+
+        result = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                f'. "{REPO_ROOT / "setup.sh"}" --with-deep-history',
+            ],
+            cwd=REPO_ROOT,
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = (
+            Path(self.env["HOME"])
+            / ".local"
+            / "share"
+            / "codexfarm"
+            / "plugins"
+            / "tmux-deep-history"
+        )
+        self.assertTrue((installed / "bin" / "tmux-deep-history").is_file())
+        self.assertIn("Installed tmux-deep-history 0.1.0", result.stdout)
+
     def test_with_deep_history_installs_pinned_local_release(self) -> None:
         (self.bin_dir / "python3").unlink()
         (self.bin_dir / "python3").symlink_to(sys.executable)
@@ -105,6 +141,22 @@ class SetupScriptTests(unittest.TestCase):
         )
         self.assertTrue((installed / "bin" / "tmux-deep-history").is_file())
         self.assertIn("Installed tmux-deep-history 0.1.0", result.stdout)
+
+    def test_with_deep_history_without_installer_overrides_works_under_nounset(self) -> None:
+        python_log = self.tmpdir / "python.log"
+        self.env["FAKE_PYTHON_LOG"] = str(python_log)
+
+        result = self.run_setup("--with-deep-history")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        invocations = python_log.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(
+            any(
+                invocation.endswith("integrations/install_tmux_deep_history.py")
+                for invocation in invocations
+            ),
+            invocations,
+        )
 
     def test_skips_package_manager_when_dependencies_already_exist(self) -> None:
         make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")

@@ -13,11 +13,23 @@ if [[ ! -x "$DEEP_HISTORY_BIN" ]]; then
     exit 1
 fi
 
-TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codexfarm-deep-history-test.XXXXXX")"
+# tmux Unix-domain socket paths are short (roughly 100 bytes on macOS). The
+# platform TMPDIR can already consume most of that budget before our suffix.
+TEMP_DIR="$(mktemp -d "/tmp/codexfarm-dh.XXXXXX")"
 SESSION="codexfarm-deep-history-$$"
 
 cleanup() {
     tmux kill-server >/dev/null 2>&1 || true
+    # Logger shutdown writes final metadata before removing logger.ready. Wait
+    # for those writers so recursive cleanup cannot race a recreated state dir.
+    for _ in $(seq 1 100); do
+        if [[ ! -d "$TEMP_DIR" ]] \
+            || ! find "$TEMP_DIR" -type f -name logger.ready -print -quit 2>/dev/null \
+                | grep -q .; then
+            break
+        fi
+        sleep 0.05
+    done
     rm -rf "$TEMP_DIR"
 }
 trap cleanup EXIT INT TERM HUP
@@ -54,9 +66,42 @@ OUTPUT="$("$ROOT_DIR/bin/codex-add" -d "$TEMP_DIR/project")"
 grep -q 'History backend: deep-history' <<< "$OUTPUT"
 
 PANE_ID="$(tmux display-message -p -t "$SESSION:1" '#{pane_id}')"
+HOME_PANE_ID="$(tmux display-message -p -t "$SESSION:0" '#{pane_id}')"
 [[ "$(tmux display-message -p -t "$PANE_ID" '#{pane_pipe}')" == "1" ]]
 [[ "$(tmux show-options -pqv -t "$PANE_ID" '@deep-history-owned')" == "1" ]]
-[[ "$(tmux show-options -gqv '@deep-history-auto-start')" == "off" ]]
+HOME_BACKFILLED=0
+for _ in $(seq 1 200); do
+    if [[ "$(tmux display-message -p -t "$HOME_PANE_ID" '#{pane_pipe}')" == "1" ]] \
+        && [[ "$(tmux show-options -pqv -t "$HOME_PANE_ID" '@deep-history-owned')" == "1" ]]; then
+        HOME_BACKFILLED=1
+        break
+    fi
+    sleep 0.05
+done
+[[ "$HOME_BACKFILLED" == "1" ]]
+
+# A pane created after auto-start is enabled must be claimed by the installed
+# global hook without another codex-add invocation.
+AUTO_PANE_ID="$(
+    tmux new-window -d -t "$SESSION" -P -F '#{pane_id}' -n auto-history \
+        "$TEMP_DIR/bin/fake-agent"
+)"
+AUTO_STARTED=0
+for _ in $(seq 1 200); do
+    if [[ "$(tmux display-message -p -t "$AUTO_PANE_ID" '#{pane_pipe}')" == "1" ]] \
+        && [[ "$(tmux show-options -pqv -t "$AUTO_PANE_ID" '@deep-history-owned')" == "1" ]]; then
+        AUTO_STARTED=1
+        break
+    fi
+    sleep 0.05
+done
+[[ "$AUTO_STARTED" == "1" ]]
+
+[[ "$(tmux show-options -gqv '@deep-history-auto-start')" == "on" ]]
+[[ "$(tmux show-options -gqv '@deep-history-seamless-pageup')" == "on" ]]
+[[ "$(tmux show-options -gqv history-limit)" == "50000" ]]
+tmux list-keys -T copy-mode | grep -q 'PPage.*tmux-deep-history.*view.*--older'
+tmux list-keys -T copy-mode-vi | grep -q 'PPage.*tmux-deep-history.*view.*--older'
 
 tmux send-keys -t "$PANE_ID" 'integration-marker' Enter
 
