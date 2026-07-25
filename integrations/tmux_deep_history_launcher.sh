@@ -58,6 +58,7 @@ import runpy
 import shlex
 import sys
 import time
+from pathlib import Path
 
 if sys.version_info < (3, 10):
     print("tmux-deep-history requires Python 3.10 or newer", file=sys.stderr)
@@ -165,10 +166,24 @@ def _start_pipe_after_tmux_settles(self, target, command, *, only_if_none=True):
     # A pane id beginning with %0 is consumed by tmux shell-command formatting
     # expansion unless the percent sign is doubled before pipe-pane receives it.
     command = command.replace(" --pane-id %", " --pane-id %%", 1)
+    run_dir = None
+    try:
+        command_arguments = shlex.split(command)
+        run_dir_index = command_arguments.index("--run-dir") + 1
+        run_dir = Path(command_arguments[run_dir_index])
+    except (ValueError, IndexError):
+        pass
     _start_pipe(self, target, command, only_if_none=only_if_none)
-    deadline = time.monotonic() + 0.75
+    pipe_visible = False
+    deadline = time.monotonic() + (5.0 if run_dir is not None else 0.75)
     while time.monotonic() < deadline:
+        if run_dir is not None and (run_dir / "logger.ready").is_file():
+            return
         if self.display("#{pane_pipe}", target, check=False) == "1":
+            pipe_visible = True
+            if run_dir is None:
+                return
+        elif pipe_visible:
             return
         time.sleep(0.025)
 

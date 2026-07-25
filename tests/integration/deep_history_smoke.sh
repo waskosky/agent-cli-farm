@@ -20,6 +20,16 @@ SESSION="codexfarm-deep-history-$$"
 
 cleanup() {
     tmux kill-server >/dev/null 2>&1 || true
+    # Logger shutdown writes final metadata before removing logger.ready. Wait
+    # for those writers so recursive cleanup cannot race a recreated state dir.
+    for _ in $(seq 1 100); do
+        if [[ ! -d "$TEMP_DIR" ]] \
+            || ! find "$TEMP_DIR" -type f -name logger.ready -print -quit 2>/dev/null \
+                | grep -q .; then
+            break
+        fi
+        sleep 0.05
+    done
     rm -rf "$TEMP_DIR"
 }
 trap cleanup EXIT INT TERM HUP
