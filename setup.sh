@@ -7,18 +7,23 @@ codexfarm_setup_main() (
   set -euo pipefail
 
   local install_deep_history=0
+  local install_session_hook=1
   local setup_python=""
   while (( "$#" )); do
     case "${1:-}" in
       --with-deep-history)
         install_deep_history=1
         ;;
+      --without-session-hook)
+        install_session_hook=0
+        ;;
       -h|--help)
         cat <<'EOF'
-Usage: setup.sh [--with-deep-history]
+Usage: setup.sh [--with-deep-history] [--without-session-hook]
 
-Install Agent CLI Farm helpers. The optional flag also installs the
-checksum-pinned tmux-deep-history release used by the automatic history backend.
+Install Agent CLI Farm helpers and the Codex session-identity hook. The
+--with-deep-history flag also installs the checksum-pinned history backend.
+Use --without-session-hook to leave ~/.codex/hooks.json unchanged.
 EOF
         exit 0
         ;;
@@ -31,6 +36,9 @@ EOF
   done
   case "${CODEXFARM_WITH_DEEP_HISTORY:-}" in
     1|true|TRUE|True|yes|YES|Yes|on|ON|On) install_deep_history=1 ;;
+  esac
+  case "${CODEXFARM_INSTALL_SESSION_HOOK:-}" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off) install_session_hook=0 ;;
   esac
 
   echo "Setting up Agent CLI Farm..."
@@ -54,7 +62,7 @@ PY
   }
 
   find_python() {
-    local candidate
+    local candidate resolved resolved_dir
     for candidate in \
       "${CODEXFARM_PYTHON_BIN:-}" \
       python3 \
@@ -66,8 +74,17 @@ PY
     do
       [ -n "$candidate" ] || continue
       have_executable "$candidate" || continue
-      if python_is_supported "$candidate"; then
-        printf '%s\n' "$candidate"
+      resolved="$(command -v "$candidate" 2>/dev/null || true)"
+      [ -n "$resolved" ] || continue
+      case "$resolved" in
+        /*) ;;
+        *)
+          resolved_dir="$(cd "$(dirname "$resolved")" && pwd)" || continue
+          resolved="$resolved_dir/$(basename "$resolved")"
+          ;;
+      esac
+      if python_is_supported "$resolved"; then
+        printf '%s\n' "$resolved"
         return 0
       fi
     done
@@ -261,6 +278,21 @@ EOF
       rm -f "$HOME/bin/$legacy" && echo "Removed legacy command from $HOME/bin: $legacy"
     fi
   done
+
+  if [ "$install_session_hook" -eq 1 ]; then
+    local codex_hooks_file
+    codex_hooks_file="${CODEX_HOME:-$HOME/.codex}/hooks.json"
+    echo ""
+    echo "Installing Codex session-identity hook..."
+    "$setup_python" "$HOME/bin/codex-session-hook-install.py" \
+      --hooks-file "$codex_hooks_file" \
+      --hook-command "$HOME/bin/codex-session-hook.py" \
+      --python-command "$setup_python"
+    echo "Review and trust it with /hooks in Codex CLI."
+  else
+    echo ""
+    echo "Session hook installation skipped."
+  fi
 
   if [ "$install_deep_history" -eq 1 ]; then
     local deep_history_installer_args=()

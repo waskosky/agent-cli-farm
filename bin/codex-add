@@ -250,6 +250,11 @@ BOARD_SESSION="$(board_session_name "$SESSION" "$DEFAULT_SESSION")"
 DIR="${dir_arg:-$PWD}"
 NAME="$(get_env NAME "$(basename "$DIR")")"
 CMD="$(get_env CMD "$tool_name")"
+PANE_PROVIDER=""
+case "${CMD##*/}" in
+  codex|claude|gemini) PANE_PROVIDER="${CMD##*/}" ;;
+esac
+HOOK_PROVIDER="${PANE_PROVIDER:-$tool_name}"
 ARGS_ENV="$(get_env ARGS "")"
 LOCK_TITLES="$(get_env LOCK_TITLES 0)"
 ANNOTATOR_AUTOSTART="$(get_env ANNOTATOR_AUTOSTART 1)"
@@ -690,9 +695,27 @@ fi
 
 if [ "$SELECTED_HISTORY_BACKEND" = "deep-history" ]; then
   WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" \
+    -e "CODEXFARM_MANAGED=1" -e "CODEXFARM_PROVIDER=$HOOK_PROVIDER" \
+    -e "CODEXFARM_WINDOW_NAME=$NAME" \
     -e "TMUX_DEEP_HISTORY_PYTHON=$DEEP_HISTORY_PYTHON_BIN" "$WINDOW_CMDLINE")
 else
-  WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" "$WINDOW_CMDLINE")
+  WIN=$(tmux new-window -t "$SESSION" -P -F "#{window_index}" -n "$NAME" -c "$DIR" \
+    -e "CODEXFARM_MANAGED=1" -e "CODEXFARM_PROVIDER=$HOOK_PROVIDER" \
+    -e "CODEXFARM_WINDOW_NAME=$NAME" "$WINDOW_CMDLINE")
+fi
+
+identity_failed=0
+if ! tmux set-option -p -t "$SESSION:$WIN.0" @codexfarm_name "$NAME"; then
+  identity_failed=1
+fi
+if [ -n "$PANE_PROVIDER" ] \
+  && ! tmux set-option -p -t "$SESSION:$WIN.0" \
+    @codexfarm_provider "$PANE_PROVIDER"
+then
+  identity_failed=1
+fi
+if [ "$identity_failed" -eq 1 ]; then
+  echo "warning: unable to set stable pane identity for $SESSION:$WIN" >&2
 fi
 
 if remain_on_exit_enabled; then

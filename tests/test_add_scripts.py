@@ -146,6 +146,106 @@ esac
         ]
         self.assertEqual(title_lock_commands, [], f"Unexpected title locks: {commands}")
 
+    def test_codex_add_sets_stable_managed_pane_identity(self):
+        target_dir = self.tmpdir / "proj-stable-identity"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        env = self.env.copy()
+        env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
+        env["CODEX_NAME"] = "stable-api"
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "-d", str(target_dir)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = self.read_tmux_commands()
+        new_window = next(command for command in commands if command[0] == "new-window")
+        self.assertIn("CODEXFARM_MANAGED=1", new_window)
+        self.assertIn("CODEXFARM_PROVIDER=codex", new_window)
+        self.assertIn("CODEXFARM_WINDOW_NAME=stable-api", new_window)
+        self.assertIn(
+            [
+                "set-option",
+                "-p",
+                "-t",
+                "codexfarm:1.0",
+                "@codexfarm_name",
+                "stable-api",
+            ],
+            commands,
+        )
+        self.assertIn(
+            [
+                "set-option",
+                "-p",
+                "-t",
+                "codexfarm:1.0",
+                "@codexfarm_provider",
+                "codex",
+            ],
+            commands,
+        )
+
+    def test_codex_add_does_not_label_a_custom_command_as_a_provider(self):
+        target_dir = self.tmpdir / "proj-custom-command"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        make_executable(self.tmpdir / "custom-agent", "#!/usr/bin/env bash\nexit 0\n")
+        env = self.env.copy()
+        env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
+        env["CODEX_CMD"] = "custom-agent"
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "-d", str(target_dir)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = self.read_tmux_commands()
+        provider_options = [
+            command
+            for command in commands
+            if command and command[0] == "set-option" and "@codexfarm_provider" in command
+        ]
+        self.assertEqual(provider_options, [])
+
+    def test_codex_add_hook_environment_follows_an_explicit_provider_command(self):
+        target_dir = self.tmpdir / "proj-explicit-claude"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        env = self.env.copy()
+        env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
+        env["CODEX_CMD"] = "claude"
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-add", "-d", str(target_dir)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = self.read_tmux_commands()
+        new_window = next(command for command in commands if command[0] == "new-window")
+        self.assertIn("CODEXFARM_PROVIDER=claude", new_window)
+        self.assertIn(
+            [
+                "set-option",
+                "-p",
+                "-t",
+                "codexfarm:1.0",
+                "@codexfarm_provider",
+                "claude",
+            ],
+            commands,
+        )
+
     def test_codex_add_uses_unique_logs_for_same_name_and_second(self):
         target_dir = self.tmpdir / "same-name"
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -657,6 +757,10 @@ class SaveScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="save-script-test-"))
         self.manifest = self.tmpdir / "manifest.tsv"
+        self.hook_session_id = "123e4567-e89b-42d3-a456-426614174000"
+        self.second_codex_session_id = "123e4567-e89b-42d3-a456-426614174001"
+        self.second_claude_session_id = "123e4567-e89b-42d3-a456-426614174002"
+        self.second_gemini_session_id = "123e4567-e89b-42d3-a456-426614174003"
 
         codex_session_path = (
             "/home/test/.codex/sessions/2026/05/11/"
@@ -666,8 +770,16 @@ class SaveScriptTests(unittest.TestCase):
         self.custom_codex_session_path = codex_session_path.replace(
             "/home/test/.codex", "/srv/custom-codex-home"
         )
+        second_codex_session_path = (
+            "/home/test/.codex/sessions/2026/05/12/"
+            "rollout-2026-05-12T04-24-28-"
+            f"{self.second_codex_session_id}.jsonl"
+        )
         claude_session_path = (
             "/home/test/.claude/projects/-tmp-project/54f5b65c-a31c-4aa1-b91b-896b35e2a759.jsonl"
+        )
+        second_claude_session_path = (
+            f"/home/test/.claude/projects/-tmp-project/{self.second_claude_session_id}.jsonl"
         )
         gemini_session_path = (
             self.tmpdir
@@ -682,6 +794,18 @@ class SaveScriptTests(unittest.TestCase):
             '{"sessionId":"27bd36d0-2977-4cce-9d5d-33764d915f1d","projectHash":"project-hash"}\n',
             encoding="utf-8",
         )
+        second_gemini_session_path = (
+            self.tmpdir
+            / ".gemini"
+            / "tmp"
+            / "project-hash"
+            / "chats"
+            / "session-2026-05-12T04-24-28second.jsonl"
+        )
+        second_gemini_session_path.write_text(
+            (f'{{"sessionId":"{self.second_gemini_session_id}","projectHash":"project-hash"}}}}\n'),
+            encoding="utf-8",
+        )
         tmux_stub = """#!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
@@ -689,10 +813,41 @@ case "$1" in
     exit 0
     ;;
   list-windows)
-    printf '0\\n1\\n2\\n3\\n'
+    if [ "${MULTI_SESSION:-0}" = "1" ]; then
+      printf '0\\n1\\n2\\n3\\n4\\n5\\n6\\n'
+    else
+      printf '0\\n1\\n2\\n3\\n'
+    fi
     exit 0
     ;;
-      display-message)
+  show-options)
+    target=""
+    option=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) target="$2"; shift 2 ;;
+        -p|-v) shift ;;
+        *) option="$1"; shift ;;
+      esac
+    done
+    case "$target|$option" in
+      *:1.0'|@codexfarm_name')
+        [ -n "${STABLE_CODEX_NAME:-}" ] && printf '%s\\n' "$STABLE_CODEX_NAME"
+        ;;
+      *:1.0'|@codexfarm_provider')
+        [ -n "${PANE_PROVIDER:-}" ] && printf '%s\\n' "$PANE_PROVIDER"
+        ;;
+      *:1.0'|@codexfarm_session_id')
+        [ -n "${HOOK_SESSION_ID:-}" ] && printf '%s\\n' "$HOOK_SESSION_ID"
+        ;;
+      *:1.0'|@codexfarm_session_pid')
+        [ -n "${HOOK_SESSION_PID:-}" ] && printf '%s\\n' "$HOOK_SESSION_PID"
+        ;;
+      *) exit 1 ;;
+    esac
+    exit 0
+    ;;
+  display-message)
     target=""
     format=""
     while [ "$#" -gt 0 ]; do
@@ -713,7 +868,7 @@ case "$1" in
         ;;
       *:1.0'|#{pane_current_path}') printf '/tmp/project\\n' ;;
       *:1.0'|#{pane_start_command}')
-        if [ "${SHELL_STARTED_CODEX:-0}" = "1" ]; then
+        if [ "${METADATA_ONLY:-0}" = "1" ] || [ "${SHELL_STARTED_CODEX:-0}" = "1" ]; then
           printf '\\n'
         elif [ "${WRAPPED_CODEX_START:-0}" = "1" ]; then
           printf 'tmux set-window-option -q remain-on-exit on >/dev/null 2>&1 || true; exec codex\\n'
@@ -735,6 +890,22 @@ case "$1" in
       *:3.0'|#{pane_start_command}') printf 'gemini\\n' ;;
       *:3.0'|#{pane_current_command}') printf 'node\\n' ;;
       *:3.0'|#{pane_pid}') printf '300\\n' ;;
+      *:4'|#{window_name}') printf 'codex-second\\n' ;;
+      *:4.0'|#{pane_current_path}') printf '/tmp/codex-second\\n' ;;
+      *:4.0'|#{pane_start_command}') printf 'codex\\n' ;;
+      *:4.0'|#{pane_current_command}') printf 'node\\n' ;;
+      *:4.0'|#{pane_pid}') printf '400\\n' ;;
+      *:5'|#{window_name}') printf 'claude-second\\n' ;;
+      *:5.0'|#{pane_current_path}') printf '/tmp/claude-second\\n' ;;
+      *:5.0'|#{pane_start_command}') printf 'claude\\n' ;;
+      *:5.0'|#{pane_current_command}') printf 'node\\n' ;;
+      *:5.0'|#{pane_pid}') printf '500\\n' ;;
+      *:6'|#{window_name}') printf 'gemini-second\\n' ;;
+      *:6.0'|#{pane_current_path}') printf '/tmp/gemini-second\\n' ;;
+      *:6.0'|#{pane_start_command}') printf 'gemini\\n' ;;
+      *:6.0'|#{pane_current_command}') printf 'node\\n' ;;
+      *:6.0'|#{pane_pid}') printf '600\\n' ;;
+      *'.0|#{pane_dead}') printf '0\\n' ;;
       *) exit 1 ;;
     esac
     exit 0
@@ -752,6 +923,12 @@ elif [ "$1" = "-P" ] && [ "$2" = "200" ]; then
   printf '201\\n'
 elif [ "$1" = "-P" ] && [ "$2" = "300" ]; then
   printf '301\\n'
+elif [ "$1" = "-P" ] && [ "$2" = "400" ]; then
+  printf '401\\n'
+elif [ "$1" = "-P" ] && [ "$2" = "500" ]; then
+  printf '501\\n'
+elif [ "$1" = "-P" ] && [ "$2" = "600" ]; then
+  printf '601\\n'
 fi
 """
         lsof_stub = f"""#!/usr/bin/env bash
@@ -772,6 +949,18 @@ case "$3" in
     printf 'p301\\n'
     printf 'n{gemini_session_path}\\n'
     ;;
+  401)
+    printf 'p401\\n'
+    printf 'n{second_codex_session_path}\\n'
+    ;;
+  501)
+    printf 'p501\\n'
+    printf 'n{second_claude_session_path}\\n'
+    ;;
+  601)
+    printf 'p601\\n'
+    printf 'n{second_gemini_session_path}\\n'
+    ;;
 esac
 """
         make_executable(self.tmpdir / "tmux", tmux_stub)
@@ -790,14 +979,35 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-if [ "${SHELL_STARTED_CODEX:-0}" = "1" ]; then
-  case "$pid|$format" in
-    100'|comm=') printf 'bash\\n' ;;
-    100'|args=') printf 'bash\\n' ;;
-    101'|comm=') printf 'codex\\n' ;;
-    101'|args=') printf '/usr/local/bin/codex\\n' ;;
-  esac
+if [ "${METADATA_ONLY:-0}" = "1" ]; then
+  exit 0
 fi
+case "$pid|$format" in
+  100'|comm=') printf 'bash\\n' ;;
+  100'|args=') printf 'bash\\n' ;;
+  101'|comm=') printf 'node\\n' ;;
+  101'|args=') printf '/usr/bin/node /usr/local/bin/codex\\n' ;;
+  200'|comm=') printf 'bash\\n' ;;
+  200'|args=') printf 'bash\\n' ;;
+  201'|comm=') printf 'node\\n' ;;
+  201'|args=') printf '/usr/bin/node /usr/local/bin/claude\\n' ;;
+  300'|comm=') printf 'bash\\n' ;;
+  300'|args=') printf 'bash\\n' ;;
+  301'|comm=') printf 'node\\n' ;;
+  301'|args=') printf '/usr/bin/node /usr/local/bin/gemini\\n' ;;
+  400'|comm=') printf 'bash\\n' ;;
+  400'|args=') printf 'bash\\n' ;;
+  401'|comm=') printf 'node\\n' ;;
+  401'|args=') printf '/usr/bin/node /usr/local/bin/codex\\n' ;;
+  500'|comm=') printf 'bash\\n' ;;
+  500'|args=') printf 'bash\\n' ;;
+  501'|comm=') printf 'node\\n' ;;
+  501'|args=') printf '/usr/bin/node /usr/local/bin/claude\\n' ;;
+  600'|comm=') printf 'bash\\n' ;;
+  600'|args=') printf 'bash\\n' ;;
+  601'|comm=') printf 'node\\n' ;;
+  601'|args=') printf '/usr/bin/node /usr/local/bin/gemini\\n' ;;
+esac
 """,
         )
 
@@ -867,6 +1077,97 @@ fi
             rows,
         )
 
+    def test_codex_save_prefers_stable_name_and_provider_pane_options(self):
+        env = self.env.copy()
+        env["STACKED_WINDOW_NAME"] = "node"
+        env["STABLE_CODEX_NAME"] = "logical-codex-project"
+        env["PANE_PROVIDER"] = "codex"
+        env["METADATA_ONLY"] = "1"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        rows = self.manifest.read_text(encoding="utf-8").splitlines()
+        self.assertIn(
+            "logical-codex-project\t/tmp/project\tcodex\t"
+            "resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+            rows,
+        )
+        self.assertFalse(any(row.startswith("node\t") for row in rows))
+
+    def test_codex_save_prefers_fresh_hook_session_metadata(self):
+        env = self.env.copy()
+        env["HOOK_SESSION_ID"] = self.hook_session_id
+        env["HOOK_SESSION_PID"] = "101"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        rows = self.manifest.read_text(encoding="utf-8").splitlines()
+        self.assertIn(
+            f"proj\t/tmp/project\tcodex\tresume {self.hook_session_id}",
+            rows,
+        )
+        self.assertNotIn(
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+            rows,
+        )
+
+    def test_codex_save_ignores_hook_metadata_owned_by_a_stale_pid(self):
+        env = self.env.copy()
+        env["HOOK_SESSION_ID"] = self.hook_session_id
+        env["HOOK_SESSION_PID"] = "999"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        rows = self.manifest.read_text(encoding="utf-8").splitlines()
+        self.assertIn(
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+            rows,
+        )
+        self.assertNotIn(self.hook_session_id, "\n".join(rows))
+
+    def test_codex_save_records_two_distinct_sessions_for_each_provider(self):
+        env = self.env.copy()
+        env["MULTI_SESSION"] = "1"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        rows = self.manifest.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(rows), 7)
+        expected_args = {
+            "proj": "resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+            "codex-second": f"resume {self.second_codex_session_id}",
+            "claude-proj": "--resume 54f5b65c-a31c-4aa1-b91b-896b35e2a759",
+            "claude-second": f"--resume {self.second_claude_session_id}",
+            "gemini-proj": "--resume 27bd36d0-2977-4cce-9d5d-33764d915f1d",
+            "gemini-second": f"--resume {self.second_gemini_session_id}",
+        }
+        actual_args = {
+            fields[0]: fields[3] for row in rows[1:] if len(fields := row.split("\t")) == 4
+        }
+        self.assertEqual(actual_args, expected_args)
+        for first, second in (
+            ("proj", "codex-second"),
+            ("claude-proj", "claude-second"),
+            ("gemini-proj", "gemini-second"),
+        ):
+            self.assertNotEqual(actual_args[first], actual_args[second])
+
     def test_codex_save_rejects_extra_manifest_arguments(self):
         result = subprocess.run(
             [REPO_ROOT / "bin" / "codex-save", str(self.manifest), str(self.tmpdir / "other.tsv")],
@@ -919,13 +1220,37 @@ fi
         env["NO_CODEX_SESSION"] = "1"
 
         subprocess.run(
-            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+            [
+                REPO_ROOT / "bin" / "codex-save",
+                "--allow-fallback",
+                str(self.manifest),
+            ],
             check=True,
             env=env,
         )
 
         rows = self.manifest.read_text(encoding="utf-8").splitlines()
         self.assertIn("proj\t/tmp/project\tcodex\tresume --last", rows)
+
+    def test_codex_save_refuses_fallback_and_preserves_existing_manifest(self):
+        original = b"existing manifest must survive\n"
+        self.manifest.write_bytes(original)
+        env = self.env.copy()
+        env["NO_CODEX_SESSION"] = "1"
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.manifest.read_bytes(), original)
+        self.assertIn("exact codex session", result.stderr.lower())
+        self.assertIn("--allow-fallback", result.stderr)
+        self.assertNotIn(self.hook_session_id, result.stderr)
 
     def test_codex_save_all_registered_writes_each_registered_manifest(self):
         registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm" / "farms.tsv"
@@ -947,6 +1272,35 @@ fi
         self.assertIn(
             "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
             rows,
+        )
+
+    def test_codex_save_all_registered_propagates_allow_fallback(self):
+        registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm" / "farms.tsv"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        work_manifest = self.tmpdir / "work-fallback.tsv"
+        registry.write_text(
+            f"session\tmanifest\nwork\t{work_manifest}\n",
+            encoding="utf-8",
+        )
+        env = self.env.copy()
+        env["NO_CODEX_SESSION"] = "1"
+
+        result = subprocess.run(
+            [
+                REPO_ROOT / "bin" / "codex-save",
+                "--all-registered",
+                "--allow-fallback",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "proj\t/tmp/project\tcodex\tresume --last",
+            work_manifest.read_text(encoding="utf-8").splitlines(),
         )
 
 
@@ -982,6 +1336,28 @@ case "$1" in
     if [ -n "${TMUX_WINDOWS_OUTPUT:-}" ]; then
       printf '%s\n' "${TMUX_WINDOWS_OUTPUT}"
     fi
+    if [ -f "${TMUX_STATE_FILE}" ]; then
+      cat "${TMUX_STATE_FILE}"
+    fi
+    exit 0
+    ;;
+  show-options)
+    target=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) target="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$target" = "${TMUX_STABLE_TARGET:-}" ] && [ -n "${TMUX_STABLE_NAME:-}" ]; then
+      printf '%s\n' "$TMUX_STABLE_NAME"
+    fi
+    exit 0
+    ;;
+  kill-window)
+    if [ "${3:-}" = "${TMUX_KILL_FAIL_TARGET:-}" ]; then
+      exit 1
+    fi
     exit 0
     ;;
   *)
@@ -992,6 +1368,14 @@ esac
         codex_add_stub = """#!/usr/bin/env bash
 set -euo pipefail
 echo "$CODEX_NAME|$CODEX_CMD|$CODEX_ARGS|$*" >> "${CODEX_ADD_LOG}"
+count=0
+if [ -f "${TMUX_STATE_FILE}" ]; then
+  while IFS= read -r _line; do
+    count=$((count + 1))
+  done < "${TMUX_STATE_FILE}"
+fi
+count=$((count + 1))
+printf '@new%s\\t%s\\n' "$count" "$CODEX_NAME" >> "${TMUX_STATE_FILE}"
 exit 0
 """
         make_executable(self.tmpdir / "tmux", tmux_stub)
@@ -1006,6 +1390,7 @@ exit 0
         self.env = os.environ.copy()
         self.env["PATH"] = f"{self.tmpdir}:{self.env.get('PATH', '')}"
         self.env["TMUX_LOG"] = str(self.tmux_log)
+        self.env["TMUX_STATE_FILE"] = str(self.tmpdir / "tmux-state.tsv")
         self.env["CODEX_ADD_LOG"] = str(self.codex_add_log)
         self.env["CODEX_AUTOSERVICE_CHOICE"] = "no"
         self.env.pop("TMUX", None)
@@ -1017,7 +1402,41 @@ exit 0
         lines = self.tmux_log.read_text(encoding="utf-8").splitlines()
         return [line.split() for line in lines]
 
+    def write_duplicate_manifest(self) -> tuple[str, str]:
+        first_id = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"
+        second_id = "123e4567-e89b-42d3-a456-426614174001"
+        self.manifest.write_text(
+            "name\tdir\tcmd\targs\n"
+            f"dup\t{self.project_dir}\tcodex\tresume {first_id}\n"
+            f"dup\t{self.project_dir}\tcodex\tresume {second_id}\n",
+            encoding="utf-8",
+        )
+        return first_id, second_id
+
     def test_codex_restore_launches_saved_codex_resume_command(self):
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=self.env,
+        )
+
+        add_calls = (
+            self.codex_add_log.read_text(encoding="utf-8").splitlines()
+            if self.codex_add_log.exists()
+            else []
+        )
+        self.assertEqual(
+            add_calls,
+            [f"proj|codex|resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4|-d {self.project_dir}"],
+        )
+        self.assertFalse(
+            any(cmd and cmd[0] == "send-keys" for cmd in self.read_tmux_commands()),
+            "restore should launch the resume command instead of typing it into a running CLI",
+        )
+
+    def test_codex_restore_creates_every_fresh_duplicate_name_row(self):
+        first_id, second_id = self.write_duplicate_manifest()
+
         subprocess.run(
             [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
             check=True,
@@ -1027,12 +1446,148 @@ exit 0
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(
             add_calls,
-            [f"proj|codex|resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4|-d {self.project_dir}"],
+            [
+                f"dup|codex|resume {first_id}|-d {self.project_dir}",
+                f"dup|codex|resume {second_id}|-d {self.project_dir}",
+            ],
         )
-        self.assertFalse(
-            any(cmd and cmd[0] == "send-keys" for cmd in self.read_tmux_commands()),
-            "restore should launch the resume command instead of typing it into a running CLI",
+
+    def test_codex_restore_adds_only_missing_duplicate_occurrence(self):
+        _first_id, second_id = self.write_duplicate_manifest()
+        env = self.env.copy()
+        env["TMUX_WINDOWS_OUTPUT"] = "@9\tdup"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=env,
         )
+
+        add_calls = (
+            self.codex_add_log.read_text(encoding="utf-8").splitlines()
+            if self.codex_add_log.exists()
+            else []
+        )
+        self.assertEqual(
+            add_calls,
+            [f"dup|codex|resume {second_id}|-d {self.project_dir}"],
+        )
+
+    def test_codex_restore_is_idempotent_with_two_existing_duplicates(self):
+        self.write_duplicate_manifest()
+        env = self.env.copy()
+        env["TMUX_WINDOWS_OUTPUT"] = "@9\tdup\n@10\t*READY* dup"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        self.assertFalse(self.codex_add_log.exists())
+
+    def test_codex_restore_force_replaces_all_duplicate_occurrences_once(self):
+        self.write_duplicate_manifest()
+        env = self.env.copy()
+        env["TMUX_WINDOWS_OUTPUT"] = "@9\tdup\n@10\t*READY* dup"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", "--force", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        commands = self.read_tmux_commands()
+        killed = [command for command in commands if command[0] == "kill-window"]
+        self.assertEqual(
+            killed,
+            [["kill-window", "-t", "@9"], ["kill-window", "-t", "@10"]],
+        )
+        self.assertEqual(
+            len(self.codex_add_log.read_text(encoding="utf-8").splitlines()),
+            2,
+        )
+
+    def test_codex_restore_force_stops_if_an_existing_window_cannot_be_removed(self):
+        self.write_duplicate_manifest()
+        env = self.env.copy()
+        env["TMUX_WINDOWS_OUTPUT"] = "@9\tdup"
+        env["TMUX_KILL_FAIL_TARGET"] = "@9"
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", "--force", str(self.manifest)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertIn("Unable to remove existing window", result.stderr)
+
+    def test_codex_restore_seeds_exact_session_metadata_without_printing_id(self):
+        session_id = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = self.read_tmux_commands()
+        self.assertIn(
+            [
+                "set-option",
+                "-p",
+                "-t",
+                "@new1.0",
+                "@codexfarm_provider",
+                "codex",
+            ],
+            commands,
+        )
+        self.assertIn(
+            [
+                "set-option",
+                "-p",
+                "-t",
+                "@new1.0",
+                "@codexfarm_session_source",
+                "restore",
+            ],
+            commands,
+        )
+        self.assertIn(
+            [
+                "set-option",
+                "-p",
+                "-t",
+                "@new1.0",
+                "@codexfarm_session_id",
+                session_id,
+            ],
+            commands,
+        )
+        self.assertNotIn(session_id, result.stdout)
+        self.assertNotIn(session_id, result.stderr)
+
+    def test_codex_restore_matches_stable_pane_name_when_native_title_changes(self):
+        env = self.env.copy()
+        env["TMUX_WINDOWS_OUTPUT"] = "@9\tnode"
+        env["TMUX_STABLE_TARGET"] = "@9.0"
+        env["TMUX_STABLE_NAME"] = "proj"
+
+        subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            check=True,
+            env=env,
+        )
+
+        self.assertFalse(self.codex_add_log.exists())
 
     def test_codex_restore_requests_tab_delimited_window_fields(self):
         env = self.env.copy()
@@ -1088,6 +1643,36 @@ exit 0
 
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(add_calls, [f"proj|gemini|--resume latest|-d {self.project_dir}"])
+
+    def test_codex_restore_keeps_wrapper_provider_for_a_custom_command(self):
+        custom_agent = self.tmpdir / "custom-agent"
+        checking_add = self.tmpdir / "checking-add"
+        make_executable(custom_agent, "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(
+            checking_add,
+            """#!/usr/bin/env bash
+set -euo pipefail
+[ "${CODEX_TOOL_NAME}" = codex ]
+[ "${CODEX_CMD}" = "${EXPECTED_CUSTOM_COMMAND}" ]
+""",
+        )
+        self.manifest.write_text(
+            f"name\tdir\tcmd\targs\ncustom\t{self.project_dir}\t{custom_agent}\t--flag\n",
+            encoding="utf-8",
+        )
+        env = self.env.copy()
+        env["CODEX_ADD_BIN"] = str(checking_add)
+        env["EXPECTED_CUSTOM_COMMAND"] = str(custom_agent)
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_codex_restore_skips_existing_annotated_window_name(self):
         env = self.env.copy()

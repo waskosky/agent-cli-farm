@@ -2,13 +2,16 @@
 set -euo pipefail
 
 # Snapshot the current Codex tmux windows to a manifest file
-# Usage: codex-save [manifest-path]
+# Usage: codex-save [--allow-fallback] [manifest-path]
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--all-registered] [manifest-path]
+Usage: $(basename "$0") [--all-registered] [--allow-fallback] [manifest-path]
 
 Snapshot tmux farm windows to a trusted restore manifest.
+
+Recognized provider panes require an exact session ID by default. Use
+--allow-fallback to permit provider-specific latest-session resume commands.
 EOF
 }
 
@@ -67,6 +70,16 @@ extract_uuid_from_session_path() {
   if [[ "$base" =~ ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) ]]; then
     printf '%s' "${BASH_REMATCH[1]}"
   fi
+}
+
+valid_session_id() {
+  [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+}
+
+pane_option() {
+  local pane_target="$1"
+  local option="$2"
+  tmux show-options -p -v -t "$pane_target" "$option" 2>/dev/null || true
 }
 
 extract_session_id_from_metadata() {
@@ -291,34 +304,46 @@ provider_pid_from_process_tree() {
   printf '%s' "$fallback"
 }
 
-resume_args_for_pane() {
+session_id_for_pane() {
   local tool="$1"
-  local pane_pid="$2"
-  local provider_pid="${3:-}"
-  local session_id
+  local pane_target="$2"
+  local pane_pid="$3"
+  local provider_pid="${4:-}"
+  local pane_dead="${5:-0}"
+  local session_id metadata_pid
+
+  session_id="$(pane_option "$pane_target" @codexfarm_session_id)"
+  metadata_pid="$(pane_option "$pane_target" @codexfarm_session_pid)"
+  if valid_session_id "$session_id" \
+    && { [ "$pane_dead" = "1" ] \
+      || { [ -n "$provider_pid" ] && [ "$metadata_pid" = "$provider_pid" ]; }; }
+  then
+    printf '%s' "$session_id"
+    return 0
+  fi
+
   session_id="$(session_id_from_process_files "$tool" "$pane_pid" "$provider_pid" || true)"
+  if valid_session_id "$session_id"; then
+    printf '%s' "$session_id"
+    return 0
+  fi
+  return 1
+}
+
+exact_resume_args() {
+  local tool="$1"
+  local session_id="$2"
   case "$tool" in
-    codex)
-      if [ -n "$session_id" ]; then
-        printf 'resume %s' "$session_id"
-      else
-        printf 'resume --last'
-      fi
-      ;;
-    claude)
-      if [ -n "$session_id" ]; then
-        printf -- '--resume %s' "$session_id"
-      else
-        printf -- '--continue'
-      fi
-      ;;
-    gemini)
-      if [ -n "$session_id" ]; then
-        printf -- '--resume %s' "$session_id"
-      else
-        printf -- '--resume latest'
-      fi
-      ;;
+    codex) printf 'resume %s' "$session_id" ;;
+    claude|gemini) printf -- '--resume %s' "$session_id" ;;
+  esac
+}
+
+fallback_resume_args() {
+  case "$1" in
+    codex) printf 'resume --last' ;;
+    claude) printf -- '--continue' ;;
+    gemini) printf -- '--resume latest' ;;
   esac
 }
 
@@ -341,8 +366,12 @@ default_manifest_path_for_session() {
 
 save_all_registered() {
   local session manifest status count
+  local recursive_args=()
   status=0
   count=0
+  if [ "$allow_fallback" -eq 1 ]; then
+    recursive_args+=("--allow-fallback")
+  fi
   if [ ! -f "$AUTOSERVICE_REGISTRY" ]; then
     echo "No registered farms found at $AUTOSERVICE_REGISTRY"
     return 0
@@ -355,7 +384,7 @@ save_all_registered() {
     if [ -z "${manifest:-}" ]; then
       manifest="$(default_manifest_path_for_session "$session")"
     fi
-    if CODEX_SESSION="$session" "$0" "$manifest"; then
+    if CODEX_SESSION="$session" "$0" "${recursive_args[@]}" "$manifest"; then
       count=$((count + 1))
     else
       status=1
@@ -367,6 +396,7 @@ save_all_registered() {
 }
 
 all_registered=0
+allow_fallback=0
 args_pos=()
 while (( "$#" )); do
   case "${1:-}" in
@@ -376,6 +406,10 @@ while (( "$#" )); do
       ;;
     --all-registered)
       all_registered=1
+      shift
+      ;;
+    --allow-fallback)
+      allow_fallback=1
       shift
       ;;
     --)
@@ -431,20 +465,34 @@ chmod 600 "$tmpfile" 2>/dev/null || true
 trap 'rm -f "$tmpfile"' EXIT
 
 printf 'name\tdir\tcmd\targs\n' > "$tmpfile"
+unresolved_sessions=0
 
 # Collect windows, skipping the initial 'home' window if present
 while IFS=$'\n' read -r idx; do
+  pane_target="$SESSION:$idx.0"
   name=$(tmux display-message -p -t "$SESSION:$idx" '#{window_name}')
   name=$(strip_status_prefix "$name")
+  stable_name="$(pane_option "$pane_target" @codexfarm_name)"
+  if [ -n "$stable_name" ]; then
+    name="$stable_name"
+  fi
   [ "$name" = "home" ] && continue
   # Prefer the first pane's path
-  dir=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_current_path}')
+  dir=$(tmux display-message -p -t "$pane_target" '#{pane_current_path}')
   # Best-effort: starting command (often sh/bash for a long-lived pane)
-  cmd=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_start_command}')
-  current_cmd=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_current_command}')
-  pane_pid=$(tmux display-message -p -t "$SESSION:$idx.0" '#{pane_pid}')
+  cmd=$(tmux display-message -p -t "$pane_target" '#{pane_start_command}')
+  current_cmd=$(tmux display-message -p -t "$pane_target" '#{pane_current_command}')
+  pane_pid=$(tmux display-message -p -t "$pane_target" '#{pane_pid}')
+  pane_dead=$(tmux display-message -p -t "$pane_target" '#{pane_dead}' 2>/dev/null || true)
   args=
-  tool="$(tool_from_command "$cmd" || true)"
+  tool="$(pane_option "$pane_target" @codexfarm_provider)"
+  case "$tool" in
+    codex|claude|gemini) ;;
+    *) tool="" ;;
+  esac
+  if [ -z "$tool" ]; then
+    tool="$(tool_from_command "$cmd" || true)"
+  fi
   if [ -z "$tool" ]; then
     tool="$(tool_from_command "$current_cmd" || true)"
   fi
@@ -454,19 +502,23 @@ while IFS=$'\n' read -r idx; do
   provider_pid=""
   if [ -n "$tool" ]; then
     provider_pid="$(provider_pid_from_process_tree "$tool" "$pane_pid" || true)"
+    session_id="$(
+      session_id_for_pane \
+        "$tool" "$pane_target" "$pane_pid" "$provider_pid" "$pane_dead" || true
+    )"
   fi
   case "$tool" in
-    codex)
-      cmd="codex"
-      args="$(resume_args_for_pane "$tool" "$pane_pid" "$provider_pid")"
-      ;;
-    claude)
-      cmd="claude"
-      args="$(resume_args_for_pane "$tool" "$pane_pid" "$provider_pid")"
-      ;;
-    gemini)
-      cmd="gemini"
-      args="$(resume_args_for_pane "$tool" "$pane_pid" "$provider_pid")"
+    codex|claude|gemini)
+      cmd="$tool"
+      if [ -n "$session_id" ]; then
+        args="$(exact_resume_args "$tool" "$session_id")"
+      elif [ "$allow_fallback" -eq 1 ]; then
+        args="$(fallback_resume_args "$tool")"
+        echo "warning: using fallback resume for $tool window '$name'" >&2
+      else
+        unresolved_sessions=$((unresolved_sessions + 1))
+        echo "Unable to resolve exact $tool session for window '$name'." >&2
+      fi
       ;;
     *)
       cmd=$(trim_command_field "$cmd")
@@ -479,6 +531,11 @@ while IFS=$'\n' read -r idx; do
   args=${args//$'\t'/ }
   printf '%s\t%s\t%s\t%s\n' "$name" "$dir" "$cmd" "$args" >> "$tmpfile"
 done < <(tmux list-windows -t "$SESSION" -F '#{window_index}')
+
+if [ "$unresolved_sessions" -ne 0 ]; then
+  echo "Manifest was not replaced; rerun with --allow-fallback to permit latest-session resumes." >&2
+  exit 1
+fi
 
 mv "$tmpfile" "$MANIFEST_PATH"
 chmod 600 "$MANIFEST_PATH" 2>/dev/null || true
