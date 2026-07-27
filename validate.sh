@@ -111,6 +111,10 @@ check_static_behavior() {
     require_output "codex-board help" "Usage:" "$repo_root/bin/codex-board" --help
     require_output "codex-farm-reboot help" "Usage:" "$repo_root/bin/codex-farm-reboot" --help
     require_output "codex-doctor help" "Usage:" "$repo_root/bin/codex-doctor" --help
+    require_output "codex-save exact-session help" "allow-fallback" \
+        "$repo_root/bin/codex-save" --help
+    require_output "session hook installer help" "session-identity hook" \
+        python3 "$repo_root/bin/codex-session-hook-install.py" --help
     require_output "codex-status help" "Usage:" "$repo_root/bin/codex-status" --help
     require_output "codex-looper help" "Tiny coding-agent looper" "$repo_root/bin/codex-looper" --help
     require_output "codex-watch help" "Usage:" "$repo_root/bin/codex-watch" --help
@@ -143,7 +147,7 @@ check_static_behavior() {
 }
 
 run_live_tmux_checks() {
-    local mock_agent project manifest mode
+    local mock_agent project manifest mode stable_name provider_option
     if ! command -v tmux >/dev/null 2>&1; then
         echo "tmux not found; live validation cannot run" >&2
         exit 127
@@ -172,8 +176,16 @@ EOF
 
     tmux has-session -t "$main_session"
     tmux list-windows -t "$main_session" -F '#{window_name}' | grep -q "validate-test"
+    stable_name="$(tmux show-options -p -v -t "$main_session:validate-test.0" \
+      @codexfarm_name)"
+    [ "$stable_name" = "validate-test" ]
+    provider_option="$(
+      tmux show-options -p -v -t "$main_session:validate-test.0" \
+        @codexfarm_provider 2>/dev/null || true
+    )"
+    [ -z "$provider_option" ]
     CODEX_SESSION="$main_session" "$repo_root/bin/codex-status" sessions >/dev/null
-    echo "[OK] farm session, window, and status listing"
+    echo "[OK] farm session, stable pane identity, and status listing"
 
     CODEX_SESSION="$main_session" "$repo_root/bin/codex-board" create >/dev/null
     CODEX_SESSION="$main_session" "$repo_root/bin/codex-board" link >/dev/null

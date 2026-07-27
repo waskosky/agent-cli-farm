@@ -158,6 +158,21 @@ esac
         self.assertFalse(any("kill-session" in line for line in lines))
         self.assertFalse(any(line.startswith("restore ") for line in lines))
 
+    def test_allow_fallback_is_passed_only_to_the_save_step(self) -> None:
+        self.env["TMUX_EXISTING_SESSIONS"] = "codexfarm"
+
+        result = self.run_reboot("--allow-fallback", "--detach")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "save tool=codex session=codexfarm args=--allow-fallback",
+            self.log_lines(),
+        )
+        self.assertIn(
+            "restore tool=codex session=codexfarm args=",
+            self.log_lines(),
+        )
+
     def test_restore_failure_reports_recovery_command(self) -> None:
         self.env["TMUX_EXISTING_SESSIONS"] = "codexfarm board"
         self.env["RESTORE_EXIT"] = "8"
@@ -235,6 +250,7 @@ esac
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Usage: gemini-farm-reboot", result.stdout)
+        self.assertIn("--allow-fallback", result.stdout)
 
 
 if __name__ == "__main__":

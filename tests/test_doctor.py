@@ -148,6 +148,37 @@ esac
         self.assertIn("exact provider sessions: 0", result.stdout)
         self.assertIn("provider command(s) with invalid resume arguments", result.stdout)
 
+    def test_non_uuid_resume_value_is_not_counted_as_an_exact_session(self) -> None:
+        self.manifest.write_text(
+            "name\tdir\tcmd\targs\nproject\t/tmp/project\tcodex\tresume not-a-uuid\n",
+            encoding="utf-8",
+        )
+        self.manifest.chmod(0o600)
+
+        result = self.run_doctor(self.manifest)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("exact provider sessions: 0", result.stdout)
+        self.assertIn("provider command(s) with invalid resume arguments", result.stdout)
+
+    def test_duplicate_logical_names_are_reported_without_printing_ids(self) -> None:
+        second_id = "123e4567-e89b-42d3-a456-426614174001"
+        self.manifest.write_text(
+            "name\tdir\tcmd\targs\n"
+            f"project\t/tmp/project\tcodex\tresume {SESSION_ID}\n"
+            f"project\t/tmp/other\tcodex\tresume {second_id}\n",
+            encoding="utf-8",
+        )
+        self.manifest.chmod(0o600)
+
+        result = self.run_doctor(self.manifest)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("duplicate names: 1", result.stdout)
+        self.assertIn("duplicate logical name occurrence", result.stdout)
+        self.assertNotIn(SESSION_ID, result.stdout)
+        self.assertNotIn(second_id, result.stdout)
+
     def test_rejects_duplicate_session_arguments(self) -> None:
         result = subprocess.run(
             [DOCTOR_BIN, "--session", "one", "--session", "two", self.manifest],

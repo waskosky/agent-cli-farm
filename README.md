@@ -12,7 +12,8 @@ backward compatibility.
 - **Durable pane history**: Optional tmux-deep-history integration adds rotated raw/normalized transcripts, a seamless Page Up handoff beyond tmux's in-memory buffer, and compatible timestamped farm logs
 - **Unified monitoring**: Watch all agent instances from a single consolidated view
 - **Fast navigation**: Optional "board" session for quick switching between instances
-- **Snapshot/restore**: Save a manifest of windows and restore them later
+- **Exact snapshot/restore**: Save each provider conversation by ID and restore
+  every manifest row independently
 - **Status updates**: Tracks RUN/READY/ERR in tmux metadata and notifies when a window becomes READY
 - **Memory warnings**: Flag tmux windows whose pane process trees exceed a chosen RSS threshold
 - **Autosave/autorestore (optional)**: Systemd user services to persist sessions across logins
@@ -25,7 +26,8 @@ backward compatibility.
 - `tmux` for farm sessions, boards, status inspection, save/restore, and farm-launched loopers.
 - The selected provider executable on `PATH` (`codex`, `claude`, `gemini`, or a custom command).
 - Optional `multitail` for the richer `codex-watch` view. Without it, watch falls back to `tail`.
-- Optional `lsof` so save/restore can find exact live provider session files.
+- Optional `lsof` improves exact-session discovery for Claude, Gemini, and
+  Codex panes whose lifecycle hook has not run.
 - Git only for looper backup branches and git-progress circuit breakers.
 - Systemd user services only for autosave/autorestore.
 - Optional network access during `setup.sh --with-deep-history` to download the checksum-pinned plugin release.
@@ -36,8 +38,9 @@ backward compatibility.
 
 ### 1. One-time Setup
 
-Run the setup script to create helper scripts, install the pinned deep-history integration, and
-auto-reload your shell:
+Run the setup script to create helper scripts, install the Codex
+session-identity hook and pinned deep-history integration, and auto-reload your
+shell:
 
 ```bash
 source ./setup.sh --with-deep-history
@@ -46,6 +49,7 @@ source ./setup.sh --with-deep-history
 This will:
 - Report missing `tmux` and `multitail` commands without running package-manager installs
 - Create helper scripts in `$HOME/bin/`
+- Merge the session-identity hook into `${CODEX_HOME:-~/.codex}/hooks.json`
 - Set up logging directories
 - Add `$HOME/bin` to your PATH automatically (bash/zsh/fish) and the current session
 - Verify and install the pinned `tmux-deep-history` release under `$XDG_DATA_HOME/codexfarm/plugins/` (or `~/.local/share/codexfarm/plugins/`)
@@ -53,6 +57,21 @@ This will:
 If `tmux` is unavailable, core tmux commands will not work until you install it. If `multitail` is unavailable, `codex-watch` falls back to a simpler `tail` view.
 Omit `--with-deep-history` when you want the legacy flat-log backend only. Re-running the setup
 command is safe; the installed version can change only when this repository's reviewed lock changes.
+
+Codex requires review for non-managed command hooks. Open `/hooks` in Codex CLI
+after setup and trust the Agent CLI Farm hook. It receives the active Codex
+`session_id` on `SessionStart` and `UserPromptSubmit`, then records it as an
+invisible tmux pane option. Use `./setup.sh --without-session-hook` (or
+`CODEXFARM_INSTALL_SESSION_HOOK=0`) when you do not want setup to change the
+user hook file.
+
+To explicitly inspect the ID recorded for the current pane, run this inside that
+pane (the command intentionally prints the otherwise hidden conversation ID):
+
+```bash
+tmux show-options -p -v -t "$TMUX_PANE" @codexfarm_session_id
+tmux show-options -p -v -t "$TMUX_PANE" @codexfarm_session_source
+```
 
 Deep history is intentionally opt-in because terminal transcripts can contain commands, private
 paths, credentials, and other sensitive output. Once installed, the default `auto` backend starts
@@ -201,6 +220,9 @@ CODEX_SESSION=work codex-save
 # writes to ~/.config/codexfarm/manifests/work.tsv
 codex-save --all-registered
 # writes one manifest per farm registered for autoservice
+
+# Explicitly permit legacy latest-session fallbacks:
+codex-save --allow-fallback
 ```
 
 Restore them later (e.g., after reboot or on SSH login):
@@ -214,6 +236,7 @@ Reboot a running farm through the complete save, stop, and restore sequence:
 codex-farm-reboot              # reboot the default farm and attach
 codex-farm-reboot --detach     # restore without attaching
 codex-farm-reboot work         # reboot the named "work" farm
+codex-farm-reboot --allow-fallback --detach
 claude-farm-reboot --detach    # use Claude defaults for fallback restore commands
 gemini-farm-reboot --detach    # use Gemini defaults for fallback restore commands
 ```
@@ -225,7 +248,18 @@ board that is currently hosting the command. Checkpoint active agent work first 
 exact provider-session discovery is best-effort.
 
 Use `-f` to force re-creation of existing-named windows.
-Saved Codex, Claude, and Gemini windows restore with exact session IDs when `codex-save` can read the live session file from the pane's process tree. If the exact session is unavailable, restore falls back by tool: `codex resume --last`, `claude --continue`, or `gemini --resume latest`.
+Managed panes keep a stable logical name in tmux metadata even while a CLI
+changes its visible native title. Duplicate logical names are valid: restore
+matches the first manifest occurrence to the first existing window, the second
+to the second, and so on. Force restore removes all matching occurrences before
+recreating every row.
+
+Saved Codex, Claude, and Gemini windows require exact session IDs by default.
+Codex first uses fresh hook metadata owned by the pane's current provider
+process; all providers can fall back to live session-file discovery. If any
+recognized provider ID is unresolved, `codex-save` exits nonzero and leaves the
+previous manifest intact. `--allow-fallback` explicitly permits
+`codex resume --last`, `claude --continue`, or `gemini --resume latest`.
 Only pane 0 is saved. Split layouts and scrollback are not reconstructed. Missing saved directories fall back to `$HOME` with a warning.
 Manifests are written owner-only and via atomic replacement, but they are still trusted executable input because restore launches the recorded commands.
 
@@ -237,7 +271,10 @@ CODEX_SESSION=work codex-doctor
 codex-doctor --source /path/to/agent-cli-farm /path/to/manifest.tsv
 ```
 
-The doctor exits nonzero for stale or missing installed helpers, malformed or unsafe manifests, blank commands, and provider fallbacks that could resume the wrong conversation.
+The doctor exits nonzero for stale or missing installed helpers, malformed or
+unsafe manifests, blank commands, non-UUID or fallback provider resumes, and
+duplicate logical names. Duplicate names are supported by restore, but the
+warning makes them explicit before destructive force restores.
 
 If tmux sessions are already running (no manifest needed):
 ```bash
@@ -314,9 +351,9 @@ Tuning and controls:
 - **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
 - **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
 - **`codex-doctor [--session NAME] [--source DIR] [manifest]`** - Check installed-helper freshness and manifest resume coverage without displaying session IDs
-- **`codex-save [manifest]`** - Snapshot current windows to a manifest (TSV)
+- **`codex-save [--allow-fallback] [manifest]`** - Snapshot current windows to a manifest (TSV), requiring exact provider IDs by default
 - **`codex-restore [-a] [-f] [manifest]`** - Restore windows from a manifest
-- **`codex-farm-reboot [--detach] [session]`** - Safely save, stop, restore, and optionally attach to a farm
+- **`codex-farm-reboot [--detach] [--allow-fallback] [session]`** - Safely save, stop, restore, and optionally attach to a farm
 
 ### Claude and Gemini Wrappers
 
@@ -343,6 +380,7 @@ Common:
 - **`CODEX_ANNOTATOR_PYTHON_BIN`** - Python 3.10+ interpreter for `codex-annotator` (default searches `python3`, then versioned `python3.14` through `python3.10`)
 - **`CODEXFARM_PYTHON_BIN`** - Python 3.10+ interpreter to prefer during `./setup.sh`
 - **`CODEXFARM_WITH_DEEP_HISTORY`** - set to `1` as an alternative to `setup.sh --with-deep-history`
+- **`CODEXFARM_INSTALL_SESSION_HOOK`** - set to `0` to leave the Codex user hook file unchanged during setup
 - **`CODEXFARM_HISTORY_BACKEND`** - `auto` (default), `legacy`, or `deep-history`; auto uses the pinned plugin when installed and otherwise preserves legacy logging
 - **`CODEXFARM_DEEP_HISTORY_BIN`** - override the deep-history executable discovered under the XDG data directory
 - **`CODEXFARM_DEEP_HISTORY_PYTHON_BIN`** - override the Python 3.10+ interpreter used by deep-history hooks and loggers (default searches supported `python3` and versioned commands)
@@ -373,7 +411,8 @@ CODEX_CMD="cursor" CODEX_ARGS="--wait" codex-add /my/project
 Flags:
 - `codex-add -d`: start without attaching (useful in SSH automation)
 - `codex-restore -a`: attach after restoring; `-f` to replace same-named windows
-- `codex-farm-reboot -d`: save, stop, and restore without attaching
+- `codex-save --allow-fallback`: explicitly allow provider latest/continue resume commands
+- `codex-farm-reboot -d`: save, stop, and restore without attaching; add `--allow-fallback` only when exact identity cannot be recovered
 
 ## Advanced Usage
 
@@ -480,6 +519,8 @@ agent-cli-farm/
 │   ├── codex-doctor   # Diagnose installed-helper and manifest drift
 │   ├── codex-save     # Save manifest of windows
 │   ├── codex-restore  # Restore windows from manifest
+│   ├── codex-session-hook.py # Record active Codex IDs on managed tmux panes
+│   ├── codex-session-hook-install.py # Safely merge the user hook config
 │   ├── codex-farm-reboot # Save, stop, and restore a farm
 │   ├── codex-watch    # Monitor logs
 │   ├── codex-board    # Navigation helper
@@ -504,7 +545,11 @@ agent-cli-farm/
 - `tmux` survives client disconnects, but not host reboot or tmux-server exit unless autosave/autorestore recreates windows later.
 - Autosave/autorestore is systemd-user-only.
 - tmux provides one `pipe-pane` consumer per pane; the deep-history backend owns it and mirrors the stream rather than attaching a competing logger.
-- Manifest `cmd/args` are best-effort when saving from existing panes. Exact session IDs are captured from live processes when `lsof` can see the open session file: Codex under `~/.codex/sessions`, Claude under `~/.claude/projects`, and Gemini under a `.gemini/.../chats` directory. Missing IDs fall back to each tool's latest/continue behavior.
+- Existing panes created before the session hook was installed may need one
+  submitted Codex prompt before hook metadata appears. Save also inspects live
+  process file descriptors: Codex under `~/.codex/sessions`, Claude under
+  `~/.claude/projects`, and Gemini under a `.gemini/.../chats` directory.
+  Missing provider IDs stop save unless fallback behavior is explicitly enabled.
 - A single positional argument to `codex-add` is interpreted as a farm name when it does not look like a path. Use `--session NAME` to force farm selection when needed.
 - Gemini looper support is generic command execution, not a verified resumable protocol.
 

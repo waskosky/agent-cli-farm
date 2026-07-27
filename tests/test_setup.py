@@ -1,4 +1,6 @@
+import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -80,6 +82,65 @@ class SetupScriptTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--with-deep-history", result.stdout)
+        self.assertIn("--without-session-hook", result.stdout)
+
+    def test_installs_session_hook_and_preserves_unrelated_user_hooks(self) -> None:
+        (self.bin_dir / "python3").unlink()
+        (self.bin_dir / "python3").symlink_to(sys.executable)
+        make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(self.bin_dir / "multitail", "#!/usr/bin/env bash\nexit 0\n")
+        hooks_file = Path(self.env["HOME"]) / ".codex" / "hooks.json"
+        hooks_file.parent.mkdir(parents=True)
+        hooks_file.write_text(
+            json.dumps(
+                {
+                    "description": "preserve",
+                    "hooks": {
+                        "PostToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [{"type": "command", "command": "echo existing"}],
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        first = self.run_setup()
+        second = self.run_setup()
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        config = json.loads(hooks_file.read_text(encoding="utf-8"))
+        self.assertEqual(config["description"], "preserve")
+        self.assertIn("echo existing", json.dumps(config))
+        expected_hook = Path(self.env["HOME"]) / "bin" / "codex-session-hook.py"
+        commands = [
+            handler["command"]
+            for event in ("SessionStart", "UserPromptSubmit")
+            for group in config["hooks"][event]
+            for handler in group["hooks"]
+            if Path(shlex.split(handler["command"])[-1]).name == "codex-session-hook.py"
+        ]
+        expected_command = shlex.join([str(self.bin_dir / "python3"), str(expected_hook)])
+        self.assertEqual(commands, [expected_command, expected_command])
+        self.assertEqual(stat.S_IMODE(hooks_file.stat().st_mode), 0o600)
+        self.assertIn("Review and trust it with /hooks", first.stdout)
+
+    def test_without_session_hook_skips_user_config_change(self) -> None:
+        (self.bin_dir / "python3").unlink()
+        (self.bin_dir / "python3").symlink_to(sys.executable)
+        make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
+        make_executable(self.bin_dir / "multitail", "#!/usr/bin/env bash\nexit 0\n")
+        hooks_file = Path(self.env["HOME"]) / ".codex" / "hooks.json"
+
+        result = self.run_setup("--without-session-hook")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(hooks_file.exists())
+        self.assertIn("Session hook installation skipped", result.stdout)
 
     def test_sourced_setup_forwards_deep_history_flag(self) -> None:
         (self.bin_dir / "python3").unlink()
@@ -264,7 +325,10 @@ exit 98
         result = self.run_setup()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Using Python interpreter: python3.12", result.stdout)
+        self.assertIn(
+            f"Using Python interpreter: {self.bin_dir / 'python3.12'}",
+            result.stdout,
+        )
 
     def test_installed_python_wrappers_fall_back_to_versioned_python(self) -> None:
         make_fake_python(self.bin_dir / "python3", 3, 9)

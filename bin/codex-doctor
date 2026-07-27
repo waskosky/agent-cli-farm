@@ -116,7 +116,7 @@ check_installed_helpers() {
 check_manifest() {
   local manifest="$1"
   local header=""
-  local stats rows malformed blank exact fallback provider_invalid other
+  local stats rows malformed blank exact fallback provider_invalid other duplicates
   local mode=""
 
   if [ ! -f "$manifest" ]; then
@@ -136,10 +136,22 @@ check_manifest() {
   fi
 
   if ! stats="$(awk -F '\t' '
+    function valid_uuid(value, parts, count, part_index) {
+      count = split(value, parts, "-")
+      if (count != 5 || length(parts[1]) != 8 || length(parts[2]) != 4 \
+          || length(parts[3]) != 4 || length(parts[4]) != 4 \
+          || length(parts[5]) != 12) return 0
+      for (part_index = 1; part_index <= 5; part_index++) {
+        if (parts[part_index] ~ /[^0-9a-fA-F]/) return 0
+      }
+      return 1
+    }
     NR == 1 { next }
     {
       rows++
       if (NF != 4) malformed++
+      names[$1]++
+      if (names[$1] > 1) duplicates++
       cmd = $3
       args = $4
       if (cmd == "") {
@@ -148,21 +160,21 @@ check_manifest() {
         if (args == "resume --last") fallback++
         else {
           session_id = substr(args, 8)
-          if (index(args, "resume ") == 1 && session_id !~ /^--/ && session_id !~ /[[:space:]]/) exact++
+          if (index(args, "resume ") == 1 && valid_uuid(session_id)) exact++
           else provider_invalid++
         }
       } else if (cmd == "claude") {
         if (args == "--continue") fallback++
         else {
           session_id = substr(args, 10)
-          if (index(args, "--resume ") == 1 && session_id !~ /^-/ && session_id !~ /[[:space:]]/) exact++
+          if (index(args, "--resume ") == 1 && valid_uuid(session_id)) exact++
           else provider_invalid++
         }
       } else if (cmd == "gemini") {
         if (args == "--resume latest") fallback++
         else {
           session_id = substr(args, 10)
-          if (index(args, "--resume ") == 1 && session_id !~ /^-/ && session_id !~ /[[:space:]]/) exact++
+          if (index(args, "--resume ") == 1 && valid_uuid(session_id)) exact++
           else provider_invalid++
         }
       } else {
@@ -170,19 +182,19 @@ check_manifest() {
       }
     }
     END {
-      printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\n", \
+      printf "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", \
         rows + 0, malformed + 0, blank + 0, exact + 0, fallback + 0, \
-        provider_invalid + 0, other + 0
+        provider_invalid + 0, other + 0, duplicates + 0
     }
   ' "$manifest")"; then
     problem "unable to inspect manifest rows: $manifest"
     return
   fi
-  IFS=$'\t' read -r rows malformed blank exact fallback provider_invalid other <<EOF
+  IFS=$'\t' read -r rows malformed blank exact fallback provider_invalid other duplicates <<EOF
 $stats
 EOF
 
-  info "manifest rows: $rows; exact provider sessions: $exact; fallback: $fallback; blank commands: $blank; other commands: $other"
+  info "manifest rows: $rows; exact provider sessions: $exact; fallback: $fallback; blank commands: $blank; other commands: $other; duplicate names: $duplicates"
   if [ "$rows" -eq 0 ]; then
     warning "manifest contains no saved windows"
   fi
@@ -198,8 +210,12 @@ EOF
   if [ "$provider_invalid" -gt 0 ]; then
     problem "manifest contains $provider_invalid provider command(s) with invalid resume arguments"
   fi
+  if [ "$duplicates" -gt 0 ]; then
+    warning "manifest contains $duplicates duplicate logical name occurrence(s); restore matches them by occurrence"
+  fi
   if [ "$rows" -gt 0 ] && [ "$malformed" -eq 0 ] && [ "$blank" -eq 0 ] \
-    && [ "$fallback" -eq 0 ] && [ "$provider_invalid" -eq 0 ]; then
+    && [ "$fallback" -eq 0 ] && [ "$provider_invalid" -eq 0 ] \
+    && [ "$duplicates" -eq 0 ]; then
     ok "manifest resume data is healthy"
   fi
 

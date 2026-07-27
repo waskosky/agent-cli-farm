@@ -63,10 +63,10 @@ strip_status_prefix() {
   printf '%s' "$value"
 }
 
-existing_window_target() {
+existing_window_targets() {
   local session="$1"
   local wanted_name="$2"
-  local line target name base_name
+  local line target name base_name stable_name
 
   while IFS= read -r line; do
     [ -z "$line" ] && continue
@@ -77,14 +77,38 @@ existing_window_target() {
       target="$line"
       name="$line"
     fi
-    base_name="$(strip_status_prefix "$name")"
+    stable_name="$(
+      tmux show-options -p -v -t "$target.0" @codexfarm_name 2>/dev/null || true
+    )"
+    if [ -n "$stable_name" ]; then
+      base_name="$stable_name"
+    else
+      base_name="$(strip_status_prefix "$name")"
+    fi
     if [ "$base_name" = "$wanted_name" ]; then
+      printf '%s\n' "$target"
+    fi
+  done < <(tmux list-windows -t "$session" -F $'#{window_id}\t#{window_name}')
+}
+
+existing_window_target() {
+  local session="$1"
+  local wanted_name="$2"
+  local wanted_occurrence="${3:-1}"
+  local target count=0
+  while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    count=$((count + 1))
+    if [ "$count" -eq "$wanted_occurrence" ]; then
       printf '%s' "$target"
       return 0
     fi
-  done < <(tmux list-windows -t "$session" -F $'#{window_id}\t#{window_name}')
-
+  done < <(existing_window_targets "$session" "$wanted_name")
   return 1
+}
+
+valid_session_id() {
+  [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
 }
 
 tool_from_command() {
@@ -151,6 +175,44 @@ normalize_restore_command() {
   if [ -z "$RESTORE_ARGS" ]; then
     RESTORE_ARGS="${CODEX_ARGS:-}"
   fi
+}
+
+exact_session_id_from_restore() {
+  local command="$1"
+  local args="$2"
+  local values=()
+  read -r -a values <<< "$args"
+  [ "${#values[@]}" -eq 2 ] || return 1
+  case "$command:${values[0]}" in
+    codex:resume|claude:--resume|gemini:--resume) ;;
+    *) return 1 ;;
+  esac
+  valid_session_id "${values[1]}" || return 1
+  printf '%s' "${values[1]}"
+}
+
+next_name_occurrence() {
+  local wanted="$1"
+  local index
+  for index in "${!seen_names[@]}"; do
+    if [ "${seen_names[$index]}" = "$wanted" ]; then
+      seen_counts[$index]=$((seen_counts[$index] + 1))
+      window_occurrence="${seen_counts[$index]}"
+      return
+    fi
+  done
+  seen_names+=("$wanted")
+  seen_counts+=(1)
+  window_occurrence=1
+}
+
+name_was_seen() {
+  local wanted="$1"
+  local value
+  for value in "${force_names[@]}"; do
+    [ "$value" = "$wanted" ] && return 0
+  done
+  return 1
 }
 
 DEFAULT_SESSION="codexfarm"
@@ -279,27 +341,81 @@ fi
 # Ensure session exists
 tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
 
+force_names=()
+if [ "$force" -eq 1 ]; then
+  {
+    IFS= read -r _header || true
+    while IFS=$'\t' read -r name _dir _cmd _args || [ -n "${name:-}" ]; do
+      [ -n "${name:-}" ] || continue
+      if name_was_seen "$name"; then
+        continue
+      fi
+      force_names+=("$name")
+      while IFS= read -r existing_target; do
+        [ -n "$existing_target" ] || continue
+        if ! tmux kill-window -t "$existing_target"; then
+          echo "Unable to remove existing window '$name' during force restore." >&2
+          exit 1
+        fi
+      done < <(existing_window_targets "$SESSION" "$name")
+    done
+  } < "$MANIFEST_PATH"
+fi
+
 # Read manifest; skip header
-{ read -r _header || true; cat; } < "$MANIFEST_PATH" | while IFS=$'\t' read -r name dir cmd args || [ -n "${name:-}" ]; do
-  [ -z "${name:-}" ] && continue
-  restore_dir="${dir:-$HOME}"
-  if [ ! -d "$restore_dir" ]; then
-    echo "Warning: saved directory not found, using HOME: $restore_dir" >&2
-    restore_dir="$HOME"
-  fi
-  # Skip if window exists and not forcing
-  existing_target="$(existing_window_target "$SESSION" "$name" || true)"
-  if [ -n "$existing_target" ]; then
-    if [ "$force" -eq 1 ]; then
-      tmux kill-window -t "$existing_target" || true
-    else
-      echo "Skipping existing window: $name"
-      continue
+seen_names=()
+seen_counts=()
+{
+  IFS= read -r _header || true
+  while IFS=$'\t' read -r name dir cmd args || [ -n "${name:-}" ]; do
+    [ -z "${name:-}" ] && continue
+    next_name_occurrence "$name"
+    restore_dir="${dir:-$HOME}"
+    if [ ! -d "$restore_dir" ]; then
+      echo "Warning: saved directory not found, using HOME: $restore_dir" >&2
+      restore_dir="$HOME"
     fi
-  fi
-  normalize_restore_command "${cmd:-}" "${args:-}"
-  CODEX_NAME="$name" CODEX_CMD="$RESTORE_CMD" CODEX_ARGS="$RESTORE_ARGS" "$ADD_BIN" -d "$restore_dir"
-done
+    if [ "$force" -eq 0 ]; then
+      existing_target="$(
+        existing_window_target "$SESSION" "$name" "$window_occurrence" || true
+      )"
+      if [ -n "$existing_target" ]; then
+        echo "Skipping existing window: $name"
+        continue
+      fi
+    fi
+    normalize_restore_command "${cmd:-}" "${args:-}"
+    restore_provider="$tool_name"
+    case "$RESTORE_CMD" in
+      codex|claude|gemini) restore_provider="$RESTORE_CMD" ;;
+    esac
+    CODEX_TOOL_NAME="$restore_provider" \
+      CODEX_NAME="$name" \
+      CODEX_CMD="$RESTORE_CMD" \
+      CODEX_ARGS="$RESTORE_ARGS" \
+      "$ADD_BIN" -d "$restore_dir"
+
+    exact_session_id="$(
+      exact_session_id_from_restore "$RESTORE_CMD" "$RESTORE_ARGS" || true
+    )"
+    if [ -n "$exact_session_id" ]; then
+      created_target="$(
+        existing_window_target "$SESSION" "$name" "$window_occurrence" || true
+      )"
+      if [ -n "$created_target" ]; then
+        if ! tmux set-option -p -t "$created_target.0" \
+          @codexfarm_provider "$RESTORE_CMD" >/dev/null 2>&1 \
+          || ! tmux set-option -p -t "$created_target.0" \
+            @codexfarm_session_source restore >/dev/null 2>&1 \
+          || ! tmux set-option -p -t "$created_target.0" \
+            @codexfarm_session_id "$exact_session_id" >/dev/null 2>&1
+        then
+          echo "Warning: unable to seed exact session metadata for window: $name" >&2
+        fi
+      fi
+    fi
+  done
+} < "$MANIFEST_PATH"
 
 if [ "$attach" -eq 1 ]; then
   attach_to_session "$SESSION"
