@@ -58,6 +58,9 @@ esac
         self.env["XDG_STATE_HOME"] = str(self.tmpdir / "state")
         self.env["XDG_CONFIG_HOME"] = str(self.tmpdir / "config")
         self.env["HOME"] = str(self.tmpdir)
+        # Unit tests stub tmux and must not leave a real annotator daemon
+        # running after the short-lived codex-add process exits.
+        self.env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
 
     def read_tmux_commands(self) -> list[list[str]]:
         lines = self.tmux_log.read_text(encoding="utf-8").splitlines()

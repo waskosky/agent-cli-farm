@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import pty
+import select
 import stat
 import subprocess
 import sys
 import tempfile
+import termios
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -32,7 +36,11 @@ def build_archive(path: Path, *, unsafe_name: str | None = None) -> str:
             0o644,
         ),
         "tmux-deep-history/src/tmux_deep_history/cli.py": (
-            b"import sys\nprint('arguments=' + ' '.join(sys.argv[1:]))\n",
+            b"import os\n"
+            b"import sys\n"
+            b"import time\n"
+            b"time.sleep(float(os.environ.get('FAKE_DEEP_HISTORY_DELAY', '0')))\n"
+            b"print('arguments=' + ' '.join(sys.argv[1:]))\n",
             0o644,
         ),
     }
@@ -55,6 +63,25 @@ def write_lock(path: Path, digest: str) -> None:
 
 
 class DeepHistoryInstallerTests(unittest.TestCase):
+    @staticmethod
+    def read_pty(master_fd: int, *, timeout: float, until: bytes | None = None) -> bytes:
+        deadline = time.monotonic() + timeout
+        output = bytearray()
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([master_fd], [], [], 0.05)
+            if not readable:
+                continue
+            try:
+                chunk = os.read(master_fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output.extend(chunk)
+            if until is not None and until in output:
+                break
+        return bytes(output)
+
     def run_installer(
         self, *, archive: Path, lock: Path, destination: Path
     ) -> subprocess.CompletedProcess[str]:
@@ -150,6 +177,54 @@ class DeepHistoryInstallerTests(unittest.TestCase):
             self.assertEqual(
                 selected.read_text(encoding="utf-8").strip(), str(fake_bin / "python3.12")
             )
+
+    def test_interactive_view_is_visibly_read_only_while_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "release.zip"
+            lock = root / "release.lock"
+            destination = root / "data" / "tmux-deep-history"
+            write_lock(lock, build_archive(archive))
+
+            result = self.run_installer(archive=archive, lock=lock, destination=destination)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            master_fd, slave_fd = pty.openpty()
+            original_tty = termios.tcgetattr(slave_fd)
+            env = os.environ.copy()
+            env["FAKE_DEEP_HISTORY_DELAY"] = "1"
+            process = subprocess.Popen(
+                [destination / "bin" / "tmux-deep-history", "view", "--target", "%1"],
+                env=env,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+            )
+            try:
+                initial_output = self.read_pty(
+                    master_fd,
+                    timeout=5,
+                    until=b"Page Up/Page Down scroll once loaded; q closes.",
+                )
+                self.assertIn(b"Loading deep history (read-only)", initial_output)
+                self.assertFalse(termios.tcgetattr(slave_fd)[3] & termios.ECHO)
+
+                os.write(master_fd, b"\x1b[5~")
+                process.wait(timeout=5)
+                final_output = self.read_pty(master_fd, timeout=0.2)
+                output = initial_output + final_output
+
+                self.assertIn(b"arguments=view --target %1", output)
+                self.assertNotIn(b"^[[5~", output)
+                self.assertNotIn(b"\x1b[5~", output)
+                self.assertEqual(termios.tcgetattr(slave_fd), original_tty)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+                os.close(master_fd)
+                os.close(slave_fd)
 
     def test_checksum_failure_preserves_previous_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
