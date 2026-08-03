@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 
 PROJECT_NAME = "tmux-deep-history"
 LAUNCHER_NAME = "tmux_deep_history_launcher.sh"
+PAGER_HELPER_NAME = ".codexfarm-deep-history-pager.py"
 LOCK_KEYS = {"repository", "version", "sha256"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+){2}(?:[-+][A-Za-z0-9.-]+)?$")
@@ -129,6 +130,7 @@ def install_release(
     destination: Path,
     archive_path: Path | None = None,
     launcher_path: Path | None = None,
+    pager_helper_path: Path | None = None,
 ) -> tuple[Path, str]:
     lock = read_lock(lock_path)
     destination = Path(os.path.abspath(os.fspath(destination.expanduser())))
@@ -177,6 +179,9 @@ def install_release(
         launcher = launcher_path or Path(__file__).resolve().with_name(LAUNCHER_NAME)
         if not launcher.is_file():
             raise InstallError(f"deep-history compatibility launcher is missing: {launcher}")
+        pager_helper = pager_helper_path or Path(__file__).resolve().with_name(PAGER_HELPER_NAME)
+        if not pager_helper.is_file():
+            raise InstallError(f"deep-history pager helper is missing: {pager_helper}")
         upstream_cli = required[1].with_name(f"{PROJECT_NAME}-upstream")
         try:
             os.replace(required[1], upstream_cli)
@@ -185,6 +190,9 @@ def install_release(
             configured_python = required[1].with_name(".codexfarm-python")
             configured_python.write_text(f"{Path(sys.executable).resolve()}\n", encoding="utf-8")
             configured_python.chmod(0o600)
+            installed_pager_helper = required[1].with_name(PAGER_HELPER_NAME)
+            shutil.copyfile(pager_helper, installed_pager_helper)
+            installed_pager_helper.chmod(0o700)
         except OSError as exc:
             raise InstallError(
                 f"unable to install deep-history compatibility launcher: {exc}"
