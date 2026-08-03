@@ -4,13 +4,11 @@ set -euo pipefail
 launcher_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 plugin_root="$(cd -- "$launcher_dir/.." && pwd)"
 viewer_tty_state=""
-viewer_tty_muted=0
 interactive_view=0
 
 restore_viewer_tty() {
-    if [[ "$viewer_tty_muted" -eq 1 && -n "$viewer_tty_state" ]]; then
+    if [[ -n "$viewer_tty_state" ]]; then
         stty "$viewer_tty_state" 2>/dev/null || true
-        viewer_tty_muted=0
     fi
 }
 
@@ -24,12 +22,16 @@ if [[ "${1:-}" == "view" && -t 0 && -t 1 ]]; then
     interactive_view=1
     viewer_tty_state="$(stty -g 2>/dev/null || true)"
     if [[ -n "$viewer_tty_state" ]] && stty -echo 2>/dev/null; then
-        viewer_tty_muted=1
         trap restore_viewer_tty EXIT
     fi
     printf '\033[2J\033[H%s\r\n%s\r\n' \
         'Loading deep history (read-only)...' \
-        'Page Up/Page Down scroll once loaded; q closes.'
+        'Page Up/Page Down scroll once loaded; Esc/q closes.'
+fi
+
+viewer_pager="$launcher_dir/.codexfarm-deep-history-pager.py"
+if [[ "$interactive_view" -eq 1 && -r "$viewer_pager" ]]; then
+    export CODEXFARM_DEEP_HISTORY_PAGER="$viewer_pager"
 fi
 
 configured_python=""
@@ -84,6 +86,7 @@ fi
 # compatibility layer.
 python_program='
 import runpy
+import os
 import shlex
 import sys
 import time
@@ -99,6 +102,30 @@ if sys.version_info < (3, 10):
 from tmux_deep_history.tmux import PaneInfo
 from tmux_deep_history.tmux import Tmux
 from tmux_deep_history.tmux import TmuxError
+
+# Apple builds some versions of less without custom keymap support. Wrap less
+# in a private PTY adapter which recognizes a standalone Escape key while
+# forwarding Page Up and every other terminal escape sequence unchanged.
+_viewer_pager = os.environ.get("CODEXFARM_DEEP_HISTORY_PAGER", "")
+if _viewer_pager and Path(_viewer_pager).is_file():
+    import tmux_deep_history.service as _service_module
+
+    _real_subprocess = _service_module.subprocess
+
+    class _ViewerSubprocessProxy:
+        def __getattr__(self, name):
+            return getattr(_real_subprocess, name)
+
+        def run(self, command, *arguments, **options):
+            try:
+                program = Path(os.fspath(command[0])).name
+            except (IndexError, TypeError, ValueError):
+                program = ""
+            if program == "less":
+                command = [sys.executable, _viewer_pager, "--", *command]
+            return _real_subprocess.run(command, *arguments, **options)
+
+    _service_module.subprocess = _ViewerSubprocessProxy()
 
 _start_pipe = Tmux.start_pipe
 _bind = Tmux.bind
@@ -284,9 +311,14 @@ if [[ "$interactive_view" -eq 1 ]]; then
     restore_viewer_tty
     trap - EXIT
     if [[ "$command_status" -ne 0 ]]; then
-        printf '\r\nDeep-history viewer failed (exit %s). Press Enter to close.\r\n' \
+        printf '\r\nDeep-history viewer failed (exit %s). Press Enter or Escape to close.\r\n' \
             "$command_status" >&2
-        IFS= read -r _ || true
+        while IFS= read -r -n 1 close_key; do
+            if [[ -z "$close_key" || "$close_key" == $'\e' ]]; then
+                break
+            fi
+        done
+        restore_viewer_tty
     fi
     exit "$command_status"
 fi

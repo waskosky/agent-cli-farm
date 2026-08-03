@@ -4,6 +4,7 @@ import hashlib
 import os
 import pty
 import select
+import shutil
 import stat
 import subprocess
 import sys
@@ -39,13 +40,29 @@ def build_archive(path: Path, *, unsafe_name: str | None = None) -> str:
         ),
         "tmux-deep-history/src/tmux_deep_history/cli.py": (
             b"import os\n"
+            b"import subprocess\n"
             b"import sys\n"
             b"import time\n"
             b"time.sleep(float(os.environ.get('FAKE_DEEP_HISTORY_DELAY', '0')))\n"
             b"if os.environ.get('FAKE_DEEP_HISTORY_EXIT'):\n"
             b"    print('fake deep-history failure', file=sys.stderr)\n"
             b"    raise SystemExit(int(os.environ['FAKE_DEEP_HISTORY_EXIT']))\n"
+            b"if os.environ.get('FAKE_DEEP_HISTORY_PAGER_FILE'):\n"
+            b"    from tmux_deep_history.service import run_pager\n"
+            b"    raise SystemExit(run_pager(os.environ['FAKE_DEEP_HISTORY_PAGER_FILE']))\n"
             b"print('arguments=' + ' '.join(sys.argv[1:]))\n",
+            0o644,
+        ),
+        "tmux-deep-history/src/tmux_deep_history/service.py": (
+            b"import os\n"
+            b"import subprocess\n"
+            b"class DeepHistory:\n"
+            b"    def _popup_shell(self, *arguments):\n"
+            b"        return ' '.join(arguments)\n"
+            b"def run_pager(path):\n"
+            b"    environment = dict(os.environ)\n"
+            b"    environment['LESSSECURE'] = '1'\n"
+            b"    return subprocess.run(['less', '-R', '-N', path], env=environment).returncode\n",
             0o644,
         ),
     }
@@ -68,6 +85,12 @@ def write_lock(path: Path, digest: str) -> None:
 
 
 class DeepHistoryInstallerTests(unittest.TestCase):
+    @staticmethod
+    def without_pending_input_flag(attributes: list[object]) -> list[object]:
+        normalized = list(attributes)
+        normalized[3] = int(normalized[3]) & ~getattr(termios, "PENDIN", 0)
+        return normalized
+
     @staticmethod
     def read_pty(master_fd: int, *, timeout: float, until: bytes | None = None) -> bytes:
         deadline = time.monotonic() + timeout
@@ -126,6 +149,9 @@ class DeepHistoryInstallerTests(unittest.TestCase):
                 str(Path(sys.executable).resolve()),
             )
             self.assertEqual(configured_python.stat().st_mode & 0o777, 0o600)
+            pager_helper = destination / "bin" / ".codexfarm-deep-history-pager.py"
+            self.assertIn("standalone Escape", pager_helper.read_text(encoding="utf-8"))
+            self.assertEqual(pager_helper.stat().st_mode & 0o777, 0o700)
             launched = subprocess.run(
                 [cli, "status"],
                 text=True,
@@ -219,7 +245,7 @@ class DeepHistoryInstallerTests(unittest.TestCase):
                 initial_output = self.read_pty(
                     master_fd,
                     timeout=5,
-                    until=b"Page Up/Page Down scroll once loaded; q closes.",
+                    until=b"Page Up/Page Down scroll once loaded; Esc/q closes.",
                 )
                 self.assertIn(b"Loading deep history (read-only)", initial_output)
                 self.assertFalse(termios.tcgetattr(slave_fd)[3] & termios.ECHO)
@@ -240,7 +266,7 @@ class DeepHistoryInstallerTests(unittest.TestCase):
                 os.close(master_fd)
                 os.close(slave_fd)
 
-    def test_interactive_view_failure_stays_visible_until_enter(self) -> None:
+    def test_interactive_view_failure_stays_visible_until_escape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archive = root / "release.zip"
@@ -267,15 +293,87 @@ class DeepHistoryInstallerTests(unittest.TestCase):
                 output = self.read_pty(
                     master_fd,
                     timeout=5,
-                    until=b"Press Enter to close.",
+                    until=b"Press Enter or Escape to close.",
                 )
                 self.assertIn(b"fake deep-history failure", output)
                 self.assertIn(b"Deep-history viewer failed (exit 7)", output)
                 self.assertIsNone(process.poll())
-                self.assertEqual(termios.tcgetattr(slave_fd), original_tty)
 
-                os.write(master_fd, b"\n")
+                os.write(master_fd, b"\x1b")
+                self.read_pty(master_fd, timeout=0.5)
                 self.assertEqual(process.wait(timeout=5), 7)
+                self.assertEqual(
+                    self.without_pending_input_flag(termios.tcgetattr(slave_fd)),
+                    self.without_pending_input_flag(original_tty),
+                )
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+                os.close(master_fd)
+                os.close(slave_fd)
+
+    @unittest.skipUnless(shutil.which("less"), "less is not installed")
+    def test_escape_closes_less_without_breaking_page_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "release.zip"
+            lock = root / "release.lock"
+            destination = root / "data" / "tmux-deep-history"
+            transcript = root / "history.log"
+            transcript.write_text(
+                "".join(f"history line {line:03d}\n" for line in range(1, 201)),
+                encoding="utf-8",
+            )
+            write_lock(lock, build_archive(archive))
+
+            result = self.run_installer(archive=archive, lock=lock, destination=destination)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            master_fd, slave_fd = pty.openpty()
+            original_tty = termios.tcgetattr(slave_fd)
+            env = os.environ.copy()
+            env.pop("LESS", None)
+            env["TERM"] = "xterm-256color"
+            env["FAKE_DEEP_HISTORY_PAGER_FILE"] = str(transcript)
+
+            process = subprocess.Popen(
+                [destination / "bin" / "tmux-deep-history", "view", "--older"],
+                env=env,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+            )
+            try:
+                output = self.read_pty(
+                    master_fd,
+                    timeout=5,
+                    until=b"history line 001",
+                )
+                self.assertIn(b"history line 001", output)
+                self.assertIsNone(process.poll())
+
+                os.write(master_fd, b"\x1b")
+                time.sleep(0.02)
+                os.write(master_fd, b"[6~")
+                page_down_output = self.read_pty(master_fd, timeout=0.5)
+                self.assertIn(b"history line 024", page_down_output)
+                self.assertNotIn(b"^[[6~", page_down_output)
+                self.assertIsNone(process.poll())
+                os.write(master_fd, b"\x1b[5~")
+                page_up_output = self.read_pty(master_fd, timeout=0.5)
+                self.assertIn(b"history line 001", page_up_output)
+                self.assertNotIn(b"^[[5~", page_up_output)
+                self.assertIsNone(process.poll())
+
+                os.write(master_fd, b"\x1b")
+                self.read_pty(master_fd, timeout=1)
+                self.assertEqual(process.wait(timeout=5), 0)
+                self.assertEqual(
+                    self.without_pending_input_flag(termios.tcgetattr(slave_fd)),
+                    self.without_pending_input_flag(original_tty),
+                )
             finally:
                 if process.poll() is None:
                     process.terminate()
