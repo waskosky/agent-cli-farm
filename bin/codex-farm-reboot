@@ -169,13 +169,15 @@ if tmux has-session -t "$BOARD_SESSION" 2>/dev/null; then
 fi
 
 printf 'Saving farm %s...\n' "$SESSION"
-save_args=()
-if [ "$allow_fallback" -eq 1 ]; then
-  save_args+=("--allow-fallback")
-fi
-if ! CODEX_TOOL_NAME="$tool_name" CODEX_SESSION="$SESSION" \
-  "$SAVE_BIN" "${save_args[@]}"
-then
+save_farm() {
+  if [ "$allow_fallback" -eq 1 ]; then
+    CODEX_TOOL_NAME="$tool_name" CODEX_SESSION="$SESSION" \
+      "$SAVE_BIN" --allow-fallback
+  else
+    CODEX_TOOL_NAME="$tool_name" CODEX_SESSION="$SESSION" "$SAVE_BIN"
+  fi
+}
+if ! save_farm; then
   echo "Save failed; farm '$SESSION' was not stopped." >&2
   exit 1
 fi
