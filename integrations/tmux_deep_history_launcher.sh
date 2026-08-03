@@ -3,6 +3,33 @@ set -euo pipefail
 
 launcher_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 plugin_root="$(cd -- "$launcher_dir/.." && pwd)"
+viewer_tty_state=""
+viewer_tty_muted=0
+
+restore_viewer_tty() {
+    if [[ "$viewer_tty_muted" -eq 1 && -n "$viewer_tty_state" ]]; then
+        stty "$viewer_tty_state" 2>/dev/null || true
+        viewer_tty_muted=0
+    fi
+}
+
+# The plugin assembles a temporary transcript before starting less. On a busy
+# host, that can leave an apparently empty popup for a few seconds. Terminal
+# echo is still enabled during that startup window, so navigation keys such as
+# Page Up are otherwise rendered as literal escape sequences. Make the
+# read-only nature of the popup clear immediately and suppress that echo until
+# the pager takes control of the terminal.
+if [[ "${1:-}" == "view" && -t 0 && -t 1 ]]; then
+    viewer_tty_state="$(stty -g 2>/dev/null || true)"
+    if [[ -n "$viewer_tty_state" ]] && stty -echo 2>/dev/null; then
+        viewer_tty_muted=1
+        trap restore_viewer_tty EXIT
+    fi
+    printf '\033[2J\033[H%s\r\n%s\r\n' \
+        'Loading deep history (read-only)...' \
+        'Page Up/Page Down scroll once loaded; q closes.'
+fi
+
 configured_python=""
 if [[ -r "$launcher_dir/.codexfarm-python" ]]; then
     IFS= read -r configured_python < "$launcher_dir/.codexfarm-python" || configured_python=""
@@ -53,7 +80,7 @@ fi
 # launcher performs a separate version probe first, which can exceed the
 # logger's 1.5-second readiness deadline on macOS when repeated through this
 # compatibility layer.
-exec "$resolved" -c '
+python_program='
 import runpy
 import shlex
 import sys
@@ -194,4 +221,13 @@ Tmux.server_identity = _server_identity_batched
 Tmux.start_pipe = _start_pipe_after_tmux_settles
 sys.argv[0] = "tmux-deep-history"
 runpy.run_module("tmux_deep_history.cli", run_name="__main__")
-' "$@"
+'
+python_arguments=(-c "$python_program" "$@")
+if [[ "$viewer_tty_muted" -eq 1 ]]; then
+    command_status=0
+    "$resolved" "${python_arguments[@]}" || command_status=$?
+    restore_viewer_tty
+    trap - EXIT
+    exit "$command_status"
+fi
+exec "$resolved" "${python_arguments[@]}"
