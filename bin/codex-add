@@ -571,7 +571,7 @@ configure_history_backend() {
   deep_root="$(cd "$(dirname "$DEEP_HISTORY_BIN")/.." && pwd)"
   installed_root="$(tmux show-options -gqv '@deep-history-root' 2>/dev/null || true)"
   # Bump this marker whenever farm-managed plugin bindings/options change.
-  desired_integration="2:$DEEP_HISTORY_SEAMLESS_PAGEUP"
+  desired_integration="3:$DEEP_HISTORY_SEAMLESS_PAGEUP"
   installed_integration="$(tmux show-options -gqv '@codexfarm-deep-history-integration' 2>/dev/null || true)"
   if [ "$installed_root" != "$deep_root" ] || [ "$installed_integration" != "$desired_integration" ]; then
     if ! install_error=$(TMUX_DEEP_HISTORY_PYTHON="$DEEP_HISTORY_PYTHON_BIN" \

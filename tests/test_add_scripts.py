@@ -409,6 +409,12 @@ esac
                 "@deep-history-seamless-pageup on" in " ".join(command) for command in tmux_commands
             )
         )
+        self.assertTrue(
+            any(
+                "@codexfarm-deep-history-integration 3:on" in " ".join(command)
+                for command in tmux_commands
+            )
+        )
         deep_commands = []
         for _ in range(100):
             deep_commands = deep_history_log.read_text(encoding="utf-8").splitlines()
