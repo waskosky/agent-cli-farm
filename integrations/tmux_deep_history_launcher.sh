@@ -5,6 +5,7 @@ launcher_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 plugin_root="$(cd -- "$launcher_dir/.." && pwd)"
 viewer_tty_state=""
 viewer_tty_muted=0
+interactive_view=0
 
 restore_viewer_tty() {
     if [[ "$viewer_tty_muted" -eq 1 && -n "$viewer_tty_state" ]]; then
@@ -20,6 +21,7 @@ restore_viewer_tty() {
 # read-only nature of the popup clear immediately and suppress that echo until
 # the pager takes control of the terminal.
 if [[ "${1:-}" == "view" && -t 0 && -t 1 ]]; then
+    interactive_view=1
     viewer_tty_state="$(stty -g 2>/dev/null || true)"
     if [[ -n "$viewer_tty_state" ]] && stty -echo 2>/dev/null; then
         viewer_tty_muted=1
@@ -99,6 +101,7 @@ from tmux_deep_history.tmux import Tmux
 from tmux_deep_history.tmux import TmuxError
 
 _start_pipe = Tmux.start_pipe
+_bind = Tmux.bind
 
 
 def _show_global_option_batched(self, name, default=""):
@@ -215,19 +218,76 @@ def _start_pipe_after_tmux_settles(self, target, command, *, only_if_none=True):
         time.sleep(0.025)
 
 
+def _bind_with_live_history_boundary(self, *arguments):
+    # While a pane keeps producing output, tmux can report a copy-mode
+    # scroll_position greater than the current history_size at the absolute
+    # top. Equality then makes Page Up miss the disk-history handoff until the
+    # user exits and re-enters copy mode.
+    boundary = "#{==:#{scroll_position},#{history_size}}"
+    live_boundary = "#{>=:#{scroll_position},#{history_size}}"
+    normalized = tuple(live_boundary if argument == boundary else argument for argument in arguments)
+    _bind(self, *normalized)
+
+
+# tmux does not expand #{pane_id} inside a popup shell command. Omit that
+# generated target during installation so the CLI uses the popup process
+# TMUX_PANE value, which tmux sets to the pane that opened the popup.
+if len(sys.argv) > 1 and sys.argv[1] == "install":
+    from tmux_deep_history.service import DeepHistory
+
+    _popup_shell = DeepHistory._popup_shell
+
+    def _popup_shell_with_current_pane(self, *arguments):
+        normalized = []
+        index = 0
+        while index < len(arguments):
+            if (
+                arguments[index] == "--target"
+                and index + 1 < len(arguments)
+                and arguments[index + 1] == "#{pane_id}"
+            ):
+                index += 2
+                continue
+            normalized.append(arguments[index])
+            index += 1
+        return _popup_shell(self, *normalized)
+
+    DeepHistory._popup_shell = _popup_shell_with_current_pane
+
+
 Tmux.show_global_option = _show_global_option_batched
 Tmux.pane_info = _pane_info_batched
 Tmux.server_identity = _server_identity_batched
 Tmux.start_pipe = _start_pipe_after_tmux_settles
+Tmux.bind = _bind_with_live_history_boundary
 sys.argv[0] = "tmux-deep-history"
 runpy.run_module("tmux_deep_history.cli", run_name="__main__")
 '
-python_arguments=(-c "$python_program" "$@")
-if [[ "$viewer_tty_muted" -eq 1 ]]; then
+
+# Older generated bindings pass the format token literally. Normalize those
+# existing commands too, so upgrading the launcher repairs a running server
+# even before its bindings are reinstalled.
+launcher_arguments=()
+while [[ "$#" -gt 0 ]]; do
+    if [[ "$1" == "--target" && "${2:-}" == '#{pane_id}' ]]; then
+        shift 2
+        continue
+    fi
+    launcher_arguments+=("$1")
+    shift
+done
+
+python_arguments=(-c "$python_program" "${launcher_arguments[@]}")
+if [[ "$interactive_view" -eq 1 ]]; then
     command_status=0
     "$resolved" "${python_arguments[@]}" || command_status=$?
     restore_viewer_tty
     trap - EXIT
+    if [[ "$command_status" -ne 0 ]]; then
+        printf '\r\nDeep-history viewer failed (exit %s). Press Enter to close.\r\n' \
+            "$command_status" >&2
+        IFS= read -r _ || true
+    fi
     exit "$command_status"
 fi
 exec "$resolved" "${python_arguments[@]}"

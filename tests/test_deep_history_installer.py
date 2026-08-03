@@ -32,6 +32,8 @@ def build_archive(path: Path, *, unsafe_name: str | None = None) -> str:
             b"        self.__dict__.update(values)\n"
             b"class Tmux:\n"
             b"    def start_pipe(self, target, command, *, only_if_none=True):\n"
+            b"        pass\n"
+            b"    def bind(self, *arguments):\n"
             b"        pass\n",
             0o644,
         ),
@@ -40,6 +42,9 @@ def build_archive(path: Path, *, unsafe_name: str | None = None) -> str:
             b"import sys\n"
             b"import time\n"
             b"time.sleep(float(os.environ.get('FAKE_DEEP_HISTORY_DELAY', '0')))\n"
+            b"if os.environ.get('FAKE_DEEP_HISTORY_EXIT'):\n"
+            b"    print('fake deep-history failure', file=sys.stderr)\n"
+            b"    raise SystemExit(int(os.environ['FAKE_DEEP_HISTORY_EXIT']))\n"
             b"print('arguments=' + ' '.join(sys.argv[1:]))\n",
             0o644,
         ),
@@ -130,6 +135,15 @@ class DeepHistoryInstallerTests(unittest.TestCase):
             self.assertEqual(launched.returncode, 0, launched.stderr)
             self.assertEqual(launched.stdout.strip(), "arguments=status")
 
+            literal_target = subprocess.run(
+                [cli, "view", "--target", "#{pane_id}", "--older"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(literal_target.returncode, 0, literal_target.stderr)
+            self.assertEqual(literal_target.stdout.strip(), "arguments=view --older")
+
             (destination / "obsolete.txt").write_text("old\n", encoding="utf-8")
             second = self.run_installer(archive=archive, lock=lock, destination=destination)
             self.assertEqual(second.returncode, 0, second.stderr)
@@ -219,6 +233,49 @@ class DeepHistoryInstallerTests(unittest.TestCase):
                 self.assertNotIn(b"^[[5~", output)
                 self.assertNotIn(b"\x1b[5~", output)
                 self.assertEqual(termios.tcgetattr(slave_fd), original_tty)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+                os.close(master_fd)
+                os.close(slave_fd)
+
+    def test_interactive_view_failure_stays_visible_until_enter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "release.zip"
+            lock = root / "release.lock"
+            destination = root / "data" / "tmux-deep-history"
+            write_lock(lock, build_archive(archive))
+
+            result = self.run_installer(archive=archive, lock=lock, destination=destination)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            master_fd, slave_fd = pty.openpty()
+            original_tty = termios.tcgetattr(slave_fd)
+            env = os.environ.copy()
+            env["FAKE_DEEP_HISTORY_EXIT"] = "7"
+            process = subprocess.Popen(
+                [destination / "bin" / "tmux-deep-history", "view", "--older"],
+                env=env,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+            )
+            try:
+                output = self.read_pty(
+                    master_fd,
+                    timeout=5,
+                    until=b"Press Enter to close.",
+                )
+                self.assertIn(b"fake deep-history failure", output)
+                self.assertIn(b"Deep-history viewer failed (exit 7)", output)
+                self.assertIsNone(process.poll())
+                self.assertEqual(termios.tcgetattr(slave_fd), original_tty)
+
+                os.write(master_fd, b"\n")
+                self.assertEqual(process.wait(timeout=5), 7)
             finally:
                 if process.poll() is None:
                     process.terminate()
