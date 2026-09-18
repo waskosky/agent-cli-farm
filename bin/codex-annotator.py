@@ -23,6 +23,7 @@ for import_root in (SCRIPT_DIR_FOR_IMPORTS.parent, SCRIPT_DIR_FOR_IMPORTS):
         sys.path.insert(0, str(import_root))
         break
 
+from codex_looper.health import HealthMonitor, Limits  # noqa: E402
 from codex_looper.pane_status import (  # noqa: E402
     aggregate_window_state,
     classify_claude_output,
@@ -145,9 +146,9 @@ def memory_flag_prefix(name: str) -> str:
 
 def run_tmux(cmd: list[str], *, verbose: bool) -> str | None:
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    except FileNotFoundError:
-        log("tmux not found; annotator exiting", verbose=verbose)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        log("tmux unavailable or timed out", verbose=verbose)
         return None
     if result.returncode != 0:
         detail = result.stderr.strip()
@@ -546,6 +547,18 @@ def main() -> int:
         return 0
 
     args = parse_args()
+    monitor = None
+    if os.environ.get("CODEXFARM_HEALTH_ENABLED", "1").lower() not in {"0", "false", "no"}:
+        try:
+            monitor = HealthMonitor(
+                Path(STATE_DIR) / "codexfarm",
+                Limits.from_env(),
+                status_enabled=os.environ.get("CODEXFARM_HEALTH_STATUS", "1").lower()
+                not in {"0", "false", "no"},
+            )
+        except ValueError as exc:
+            print(f"Invalid health configuration: {exc}", file=sys.stderr)
+            return 2
     try:
         session_pattern = re.compile(args.session_regex)
         running_pattern = re.compile(args.running_regex)
@@ -580,6 +593,8 @@ def main() -> int:
                     ready_message=DEFAULT_READY_MESSAGE,
                     verbose=args.verbose,
                 )
+                if monitor is not None:
+                    monitor.tick(set(state_cache), lambda cmd: run_tmux(cmd, verbose=args.verbose))
             except Exception as exc:  # pragma: no cover - defensive
                 log(f"Annotator loop error: {exc}", verbose=args.verbose)
             if args.once:

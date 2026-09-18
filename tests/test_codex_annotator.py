@@ -275,6 +275,24 @@ class AnnotatorWindowTests(unittest.TestCase):
                 with self.assertRaises(argparse.ArgumentTypeError):
                     annotator.parse_positive_interval(value)
 
+    def test_invalid_health_configuration_exits_before_touching_tmux(self):
+        annotator_path = Path(__file__).resolve().parent.parent / "bin" / "codex-annotator.py"
+        env = {
+            **os.environ,
+            "CODEXFARM_MEMORY_WARN_PERCENT": "nan",
+            "CODEXFARM_HEALTH_ENABLED": "1",
+        }
+        result = subprocess.run(
+            [sys.executable, str(annotator_path), "--once"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Invalid health configuration", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_cli_handles_lockfile_without_directory_and_invalid_regex(self):
         annotator_path = Path(__file__).resolve().parent.parent / "bin" / "codex-annotator.py"
         with tempfile.TemporaryDirectory() as tmp:

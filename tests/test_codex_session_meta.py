@@ -149,6 +149,43 @@ class CodexSessionMetaTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("invalid", result.stderr.lower())
 
+    def test_resolve_pid_uses_held_writer_lock_without_open_rollout(self) -> None:
+        proc = Path(self.temp_dir.name) / "proc" / "101"
+        (proc / "fd").mkdir(parents=True)
+        (proc / "fdinfo").mkdir()
+        locks = self.codex_home / "thread-writer-locks"
+        locks.mkdir()
+        lock = locks / f"{ROOT_ID}.lock"
+        lock.touch()
+        (proc / "fd" / "42").symlink_to(lock)
+        (proc / "fdinfo" / "42").write_text("lock:\t1: FLOCK ADVISORY WRITE 101 00:01:1 0 EOF\n")
+        self.env["CODEX_PROC_ROOT"] = str(proc.parent)
+
+        result = self.run_helper("resolve-pid", "101")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, ROOT_ID)
+        (proc / "fdinfo" / "42").write_text("pos:\t0\n")
+        self.assertEqual(self.run_helper("resolve-pid", "101").returncode, 1)
+
+    def test_resolve_pid_rejects_ambiguous_held_locks(self) -> None:
+        proc = Path(self.temp_dir.name) / "proc" / "101"
+        (proc / "fd").mkdir(parents=True)
+        (proc / "fdinfo").mkdir()
+        locks = self.codex_home / "thread-writer-locks"
+        locks.mkdir()
+        for number, thread_id in enumerate([ROOT_ID, FORK_ID]):
+            lock = locks / f"{thread_id}.lock"
+            lock.touch()
+            (proc / "fd" / str(number)).symlink_to(lock)
+            (proc / "fdinfo" / str(number)).write_text("lock:\t1: FLOCK ADVISORY WRITE 101\n")
+        self.env["CODEX_PROC_ROOT"] = str(proc.parent)
+
+        result = self.run_helper("resolve-pid", "101")
+
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stdout, "")
+
 
 if __name__ == "__main__":
     unittest.main()

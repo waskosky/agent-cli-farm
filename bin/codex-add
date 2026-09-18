@@ -278,6 +278,7 @@ AUTOSERVICE_CHOICE_FILE="$STATE_DIR/autoservice_choice"
 AUTOSERVICE_REGISTRY="$CONFIG_DIR/farms.tsv"
 ANNOTATOR_SESSION_REGISTRY="$STATE_DIR/managed_sessions"
 SAVE_BIN="${CODEX_SAVE_BIN:-$(dirname "$0")/codex-save}"
+BACKUP_BIN="${CODEX_BACKUP_BIN:-$(dirname "$0")/codex-backup}"
 RESTORE_BIN="${CODEX_RESTORE_BIN:-$(dirname "$0")/codex-restore}"
 
 if ! valid_session_name "$SESSION"; then
@@ -402,7 +403,15 @@ After=tmux.service
 [Service]
 Type=oneshot
 Environment=XDG_CONFIG_HOME=$CONFIG_HOME
-ExecStart=$SAVE_BIN --all-registered
+Environment=XDG_STATE_HOME=${XDG_STATE_HOME:-$HOME/.local/state}
+Environment=CODEX_HOME=${CODEX_HOME:-$HOME/.codex}
+Environment=CODEX_SAVE_BIN=$SAVE_BIN
+Environment=CODEXFARM_BACKUP_KEEP=${CODEXFARM_BACKUP_KEEP:-2}
+Environment="PATH=$PATH"
+# codex-backup runs codex-save --all-registered, then preserves history even on save failure.
+ExecStart=$BACKUP_BIN --min-age 3600
+UMask=0077
+TimeoutStartSec=15min
 
 [Install]
 WantedBy=default.target
@@ -410,10 +419,10 @@ EOF
 
   cat > "$SYSTEMD_DIR/codex-autosave.timer" <<EOF
 [Unit]
-Description=Run Codex autosave every hour
+Description=Save farm identities every five minutes and back up chats hourly
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*-*-* *:0/5:00
 Persistent=true
 Unit=codex-autosave.service
 
@@ -428,6 +437,7 @@ Description=Codex autorestore tmux session on login
 [Service]
 Type=oneshot
 Environment=XDG_CONFIG_HOME=$CONFIG_HOME
+Environment="PATH=$PATH"
 ExecStart=$RESTORE_BIN --all-registered
 
 [Install]
@@ -435,11 +445,13 @@ WantedBy=default.target
 EOF
 
   if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
-    "$SYSTEMCTL_BIN" --user daemon-reload >/dev/null 2>&1 || true
-    "$SYSTEMCTL_BIN" --user enable codex-autosave.timer codex-autorestore.service >/dev/null 2>&1 || true
-    "$SYSTEMCTL_BIN" --user start codex-autosave.timer codex-autorestore.service >/dev/null 2>&1 || true
+    "$SYSTEMCTL_BIN" --user daemon-reload >/dev/null 2>&1 || return 1
+    "$SYSTEMCTL_BIN" --user enable codex-autosave.timer codex-autorestore.service >/dev/null 2>&1 || return 1
+    "$SYSTEMCTL_BIN" --user start codex-autosave.timer codex-autorestore.service >/dev/null 2>&1 || return 1
+    "$SYSTEMCTL_BIN" --user is-active --quiet codex-autosave.timer >/dev/null 2>&1 || return 1
   else
     echo "systemctl not found; services written to $SYSTEMD_DIR but not enabled." >&2
+    return 1
   fi
 }
 
@@ -461,7 +473,7 @@ maybe_prompt_autoservice() {
       choice="$CODEX_AUTOSERVICE_CHOICE"
     elif [ -t 0 ]; then
       echo "Install Codex autosave/autorestore background service?"
-      echo "This saves your tmux window manifest hourly and restores it on login."
+      echo "This saves identities every five minutes, backs up chats hourly, and restores on login."
       echo "Without it, you must run codex-save/codex-restore manually."
       printf "Install now? [y/N] "
       read -r reply || reply=
@@ -477,7 +489,13 @@ maybe_prompt_autoservice() {
 
   case "$choice" in
     y|Y|yes|YES|Yes)
-      install_autoservice_units
+      if ! install_autoservice_units; then
+        echo "warning: autosave units were written but the timer could not be activated." >&2
+        echo "warning: run codex-doctor; codex-backup --watch --min-age 3600 is a temporary fallback." >&2
+        if [ "$install_autoservice_only" -eq 1 ]; then
+          return 1
+        fi
+      fi
       echo "yes" > "$AUTOSERVICE_CHOICE_FILE"
       ;;
     *)

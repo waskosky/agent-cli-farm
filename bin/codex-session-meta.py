@@ -121,6 +121,38 @@ def resolve_thread_id(thread_id: str) -> str | None:
     return thread_id
 
 
+def thread_id_from_pid(pid: int) -> str | None:
+    """Resolve paginated sessions even when no rollout descriptor stays open.
+
+    Only held writer locks count. A stale lock filename, argv, cwd, or newest
+    transcript alone cannot establish ownership. Ambiguous roots fail closed.
+    """
+    proc = Path(os.environ.get("CODEX_PROC_ROOT", "/proc")) / str(pid)
+    roots: set[str] = set()
+    try:
+        descriptors = list((proc / "fd").iterdir())
+    except OSError:
+        return None
+    for descriptor in descriptors:
+        try:
+            target = descriptor.resolve(strict=True)
+            if target.parent != (codex_home() / "thread-writer-locks").resolve():
+                continue
+            if target.suffix != ".lock" or not valid_thread_id(target.stem):
+                continue
+            info = (proc / "fdinfo" / descriptor.name).read_text()
+            if not any(line.startswith("lock:") for line in info.splitlines()):
+                continue
+            resolved = resolve_thread_id(target.stem)
+            if resolved:
+                roots.add(resolved)
+        except OSError:
+            continue
+    if len(roots) > 1:
+        raise ValueError("Codex process holds multiple independent conversation writers")
+    return roots.pop() if roots else None
+
+
 def wait_until_writable(thread_id: str, timeout_seconds: float) -> bool:
     if fcntl is None:
         return True
@@ -159,6 +191,9 @@ def parse_args() -> argparse.Namespace:
     resolve_id = subparsers.add_parser("resolve-id")
     resolve_id.add_argument("thread_id")
 
+    resolve_pid = subparsers.add_parser("resolve-pid")
+    resolve_pid.add_argument("pid", type=int)
+
     wait_writable = subparsers.add_parser("wait-writable")
     wait_writable.add_argument("thread_id")
     wait_writable.add_argument("timeout", type=float, nargs="?", default=10.0)
@@ -167,6 +202,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.command == "resolve-pid":
+        try:
+            resolved = thread_id_from_pid(args.pid) if args.pid > 0 else None
+        except ValueError:
+            return 3
+        if resolved is None:
+            return 1
+        sys.stdout.write(resolved)
+        return 0
     if args.command == "resolve-path":
         resolved = resumable_id_from_path(args.path)
         if resolved is None:

@@ -83,6 +83,28 @@ esac
         self.assertIn("Doctor result: healthy", result.stdout)
         self.assertNotIn(SESSION_ID, result.stdout)
 
+    def test_enabled_but_inactive_timer_is_not_healthy(self) -> None:
+        unit = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user/codex-autosave.timer"
+        unit.parent.mkdir(parents=True)
+        unit.touch()
+        make_executable(
+            self.fake_bin / "systemctl",
+            '#!/usr/bin/env bash\ncase "$*" in *is-enabled*) exit 0 ;; *) exit 1 ;; esac\n',
+        )
+
+        result = self.run_doctor(self.manifest)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not active", result.stdout)
+
+    def test_stale_manifest_is_not_healthy(self) -> None:
+        os.utime(self.manifest, (1, 1))
+
+        result = self.run_doctor(self.manifest)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("older than", result.stdout)
+
     def test_stale_installed_helper_is_actionable(self) -> None:
         (self.install_bin / "codex-save").write_text("stale\n", encoding="utf-8")
 

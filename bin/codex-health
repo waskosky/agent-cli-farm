@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""Report farm memory and recovery health without changing sessions."""
+
+import sys
+from pathlib import Path
+
+for root in (Path(__file__).resolve().parent.parent, Path(__file__).resolve().parent):
+    if (root / "codex_looper").is_dir():
+        sys.path.insert(0, str(root))
+        break
+
+from codex_looper.health import main  # noqa: E402
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, TypeError) as error:
+        print(
+            f"Farm health unavailable ({type(error).__name__}); check configuration/state.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None

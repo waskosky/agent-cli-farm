@@ -16,13 +16,33 @@ esac
 ADD_BIN="${CODEX_ADD_BIN:-$SCRIPT_DIR/codex-add}"
 SESSION_META_BIN="${CODEX_SESSION_META_BIN:-$SCRIPT_DIR/codex-session-meta.py}"
 WRITER_WAIT_SECONDS="${CODEXFARM_RESTORE_WRITER_WAIT_SECONDS:-10}"
+RESTORE_DELAY="${CODEXFARM_RESTORE_DELAY_SECONDS:-2}"
+HEALTH_BIN="${CODEX_HEALTH_BIN:-$SCRIPT_DIR/codex-health}"
+ignore_memory=0
 
 usage() {
   cat <<EOF
-Usage: $script_name [-a|--attach] [-f|--force] [--all-registered] [manifest-path]
+Usage: $script_name [-a|--attach] [-f|--force] [--all-registered]
+       [--delay SECONDS] [--ignore-memory-pressure] [manifest-path]
 
 Restore tmux farm windows from a trusted executable manifest.
+Launches are spaced by 2 seconds (0..300, also CODEXFARM_RESTORE_DELAY_SECONDS).
+Critical host memory pressure stops restoration before opening more windows.
+--ignore-memory-pressure explicitly bypasses that check; it never stops running chats.
 EOF
+}
+
+check_memory() {
+  [ "$ignore_memory" -eq 1 ] && return 0
+  if [ ! -x "$HEALTH_BIN" ]; then
+    echo "Memory guard missing; reinstall helpers or use --ignore-memory-pressure." >&2
+    return 1
+  fi
+  if "$HEALTH_BIN" --restore-check; then
+    return 0
+  fi
+  echo "Restore stopped by memory guard. Saved manifest is unchanged; rerun when memory is available." >&2
+  return 1
 }
 
 trim_command_field() {
@@ -286,11 +306,17 @@ restore_all_registered() {
       manifest="$(default_manifest_path_for_session "$session")"
     fi
 
-    restore_args=()
+    restore_args=("--delay" "$RESTORE_DELAY")
+    if [ "$ignore_memory" -eq 1 ]; then
+      restore_args+=("--ignore-memory-pressure")
+    fi
     if [ "$force_requested" -eq 1 ]; then
       restore_args+=("--force")
     fi
     restore_args+=("$manifest")
+    if [ "$count" -gt 0 ]; then
+      sleep "$RESTORE_DELAY"
+    fi
     if CODEX_SESSION="$session" "$0" "${restore_args[@]}"; then
       count=$((count + 1))
     else
@@ -315,6 +341,10 @@ while (( "$#" )); do
     -f|--force) force=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --all-registered) all_registered=1; shift ;;
+    --ignore-memory-pressure) ignore_memory=1; shift ;;
+    --delay)
+      if [ "$#" -lt 2 ]; then echo "Missing value for --delay" >&2; exit 2; fi
+      RESTORE_DELAY="$2"; shift 2 ;;
     --) shift; while (( "$#" )); do args_pos+=("$1"); shift; done ;;
     -*) echo "Unknown option: $1" >&2; exit 2 ;;
     *) args_pos+=("$1"); shift ;;
@@ -333,6 +363,11 @@ fi
 
 if [[ ! "$WRITER_WAIT_SECONDS" =~ ^([0-9]+)(\.[0-9]+)?$ ]]; then
   echo "Invalid CODEXFARM_RESTORE_WRITER_WAIT_SECONDS: $WRITER_WAIT_SECONDS" >&2
+  exit 2
+fi
+if [[ ! "$RESTORE_DELAY" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+  || ! awk -v delay="$RESTORE_DELAY" 'BEGIN { exit !(delay >= 0 && delay <= 300) }'; then
+  echo "Invalid restore delay: expected seconds between 0 and 300" >&2
   exit 2
 fi
 
@@ -365,6 +400,7 @@ if ! command -v tmux >/dev/null; then
 fi
 
 # Ensure session exists
+check_memory || exit 3
 tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
 
 force_names=()
@@ -379,6 +415,7 @@ if [ "$force" -eq 1 ]; then
       force_names+=("$name")
       while IFS= read -r existing_target; do
         [ -n "$existing_target" ] || continue
+        check_memory || exit 3
         if ! tmux kill-window -t "$existing_target"; then
           echo "Unable to remove existing window '$name' during force restore." >&2
           exit 1
@@ -392,6 +429,7 @@ fi
 seen_names=()
 seen_counts=()
 restore_failures=0
+restored=0
 {
   IFS= read -r _header || true
   while IFS=$'\t' read -r name dir cmd args || [ -n "${name:-}" ]; do
@@ -435,11 +473,16 @@ restore_failures=0
       fi
     fi
 
+    if [ "$restored" -gt 0 ]; then
+      sleep "$RESTORE_DELAY"
+    fi
+    check_memory || exit 3
     CODEX_TOOL_NAME="$restore_provider" \
       CODEX_NAME="$name" \
       CODEX_CMD="$RESTORE_CMD" \
       CODEX_ARGS="$RESTORE_ARGS" \
       "$ADD_BIN" -d "$restore_dir"
+    restored=$((restored + 1))
 
     if [ -n "$exact_session_id" ]; then
       created_target="$(

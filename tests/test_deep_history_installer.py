@@ -258,7 +258,11 @@ class DeepHistoryInstallerTests(unittest.TestCase):
             env.pop("TMUX_DEEP_HISTORY_PYTHON", None)
             env.pop("CODEXFARM_DEEP_HISTORY_PYTHON_BIN", None)
             env.pop("CODEXFARM_PYTHON_BIN", None)
-            env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+            # Do not accidentally select the host's Python 3.13/3.14 before
+            # the versioned interpreter this test provides.
+            for command in ("bash", "dirname"):
+                (fake_bin / command).symlink_to(shutil.which(command))
+            env["PATH"] = str(fake_bin)
             env["SELECTED_PYTHON_LOG"] = str(selected)
 
             launched = subprocess.run(

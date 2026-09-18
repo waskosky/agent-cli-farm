@@ -289,6 +289,19 @@ The doctor exits nonzero for stale or missing installed helpers, malformed or
 unsafe manifests, blank commands, non-UUID or fallback provider resumes, and
 duplicate logical names. Duplicate names are supported by restore, but the
 warning makes them explicit before destructive force restores.
+It also flags manifests older than 24 hours, enabled but inactive timers, and
+failed autosave services. Codex session discovery checks held writer locks as
+well as open rollouts, so paginated sessions remain discoverable even when
+their rollout descriptor is closed.
+
+Bulk restore waits two seconds between launches and checks host memory before
+creating windows, before force deletion, and before each launch. Critical
+pressure stops the restore with exit code 3; the saved manifest stays intact.
+Rerun when memory is available. `--delay SECONDS` (0..300) or
+`CODEXFARM_RESTORE_DELAY_SECONDS` changes the pacing. The explicit
+`--ignore-memory-pressure` flag bypasses the guard. These options also apply
+with `--all-registered`. On hosts without Linux memory counters, restore reports
+that the guard is unavailable and continues with pacing.
 
 If tmux sessions are already running (no manifest needed):
 ```bash
@@ -302,7 +315,8 @@ Flags:
 
 ### 6. (Optional) Enable Autosave/Autorestore
 
-`codex-add` can install systemd user services to autosave hourly and restore on login.
+`codex-add` can install systemd user services to save identities every five
+minutes, back up conversations hourly, and restore on login.
 You can trigger it directly:
 
 ```bash
@@ -318,7 +332,62 @@ codex-add --session personal --install-autoservice
 
 Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session.
 
+Autosave runs `codex-backup`, which attempts the strict manifest save and then
+preserves Codex history even if session discovery fails. Failure remains a
+nonzero service result. Installation reports failure if the user service
+manager or timer cannot be activated. Units preserve the installation PATH so
+Node/NVM commands remain available outside an interactive shell.
+
 Set `CODEX_AUTOSERVICE_CHOICE=yes` to auto-accept the prompt, or `no` to suppress it.
+
+### Conversation backups and recovery
+
+```bash
+codex-backup                         # save identities and snapshot chats now
+codex-backup --skip-save             # snapshot history even with no tmux server
+codex-backup --keep 1                # limit retained snapshots on small disks
+codex-backup --watch --min-age 3600   # foreground fallback when systemd is unavailable
+```
+
+Backups are private local `snapshot-*.tar.gz` archives under
+`~/.local/state/codexfarm/backups` (or `--destination`). They contain Codex
+rollouts, archived rollouts, history/index files, individually consistent SQLite
+copies of session/history/goal/queue databases, and farm TSV manifests. SQLite
+copies include committed WAL data. The snapshot inventory and `latest.json`
+record save coverage and an archive SHA-256. Authentication files,
+configuration, provider logs, and unrelated home files are excluded. Chats can
+still contain sensitive information: keep these archives private and out of Git.
+
+Archives are published atomically, with owner-only files/directories. Two are
+retained by default (`CODEXFARM_BACKUP_KEEP` or `--keep`); pruning occurs only
+after a successful replacement. Incident-recovery archives with other names are
+left alone. Databases are staged and compressed before transcripts to reduce
+peak temporary disk use. Backups check for 128 MiB of remaining headroom during
+compression and database copying, aborting safely if space runs low. Allow space
+for the new archive and a coherent database copy; simultaneous writes by other
+programs can still exhaust the disk. Backups are on the same host unless you choose another
+destination. They do not protect against loss of that disk.
+
+`backup-status.json` records each save/backup attempt. A failed manifest save
+does not prevent a history snapshot, but the combined command still exits
+nonzero. `--min-age` limits snapshot frequency while still checking the manifest
+on each invocation. The watcher uses an exclusive lock and checks every five
+minutes and exits once the systemd autosave timer becomes active; it is a
+temporary foreground scheduler, not a boot service. The hourly
+backup remains independent of any particular tmux pane surviving.
+
+The status annotator displays a persistent `BACKUP WARNING` when the last save
+or backup failed, the scheduler has not checked in for 15 minutes, the archive
+is missing, or the newest snapshot is older than two hours. `codex-doctor` and
+`codex-health` report the specific fault and detect a stale memory-monitor
+heartbeat. A live timer alone is not proof of a successful backup.
+
+After a crash, preserve the existing archive first. Inspect `snapshot.json` and
+extract to a separate private directory; do not replace a live Codex database.
+For history still in the current Codex home, `codex resume --all` shows chats
+from every working directory, and `codex -C /path/to/repo resume UUID` opens an
+exact conversation. A saved tmux manifest is a window index, not the chat
+transcript itself. Restoring windows does not submit a continuation prompt.
 
 ## Status Updates (RUN/READY/ERR)
 
@@ -328,7 +397,42 @@ By default, the annotator does not rewrite tmux window titles. That lets Codex's
 
 Important: the **RUN/READY/ERR status** is best-effort and based on terminal-output and command heuristics. Node-backed tools are recognized from pane start commands as well as current commands. Use READY as a signal, not a guarantee. Codex's native title animation is usually the primary visual signal.
 
-### Memory Flags
+### Continuous memory warnings
+
+The annotator checks Linux host memory and managed window process trees every
+15 seconds, including descendant test/build workers. It adds a warning to the
+managed session's existing `status-right`, preserving its previous contents and
+native window titles, and shows a ten-second tmux message. Warning readings
+must persist for two samples; critical host pressure alerts immediately.
+Unchanged alerts repeat at most every five minutes.
+
+Defaults and environment overrides (set before starting the annotator):
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `CODEXFARM_MEMORY_WARN_PERCENT` | `20` | Warn at or below this percentage of RAM available |
+| `CODEXFARM_MEMORY_CRITICAL_PERCENT` | `10` | Critical pressure; bulk restore stops opening windows |
+| `CODEXFARM_MEMORY_SESSION_MIB` | `1024` | Warn when a window's process tree exceeds this RSS |
+| `CODEXFARM_HEALTH_ENABLED` | `1` | Set to `0` to disable periodic memory/backup checks |
+| `CODEXFARM_HEALTH_STATUS` | `1` | Set to `0` to leave `status-right` formatting alone |
+
+Linux memory pressure stalls (`some avg10`) also trigger warning at 10% and
+critical at 25%. Previously used swap alone does not trigger an alert. RSS is
+an attribution estimate that can count shared pages more than once; host
+pressure uses `MemAvailable`, not summed process RSS. The monitor reports swap
+usage for context. It never kills, pauses, or restarts chats. A 15-second poll
+cannot prevent a sudden memory spike or guarantee avoidance of an OOM kill.
+
+Run `codex-health` for a current readout and `codex-doctor` for installation and
+recovery checks. The private `health-status.json` contains the last reading,
+window IDs and RSS totals, without command arguments or conversation text.
+`@codexfarm_health` is the session badge and `@codexfarm_memory_mib` is the
+per-window estimate for custom tmux status formats. The doctor flags a missing
+or older-than-60-second heartbeat once managed sessions have been registered.
+If the annotator itself stops, run the doctor: a dead process cannot issue its
+own live warning. Host pressure checks currently require Linux counters.
+
+### Manual memory flags
 
 Run `codex-memoryflag` to prefix high-memory tmux windows with a marker such as `*200+MB**`. It scans tmux sockets available to the current user, sums each window's pane process trees by RSS, and renames windows at or above the threshold. Existing memory markers are updated or cleared on each run, so window renaming is an intentional side effect.
 
@@ -359,6 +463,8 @@ Tuning and controls:
 - **`codex-add [session] [directory]`** - Add a new Codex instance, optionally selecting a named farm
 - **`codex-annotator`** - Track RUN/READY/ERR state and notify when windows become READY
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
+- **`codex-health`** - Check RAM pressure, conversation backups and the monitor heartbeat
+- **`codex-backup`** - Save exact farm identities and private, consistent Codex history snapshots
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-looper [init|doctor|run]`** - Run a single prompt or prompt sequence repeatedly with logs and stop detection; see [looper reference](docs/looper.md)
 - **`codex-status [--session SESSION] [sessions|windows|activity|logs|loopers]`** - Show status information; `loopers --repair-stale-loopers` marks active state files stopped when their supervisor process is gone
@@ -559,7 +665,10 @@ agent-cli-farm/
 
 - `tmux` cannot mirror the same live pane in two windows (use linked windows or logs)
 - `tmux` survives client disconnects, but not host reboot or tmux-server exit unless autosave/autorestore recreates windows later.
-- Autosave/autorestore is systemd-user-only.
+- Automatic login restoration uses systemd user services. `codex-backup --watch`
+  provides a foreground backup scheduler when that manager is unavailable; it
+  must be restarted after a reboot. Same-disk snapshots need a separate off-host
+  copy to protect against disk loss.
 - tmux provides one `pipe-pane` consumer per pane; the deep-history backend owns it and mirrors the stream rather than attaching a competing logger.
 - Existing panes created before the session hook was installed may need one
   submitted Codex prompt before hook metadata appears. Save also inspects live
