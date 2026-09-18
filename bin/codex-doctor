@@ -9,6 +9,7 @@ Usage: $(basename "$0") [--session NAME] [--source DIR] [manifest-path]
 
 Check the installed Agent CLI Farm helpers and a saved restore manifest.
 Exact provider session IDs are counted but never printed.
+Also check backup freshness, the memory monitor heartbeat and host RAM pressure.
 EOF
 }
 
@@ -118,10 +119,17 @@ check_manifest() {
   local header=""
   local stats rows malformed blank exact fallback provider_invalid other duplicates
   local mode=""
+  local modified now
 
   if [ ! -f "$manifest" ]; then
     problem "manifest not found: $manifest"
     return
+  fi
+
+  modified="$(stat -c '%Y' "$manifest" 2>/dev/null || stat -f '%m' "$manifest" 2>/dev/null || true)"
+  now="$(date +%s)"
+  if [[ "$modified" =~ ^[0-9]+$ ]] && [ "$((now - modified))" -gt 86400 ]; then
+    warning "manifest is older than 24 hours; verify autosave before relying on it"
   fi
 
   IFS= read -r header < "$manifest" || header=""
@@ -249,9 +257,16 @@ check_runtime() {
 
   if command -v systemctl >/dev/null 2>&1 \
     && systemctl --user is-enabled --quiet codex-autosave.timer >/dev/null 2>&1; then
-    ok "codex autosave timer is enabled"
+    if systemctl --user is-active --quiet codex-autosave.timer >/dev/null 2>&1; then
+      ok "codex autosave timer is enabled and active"
+      if systemctl --user is-failed --quiet codex-autosave.service >/dev/null 2>&1; then
+        problem "most recent codex autosave service failed; inspect its journal"
+      fi
+    else
+      problem "codex autosave timer is enabled but not active; user service manager may be unavailable"
+    fi
   elif [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/codex-autosave.timer" ]; then
-    info "codex autosave timer is installed but not enabled"
+    warning "codex autosave timer is installed but not enabled or user service manager is unavailable"
   else
     info "codex autosave timer is not installed (optional)"
   fi
@@ -335,6 +350,11 @@ else
 fi
 check_manifest "$manifest_path"
 check_runtime
+if [ -x "$SCRIPT_DIR/codex-health" ]; then
+  if ! "$SCRIPT_DIR/codex-health"; then
+    warning "memory or recovery health needs attention (details above)"
+  fi
+fi
 
 if [ "$issues" -eq 0 ]; then
   echo "Doctor result: healthy"

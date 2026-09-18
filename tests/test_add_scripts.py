@@ -757,7 +757,9 @@ exit 0
         self.assertIn("codex-save", autosave_content)
         self.assertIn("--all-registered", autosave_content)
         self.assertIn("ExecStart=", autosave_content)
-        self.assertIn("OnCalendar=hourly", autosave_timer_content)
+        self.assertIn("OnCalendar=*-*-* *:0/5:00", autosave_timer_content)
+        self.assertIn("codex-backup --min-age 3600", autosave_content)
+        self.assertIn('Environment="PATH=', autosave_content)
         self.assertIn("Unit=codex-autosave.service", autosave_timer_content)
         self.assertIn("codex-restore", autorestore_content)
         self.assertIn("--all-registered", autorestore_content)
@@ -771,6 +773,18 @@ exit 0
             any("codex-autosave.timer" in line for line in systemctl_calls),
             f"Expected timer-related systemctl calls, got: {systemctl_calls}",
         )
+
+    def test_autoservice_install_reports_inactive_user_manager(self):
+        make_executable(self.tmpdir / "systemctl", "#!/usr/bin/env bash\nexit 1\n")
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-add", "--install-autoservice"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("timer could not be activated", result.stderr)
 
     def test_autoservice_install_registers_multiple_farms_with_single_units(self):
         systemctl_log = self.tmpdir / "systemctl-session.log"
@@ -1162,6 +1176,34 @@ esac
             rows,
         )
         self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o600)
+
+    def test_codex_save_finds_paginated_session_with_only_writer_lock(self):
+        env = self.env.copy()
+        env["NO_CODEX_SESSION"] = "1"
+        codex_home = self.tmpdir / "codex-home"
+        locks = codex_home / "thread-writer-locks"
+        locks.mkdir(parents=True)
+        session_id = "123e4567-e89b-42d3-a456-426614174000"
+        lock = locks / f"{session_id}.lock"
+        lock.touch()
+        proc = self.tmpdir / "proc/101"
+        (proc / "fd").mkdir(parents=True)
+        (proc / "fdinfo").mkdir()
+        (proc / "fd/42").symlink_to(lock)
+        (proc / "fdinfo/42").write_text("lock:\t1: FLOCK ADVISORY WRITE 101\n")
+        env["CODEX_HOME"] = str(codex_home)
+        env["CODEX_PROC_ROOT"] = str(proc.parent)
+
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-save", str(self.manifest)],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"codex\tresume {session_id}", self.manifest.read_text())
 
     def test_codex_save_finds_custom_home_session_for_shell_started_codex(self):
         env = self.env.copy()
@@ -1592,6 +1634,11 @@ exit 0
         self.env["HOME"] = str(self.tmpdir)
         self.env["XDG_CONFIG_HOME"] = str(self.tmpdir / "config")
         self.env["CODEX_ADD_BIN"] = str(self.tmpdir / "codex-add")
+        self.env["CODEXFARM_RESTORE_DELAY_SECONDS"] = "0"
+        proc = self.tmpdir / "proc"
+        proc.mkdir()
+        (proc / "meminfo").write_text("MemTotal: 8000000 kB\nMemAvailable: 4000000 kB\n")
+        self.env["CODEX_PROC_ROOT"] = str(proc)
 
     def read_tmux_commands(self) -> list[list[str]]:
         lines = self.tmux_log.read_text(encoding="utf-8").splitlines()
@@ -1628,6 +1675,73 @@ exit 0
             any(cmd and cmd[0] == "send-keys" for cmd in self.read_tmux_commands()),
             "restore should launch the resume command instead of typing it into a running CLI",
         )
+
+    def test_restore_critical_memory_stops_before_force_deletes_or_launches(self):
+        (Path(self.env["CODEX_PROC_ROOT"]) / "meminfo").write_text(
+            "MemTotal: 8000000 kB\nMemAvailable: 100000 kB\n"
+        )
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--force", str(self.manifest)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertFalse(self.tmux_log.exists())
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertIn("manifest is unchanged", result.stderr)
+
+    def test_restore_stops_if_pressure_rises_between_launches(self):
+        self.write_duplicate_manifest()
+        add = self.tmpdir / "codex-add"
+        add.write_text(
+            add.read_text().replace(
+                "exit 0",
+                'printf "MemTotal: 8000000 kB\\nMemAvailable: 100000 kB\\n" > "$CODEX_PROC_ROOT/meminfo"\nexit 0',
+            )
+        )
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(len(self.codex_add_log.read_text().splitlines()), 1)
+
+    def test_restore_paces_launches_and_allows_explicit_memory_override(self):
+        self.write_duplicate_manifest()
+        (Path(self.env["CODEX_PROC_ROOT"]) / "meminfo").write_text(
+            "MemTotal: 8000000 kB\nMemAvailable: 100000 kB\n"
+        )
+        make_executable(
+            self.tmpdir / "sleep", '#!/bin/sh\nprintf "delay=%s\\n" "$1" >> "$CODEX_ADD_LOG"\n'
+        )
+        result = subprocess.run(
+            [
+                REPO_ROOT / "bin/codex-restore",
+                "--delay",
+                "2",
+                "--ignore-memory-pressure",
+                str(self.manifest),
+            ],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.codex_add_log.read_text().splitlines()[1], "delay=2")
+
+    def test_restore_rejects_nonfinite_delay_before_mutation(self):
+        for delay in ("NaN", "-1", "301", "inf"):
+            result = subprocess.run(
+                [REPO_ROOT / "bin/codex-restore", "--delay", delay, str(self.manifest)],
+                env=self.env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(self.tmux_log.exists())
 
     def test_codex_restore_repairs_existing_child_thread_manifest(self):
         root_id = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"

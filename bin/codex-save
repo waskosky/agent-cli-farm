@@ -155,7 +155,7 @@ session_id_from_path() {
 descendant_pids() {
   local root="$1"
   local pid child
-  printf '%s\n' "$root"
+  printf '%s\n' "$root" 2>/dev/null || return 0
 
   command -v pgrep >/dev/null 2>&1 || return 0
 
@@ -166,7 +166,9 @@ descendant_pids() {
     index=$((index + 1))
     while IFS= read -r child; do
       [ -z "$child" ] && continue
-      printf '%s\n' "$child"
+      # Consumers stop at the first provider. A closed pipe is normal, and
+      # discovery must not eagerly walk every test/build descendant first.
+      printf '%s\n' "$child" 2>/dev/null || return 0
       queue+=("$child")
     done < <(pgrep -P "$pid" 2>/dev/null || true)
   done
@@ -175,9 +177,23 @@ descendant_pids() {
 session_id_from_procfs() {
   local tool="$1"
   local pid="$2"
-  local descriptor path session_id
+  local descriptor path session_id resolution_status
   local proc_root="${CODEX_PROC_ROOT:-/proc}"
   [ -d "$proc_root/$pid/fd" ] || return 1
+
+  if [ "$tool" = "codex" ] && [ -x "$SESSION_META_BIN" ]; then
+    if session_id="$("$SESSION_META_BIN" resolve-pid "$pid" 2>/dev/null)"; then
+      if valid_session_id "$session_id"; then
+        printf '%s' "$session_id"
+        return 0
+      fi
+    else
+      resolution_status=$?
+      # An in-TUI fork can keep multiple independent writers in one process.
+      # Without fresh hook metadata, choosing an arbitrary rollout is unsafe.
+      [ "$resolution_status" -ne 3 ] || return 3
+    fi
+  fi
 
   for descriptor in "$proc_root/$pid/fd"/*; do
     [ -e "$descriptor" ] || [ -L "$descriptor" ] || continue
@@ -198,7 +214,7 @@ session_id_from_process_files() {
   local tool="$1"
   local pane_pid="$2"
   local provider_pid="${3:-}"
-  local pid line path session_id
+  local pid line path session_id resolution_status
   local pids=()
   [ -n "$pane_pid" ] || return 1
 
@@ -211,7 +227,12 @@ session_id_from_process_files() {
   fi
 
   for pid in "${pids[@]}"; do
-    session_id="$(session_id_from_procfs "$tool" "$pid" || true)"
+    if session_id="$(session_id_from_procfs "$tool" "$pid")"; then
+      :
+    else
+      resolution_status=$?
+      [ "$resolution_status" -ne 3 ] || return 3
+    fi
     if [ -n "$session_id" ]; then
       printf '%s' "$session_id"
       return 0

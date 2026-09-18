@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""Save farm identities and preserve private Codex history independently of tmux."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import io
+import json
+import math
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+RESERVE_BYTES = 128 * 1024 * 1024
+
+
+class BackupSpaceError(OSError):
+    """Insufficient disk headroom; preserve completed snapshots."""
+
+
+def require_space(destination: Path, extra: int = 0) -> None:
+    if shutil.disk_usage(destination).free < RESERVE_BYTES + extra:
+        raise BackupSpaceError("insufficient free space for a safe snapshot")
+
+
+class SpaceCheckedWriter(io.BufferedWriter):
+    def __init__(self, path: str, destination: Path):
+        super().__init__(io.FileIO(path, "wb"))
+        self.destination = destination
+        self.since_check = 8 * 1024 * 1024
+
+    def write(self, data):
+        self.since_check += len(data)
+        if self.since_check >= 8 * 1024 * 1024:
+            require_space(self.destination)
+            self.since_check = 0
+        return super().write(data)
+
+
+def private_directory(path: Path) -> None:
+    if path.is_symlink():
+        raise ValueError("backup directory must not be a symlink")
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=".status-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump(value, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def history_files(codex: Path, config: Path) -> list[tuple[Path, str]]:
+    files = []
+    for name in ("sessions", "archived_sessions"):
+        directory = codex / name
+        if directory.is_dir() and not directory.is_symlink():
+            for path in sorted(directory.rglob("*.jsonl")):
+                if (
+                    path.is_file()
+                    and not path.is_symlink()
+                    and path.resolve().is_relative_to(codex.resolve())
+                ):
+                    files.append((path, "codex/" + str(path.relative_to(codex))))
+    for name in ("history.jsonl", "session_index.jsonl"):
+        path = codex / name
+        if path.is_file() and not path.is_symlink():
+            files.append((path, "codex/" + name))
+    if config.is_dir() and not config.is_symlink():
+        for path in sorted(config.rglob("*.tsv")):
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and path.resolve().is_relative_to(config.resolve())
+            ):
+                files.append((path, "farm/" + str(path.relative_to(config))))
+    return files
+
+
+def snapshot(codex: Path, config: Path, destination: Path, keep: int, save_ok: bool) -> Path:
+    files = history_files(codex, config)
+    databases = [
+        path
+        for path in sorted(codex.glob("*.sqlite"))
+        if re.fullmatch(r"(?:state|thread_history|goals|queue)_\d+\.sqlite", path.name)
+        and path.is_file()
+        and not path.is_symlink()
+    ]
+    if not files and not databases:
+        raise ValueError("no Codex history or farm manifests found")
+    # A live WAL database needs an on-disk coherent copy. Never copy a bare DB
+    # while omitting its WAL, and never load the history database into RAM.
+    largest_db = max((p.stat().st_size for p in databases), default=0)
+    require_space(destination, largest_db)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    archive = destination / f"snapshot-{stamp}-{time.time_ns()}.tar.gz"
+    descriptor, temporary = tempfile.mkstemp(prefix=".snapshot-", dir=destination)
+    os.close(descriptor)
+    inventory = []
+    try:
+        with (
+            SpaceCheckedWriter(temporary, destination) as output,
+            tarfile.open(fileobj=output, mode="w:gz", compresslevel=1) as bundle,
+        ):
+            # Stage databases before transcripts so a large coherent DB copy
+            # does not compete with an almost complete transcript archive.
+            for path in databases:
+                with tempfile.TemporaryDirectory(prefix=".database-", dir=destination) as scratch:
+                    copy = Path(scratch) / path.name
+                    source = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+                    target = sqlite3.connect(copy)
+                    deadline = time.monotonic() + 120
+                    page_size = source.execute("PRAGMA page_size").fetchone()[0]
+
+                    def progress(
+                        _status: int,
+                        remaining: int,
+                        _total: int,
+                        deadline: float = deadline,
+                        page_size: int = page_size,
+                    ) -> None:
+                        if time.monotonic() > deadline:
+                            raise TimeoutError("database snapshot exceeded 120 seconds")
+                        require_space(destination, remaining * page_size)
+
+                    try:
+                        source.backup(target, pages=1024, progress=progress)
+                        if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                            raise ValueError("database snapshot failed integrity check")
+                    finally:
+                        target.close()
+                        source.close()
+                    info = bundle.gettarinfo(str(copy), arcname="codex/" + path.name)
+                    info.mode = 0o600
+                    with copy.open("rb") as handle:
+                        bundle.addfile(info, handle)
+                    inventory.append({"path": info.name, "bytes": info.size})
+            for path, name in files:
+                # tarfile reads exactly the recorded size if a rollout grows.
+                info = bundle.gettarinfo(str(path), arcname=name)
+                info.mode = 0o600
+                with path.open("rb") as handle:
+                    bundle.addfile(info, handle)
+                inventory.append({"path": name, "bytes": info.size})
+            metadata = json.dumps(
+                {
+                    "schema": 1,
+                    "created_at": time.time(),
+                    "manifest_save_ok": save_ok,
+                    "files": inventory,
+                    "note": "Private history; excludes auth/config. Databases are individually consistent.",
+                }
+            ).encode()
+            info = tarfile.TarInfo("snapshot.json")
+            info.size, info.mode = len(metadata), 0o600
+            bundle.addfile(info, io.BytesIO(metadata))
+        with open(temporary, "rb") as handle:
+            os.fsync(handle.fileno())
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        os.replace(temporary, archive)
+        atomic_json(
+            destination / "latest.json",
+            {
+                "archive": archive.name,
+                "created_at": time.time(),
+                "sha256": digest.hexdigest(),
+                "bytes": archive.stat().st_size,
+                "manifest_save_ok": save_ok,
+            },
+        )
+        # Only rotate archives owned by this command, after a complete new one
+        # has been published. Existing incident-recovery snapshots stay intact.
+        owned = sorted(
+            p
+            for p in destination.glob("snapshot-*.tar.gz")
+            if re.fullmatch(r"snapshot-\d{8}T\d{6}-\d+\.tar\.gz", p.name)
+            and p.is_file()
+            and not p.is_symlink()
+        )
+        for old in owned[:-keep]:
+            old.unlink()
+        return archive
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def run_once(args: argparse.Namespace, codex: Path, config: Path, state: Path) -> int:
+    private_directory(args.destination)
+    status = {
+        "checked_at": time.time(),
+        "manifest_save_ok": False,
+        "backup_ok": False,
+        "destination": str(args.destination.resolve()),
+    }
+    with (args.destination / ".backup.lock").open("a+b") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("Another Codex backup is already running.", file=sys.stderr)
+            return 1
+        try:
+            if not args.skip_save:
+                save = Path(
+                    os.environ.get("CODEX_SAVE_BIN", str(Path(__file__).with_name("codex-save")))
+                )
+                try:
+                    result = subprocess.run(
+                        [str(save), "--all-registered"],
+                        timeout=180,
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    status["manifest_save_ok"] = result.returncode == 0
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                if not status["manifest_save_ok"]:
+                    print(
+                        "Farm manifest save failed; preserving conversation history anyway.",
+                        file=sys.stderr,
+                    )
+            latest_path = args.destination / "latest.json"
+            try:
+                latest = json.loads(latest_path.read_text()) if latest_path.exists() else {}
+                if not isinstance(latest, dict):
+                    latest = {}
+            except (OSError, ValueError):
+                latest = {}
+            previous = args.destination / Path(str(latest.get("archive", "missing"))).name
+            try:
+                created_at = float(latest.get("created_at", 0))
+                snapshot_age = time.time() - created_at
+            except (ValueError, TypeError):
+                snapshot_age = math.inf
+            recent = previous.is_file() and not previous.is_symlink()
+            if recent and math.isfinite(snapshot_age) and 0 <= snapshot_age < args.min_age:
+                status["backup_ok"] = True
+                status["archive"] = latest["archive"]
+                print(
+                    "Conversation snapshot is recent; manifest save checked.",
+                    flush=True,
+                )
+            else:
+                archive = snapshot(
+                    codex,
+                    config,
+                    args.destination,
+                    args.keep,
+                    status["manifest_save_ok"],
+                )
+                status["backup_ok"] = True
+                status["archive"] = archive.name
+                print(f"Conversation backup saved: {archive}", flush=True)
+        except (
+            OSError,
+            ValueError,
+            sqlite3.Error,
+            tarfile.TarError,
+            TimeoutError,
+        ) as error:
+            status["error_type"] = type(error).__name__
+            # Never print database rows, transcripts, or provider command output.
+            print(
+                f"Codex backup failed ({type(error).__name__}); prior snapshots preserved.",
+                file=sys.stderr,
+            )
+        status["checked_at"] = time.time()
+        atomic_json(state / "backup-status.json", status)
+    return 0 if status["backup_ok"] and (args.skip_save or status["manifest_save_ok"]) else 1
+
+
+def timer_active() -> bool:
+    try:
+        return (
+            subprocess.run(
+                ["systemctl", "--user", "is-active", "--quiet", "codex-autosave.timer"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def main() -> int:
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--destination", type=Path, help="private backup directory")
+    parser.add_argument("--keep", type=int, default=os.environ.get("CODEXFARM_BACKUP_KEEP", "2"))
+    parser.add_argument("--min-age", type=int, default=0, help="minimum snapshot age in seconds")
+    parser.add_argument(
+        "--skip-save",
+        action="store_true",
+        help="snapshot without saving live tmux identities",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="fallback scheduler; exits when the systemd timer is active",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=300,
+        help="watch interval in seconds (minimum 10)",
+    )
+    args = parser.parse_args()
+    if not 1 <= args.keep <= 100 or args.min_age < 0 or args.interval < 10:
+        parser.error("keep must be 1..100, min-age nonnegative, and interval at least 10")
+    state = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "codexfarm"
+    config = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "codexfarm"
+    codex = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+    private_directory(state)
+    args.destination = args.destination or state / "backups"
+    if not args.watch:
+        return run_once(args, codex, config, state)
+    with (state / "backup-watch.lock").open("a+b") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("Codex backup watcher is already running.", file=sys.stderr)
+            return 1
+        atomic_json(state / "backup-watch.json", {"pid": os.getpid(), "started_at": time.time()})
+        try:
+            while not timer_active():
+                run_once(args, codex, config, state)
+                time.sleep(args.interval)
+            print("Systemd autosave timer is active; fallback watcher exiting.", flush=True)
+        finally:
+            (state / "backup-watch.json").unlink(missing_ok=True)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError) as error:
+        print(
+            f"Codex backup unavailable ({type(error).__name__}); check paths and permissions.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
