@@ -132,15 +132,23 @@ def snapshot(codex: Path, config: Path, destination: Path, keep: int, save_ok: b
                     def progress(
                         _status: int,
                         remaining: int,
-                        _total: int,
+                        total: int,
                         deadline: float = deadline,
                         page_size: int = page_size,
+                        copy: Path = copy,
                     ) -> None:
                         if time.monotonic() > deadline:
                             raise TimeoutError("database snapshot exceeded 120 seconds")
-                        require_space(destination, remaining * page_size)
+                        # A restarted copy can overwrite already allocated
+                        # pages. Do not charge those disk blocks a second time.
+                        allocated = copy.stat().st_blocks * 512
+                        require_space(destination, max(0, total * page_size - allocated))
 
                     try:
+                        # Hold one WAL read view so active chats do not restart
+                        # a large backup on every commit. Writers can continue.
+                        source.execute("BEGIN")
+                        source.execute("SELECT name FROM sqlite_schema LIMIT 1").fetchone()
                         source.backup(target, pages=1024, progress=progress)
                         if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                             raise ValueError("database snapshot failed integrity check")

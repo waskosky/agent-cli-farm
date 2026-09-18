@@ -171,6 +171,51 @@ class BackupTests(unittest.TestCase):
         with tarfile.open(next(self.destination.glob("*.tar.gz"))) as bundle:
             self.assertEqual(bundle.getnames()[0], "codex/state_5.sqlite")
 
+    def test_active_wal_writer_continues_while_backup_keeps_one_read_view(self):
+        database = self.codex / "thread_history_1.sqlite"
+        writer = sqlite3.connect(database)
+        self.addCleanup(writer.close)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE messages(value INTEGER, padding BLOB)")
+        writer.execute("INSERT INTO messages VALUES (0, zeroblob(6291456))")
+        writer.commit()
+        loader = importlib.machinery.SourceFileLoader(
+            "backup_live_test", str(ROOT / "bin/codex-backup")
+        )
+        module = importlib.util.module_from_spec(
+            importlib.util.spec_from_loader(loader.name, loader)
+        )
+        loader.exec_module(module)
+        connect = sqlite3.connect
+        changed = False
+
+        class ActiveSource(sqlite3.Connection):
+            def backup(self, target, *, pages, progress):
+                def update_during_copy(status, remaining, total):
+                    nonlocal changed
+                    if remaining and not changed:
+                        writer.execute("UPDATE messages SET value=1")
+                        writer.commit()
+                        changed = True
+                    progress(status, remaining, total)
+
+                return super().backup(target, pages=pages, progress=update_during_copy)
+
+        self.destination.mkdir()
+        with patch.object(
+            module.sqlite3,
+            "connect",
+            side_effect=lambda *a, **kw: connect(*a, **kw, factory=ActiveSource),
+        ):
+            archive = module.snapshot(self.codex, self.root / "config", self.destination, 1, True)
+        self.assertTrue(changed, "the writer must commit while the snapshot is in progress")
+        self.assertEqual(writer.execute("SELECT value FROM messages").fetchone()[0], 1)
+        with tarfile.open(archive) as bundle:
+            recovered = self.root / "recovered.sqlite"
+            recovered.write_bytes(bundle.extractfile("codex/thread_history_1.sqlite").read())
+        with connect(recovered) as restored:
+            self.assertEqual(restored.execute("SELECT value FROM messages").fetchone()[0], 0)
+
     def test_invalid_snapshot_timestamp_does_not_hide_stale_backup(self):
         self.assertEqual(self.run_backup().returncode, 0)
         latest = self.destination / "latest.json"
