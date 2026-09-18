@@ -10,7 +10,8 @@ Usage: $PROGRAM_NAME [THRESHOLD_MB]
        $PROGRAM_NAME --threshold THRESHOLD_MB [--dry-run]
 
 Prefix tmux window titles whose pane process trees use at least the threshold RSS.
-The default threshold is 200 MiB, which adds a marker like *200+MB**.
+The default threshold is 200 MiB. Markers show measured usage, e.g. *349.1MB**.
+The annotator refreshes opted-in, managed windows every 15 seconds when running.
 
 Options:
   -t, --threshold VALUE  Threshold in MiB, or an integer with M/MB/G/GB suffix
@@ -88,7 +89,6 @@ done
 
 threshold_mb="$(parse_threshold_mb "$threshold_arg")"
 threshold_kb=$((threshold_mb * 1024))
-marker="*${threshold_mb}+MB**"
 current_user="$(id -un)"
 current_uid="$(id -u)"
 
@@ -116,10 +116,11 @@ trim_spaces() {
 normalize_title() {
   local title="$1"
   local should_mark="$2"
+  local marker="$3"
   local status=""
   local current
 
-  title="$(printf '%s' "$title" | sed -E 's/\*[0-9]+(\.[0-9]+)?\+MB\*\*[[:space:]]*//g' | trim_spaces)"
+  title="$(printf '%s' "$title" | sed -E 's/\*[0-9]+(\.[0-9]+)?\+?MB\*\*[[:space:]]*//g' | trim_spaces)"
 
   while [[ "$title" =~ ^\*([Rr][Ee][Aa][Dd][Yy]|[Rr][Uu][Nn]|[Ee][Rr][Rr])\*[[:space:]]*(.*)$ ]]; do
     current="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
@@ -276,6 +277,7 @@ marked=0
 cleared=0
 unchanged=0
 rename_failed=0
+tracking_failed=0
 
 i=0
 while [ "$i" -lt "${#window_keys[@]}" ]; do
@@ -286,7 +288,15 @@ while [ "$i" -lt "${#window_keys[@]}" ]; do
   fi
 
   old_name="${window_name[$i]}"
-  new_name="$(normalize_title "$old_name" "$should_mark")"
+  rss_mb="$(LC_ALL=C awk -v kb="$rss_kb" 'BEGIN { printf "%.1f", kb / 1024 }')"
+  new_name="$(normalize_title "$old_name" "$should_mark" "*${rss_mb}MB**")"
+  window_target="${window_id_by_key[$i]}"
+  if [ "$dry_run" -eq 0 ]; then
+    if ! run_tmux "${window_socket[$i]}" set-window-option -t "$window_target" @codexfarm_memory_threshold_mib "$threshold_mb" >/dev/null 2>&1; then
+      echo "$PROGRAM_NAME: could not enable memory refresh for ${window_session[$i]}:${window_index[$i]}" >&2
+      tracking_failed=$((tracking_failed + 1))
+    fi
+  fi
 
   if [ "$old_name" = "$new_name" ]; then
     unchanged=$((unchanged + 1))
@@ -299,12 +309,12 @@ while [ "$i" -lt "${#window_keys[@]}" ]; do
     action="MARK"
   fi
 
-  printf '%s\t%s\t%s:%s\t%.1f MiB\t%s -> %s\n' \
+  printf '%s\t%s\t%s:%s\t%s MiB\t%s -> %s\n' \
     "$action" \
     "${window_owner[$i]}" \
     "${window_session[$i]}" \
     "${window_index[$i]}" \
-    "$(awk -v kb="$rss_kb" 'BEGIN { printf "%.1f", kb / 1024 }')" \
+    "$rss_mb" \
     "$old_name" \
     "$new_name"
 
@@ -313,7 +323,6 @@ while [ "$i" -lt "${#window_keys[@]}" ]; do
     continue
   fi
 
-  window_target="${window_id_by_key[$i]}"
   run_tmux "${window_socket[$i]}" set-window-option -t "$window_target" automatic-rename off >/dev/null 2>&1 || true
   run_tmux "${window_socket[$i]}" set-window-option -t "$window_target" allow-rename off >/dev/null 2>&1 || true
 
@@ -332,5 +341,5 @@ done
 if [ "$dry_run" -eq 1 ]; then
   echo "Dry run complete: ${#window_keys[@]} windows scanned, threshold ${threshold_mb} MiB, ${skipped_sockets} sockets skipped."
 else
-  echo "Complete: ${marked} marked/updated, ${cleared} cleared, ${unchanged} unchanged, ${rename_failed} rename failures, ${skipped_sockets} sockets skipped."
+  echo "Complete: ${marked} marked/updated, ${cleared} cleared, ${unchanged} unchanged, ${rename_failed} rename failures, ${tracking_failed} refresh failures, ${skipped_sockets} sockets skipped."
 fi

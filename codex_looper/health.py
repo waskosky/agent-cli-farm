@@ -6,11 +6,30 @@ import argparse
 import json
 import math
 import os
+import re
 import subprocess
 import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+MEMORY_FLAG_PATTERN = r"\*[0-9]+(?:\.[0-9]+)?\+?MB\*\*"
+
+
+def refresh_memory_title(tmux, window: str, name: str, threshold: str, mib: float) -> None:
+    """Only manage titles explicitly opted in by codex-memoryflag."""
+    try:
+        cutoff = float(threshold)
+    except ValueError:
+        return
+    if not math.isfinite(cutoff) or cutoff <= 0:
+        return
+    base = re.sub(MEMORY_FLAG_PATTERN + r"\s*", "", name).strip()
+    updated = f"*{mib:.1f}MB** {base}".rstrip() if mib >= cutoff else base
+    if updated != name:
+        tmux(["tmux", "set-window-option", "-t", window, "automatic-rename", "off"])
+        tmux(["tmux", "set-window-option", "-t", window, "allow-rename", "off"])
+        tmux(["tmux", "rename-window", "-t", window, updated])
 
 
 def state_directory() -> Path:
@@ -188,13 +207,25 @@ class HealthMonitor:
         self.last_sample = now
         memory = read_memory()
         roots: dict[str, set[int]] = {}
+        titles: dict[str, tuple[str, str]] = {}
         sessions: set[str] = set()
-        panes = tmux(["tmux", "list-panes", "-a", "-F", "#{session_id}\t#{window_id}\t#{pane_pid}"])
+        panes = tmux(
+            [
+                "tmux",
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_id}\t#{window_id}\t#{pane_pid}"
+                "\t#{@codexfarm_memory_threshold_mib}\t#{window_name}",
+            ]
+        )
         for line in (panes or "").splitlines():
-            parts = line.split("\t")
-            if len(parts) == 3 and parts[1] in window_ids and parts[2].isdigit():
+            parts = line.split("\t", 4)
+            if len(parts) >= 3 and parts[1] in window_ids and parts[2].isdigit():
                 sessions.add(parts[0])
                 roots.setdefault(parts[1], set()).add(int(parts[2]))
+                if len(parts) == 5:
+                    titles[parts[1]] = (parts[4], parts[3])
         try:
             processes = subprocess.run(
                 ["ps", "-eo", "pid=,ppid=,rss="],
@@ -211,6 +242,9 @@ class HealthMonitor:
         if level in {"warning", "critical"}:
             observed.add("host")
         for window, mib in totals.items():
+            if window in titles:
+                name, threshold = titles[window]
+                refresh_memory_title(tmux, window, name, threshold, mib)
             tmux(
                 ["tmux", "set-option", "-w", "-t", window, "@codexfarm_memory_mib", str(round(mib))]
             )

@@ -432,9 +432,11 @@ or older-than-60-second heartbeat once managed sessions have been registered.
 If the annotator itself stops, run the doctor: a dead process cannot issue its
 own live warning. Host pressure checks currently require Linux counters.
 
-### Manual memory flags
+### Memory labels
 
-Run `codex-memoryflag` to prefix high-memory tmux windows with a marker such as `*200+MB**`. It scans tmux sockets available to the current user, sums each window's pane process trees by RSS, and renames windows at or above the threshold. Existing memory markers are updated or cleared on each run, so window renaming is an intentional side effect.
+Run `codex-memoryflag` to prefix high-memory tmux windows with measured usage, such as `*349.1MB**`. The compact `MB` label uses MiB (1024 KiB), rounded to one decimal place. It scans tmux sockets available to the current user, sums each window's pane process trees by RSS, and renames windows at or above the threshold. The threshold controls when the label appears; the number is the measured RSS, not the threshold. Shared pages can count more than once.
+
+Each run updates or clears existing labels, including old `*200+MB**` markers, and records the chosen threshold in the per-window `@codexfarm_memory_threshold_mib` option. The running annotator refreshes opted-in windows it manages on its socket every 15 seconds, removing the marker below the threshold and restoring it if usage rises again. Without the annotator and its health monitor, labels remain snapshots until the next command run. Native titles remain the default for windows that have not opted in; memory labeling intentionally manages window names. A dry run changes neither titles nor options.
 
 ```bash
 codex-memoryflag        # flag windows at 200 MiB and up
@@ -443,7 +445,7 @@ codex-memoryflag 1G     # flag windows at 1024 MiB and up
 codex-memoryflag -n     # dry run
 ```
 
-The status annotator preserves memory markers if legacy title updates are enabled, so a title can read `*200+MB** *RUN* project-name`.
+Rerun the command with another threshold to change it. To stop automatic memory-title refresh for a window, unset its option with `tmux set-option -wu -t TARGET @codexfarm_memory_threshold_mib`; the last title remains until renamed. The status annotator preserves memory markers if legacy title updates are enabled, so a title can read `*349.1MB** *RUN* project-name`. The separate large-chat health warning still defaults to 1024 MiB.
 
 Tuning and controls:
 - Disable autostart: `CODEX_ANNOTATOR_AUTOSTART=0`
