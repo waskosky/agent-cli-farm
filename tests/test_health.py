@@ -15,6 +15,7 @@ from codex_looper.health import (
     backup_issues,
     main,
     read_memory,
+    refresh_memory_title,
     tree_memory,
 )
 
@@ -161,6 +162,63 @@ class HealthTests(unittest.TestCase):
         self.assertTrue(
             any(call[1] == "display-message" and "CRITICAL" in call[-1] for call in calls)
         )
+
+    def test_memory_labels_refresh_clear_and_reappear_only_for_opted_in_windows(self):
+        calls = []
+        names = {"@1": "*200+MB** *RUN* project", "@2": "native title"}
+
+        def tmux(command):
+            calls.append(command)
+            if command[1] == "list-panes":
+                return (
+                    f"$1\t@1\t123\t200\t{names['@1']}\n"
+                    f"$1\t@2\t456\t\t{names['@2']}\n"
+                    "$1\t@3\t789\t200\tignored window\n"
+                )
+            if command[1] == "rename-window":
+                names[command[3]] = command[4]
+            return ""
+
+        monitor = HealthMonitor(self.root, Limits())
+        with (
+            patch("codex_looper.health.read_memory", return_value=Memory(8000, 4000, 0)),
+            patch("codex_looper.health.subprocess.run") as processes,
+            patch("codex_looper.health.config_directory", return_value=self.root),
+        ):
+            for now, rss, expected in (
+                (10000, 307200, "*300.0MB** *RUN* project"),
+                (10015, 256000, "*250.0MB** *RUN* project"),
+                (10030, 102400, "*RUN* project"),
+                (10045, 409600, "*400.0MB** *RUN* project"),
+            ):
+                processes.return_value = subprocess.CompletedProcess(
+                    [], 0, f"123 0 {rss}\n456 0 900000\n789 0 900000\n"
+                )
+                monitor.tick({"@1", "@2"}, tmux, now=now)
+                self.assertEqual(names["@1"], expected)
+                self.assertEqual(names["@2"], "native title")
+            calls.clear()
+            monitor.tick({"@1", "@2"}, tmux, now=10060)
+            self.assertFalse(any(call[1] == "rename-window" for call in calls))
+            processes.side_effect = OSError
+            monitor.tick({"@1", "@2"}, tmux, now=10075)
+            self.assertEqual(names["@1"], "*400.0MB** *RUN* project")
+        self.assertFalse(any("@3" in call for call in calls))
+
+    def test_invalid_memory_title_options_leave_native_titles_untouched(self):
+        for threshold in ("", "nan", "inf", "-1", "0", "bad"):
+            with self.subTest(threshold=threshold):
+                calls = []
+                refresh_memory_title(calls.append, "@1", "native title", threshold, 300)
+                self.assertEqual(calls, [])
+
+    def test_memory_title_uses_custom_cutoff_not_the_cutoff_as_its_value(self):
+        calls = []
+        refresh_memory_title(calls.append, "@1", "*512+MB** *READY* project", "1024", 1500.125)
+        self.assertIn(["tmux", "rename-window", "-t", "@1", "*1500.1MB** *READY* project"], calls)
+        calls.clear()
+        refresh_memory_title(calls.append, "@1", "*1500.1MB** *READY* project", "1024", 600)
+        self.assertIn(["tmux", "rename-window", "-t", "@1", "*READY* project"], calls)
 
     def test_doctor_detects_dead_monitor_by_heartbeat(self):
         (self.root / "managed_sessions").touch()

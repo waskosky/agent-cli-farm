@@ -1228,19 +1228,19 @@ esac
 
     def test_codex_save_strips_stacked_status_and_memory_prefixes(self):
         env = self.env.copy()
-        env["STACKED_WINDOW_NAME"] = "*READY* *512+MB** *RUN* proj"
-
-        subprocess.run(
-            [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
-            check=True,
-            env=env,
-        )
-
-        rows = self.manifest.read_text(encoding="utf-8").splitlines()
-        self.assertIn(
-            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
-            rows,
-        )
+        for marker in ("*512+MB**", "*349.1MB**", "*349MB**"):
+            with self.subTest(marker=marker):
+                env["STACKED_WINDOW_NAME"] = f"*READY* {marker} *RUN* proj"
+                subprocess.run(
+                    [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+                    check=True,
+                    env=env,
+                )
+                rows = self.manifest.read_text(encoding="utf-8").splitlines()
+                self.assertIn(
+                    "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+                    rows,
+                )
 
     def test_codex_save_prefers_stable_name_and_provider_pane_options(self):
         env = self.env.copy()
@@ -2097,20 +2097,20 @@ set -euo pipefail
 
     def test_codex_restore_matches_stacked_annotated_window_name(self):
         env = self.env.copy()
-        env["TMUX_WINDOWS_OUTPUT"] = "@9\t*READY* *512+MB** *RUN* proj"
-
-        subprocess.run(
-            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
-            check=True,
-            env=env,
-        )
-
-        add_calls = (
-            self.codex_add_log.read_text(encoding="utf-8").splitlines()
-            if self.codex_add_log.exists()
-            else []
-        )
-        self.assertEqual(add_calls, [])
+        for marker in ("*512+MB**", "*349.1MB**", "*349MB**"):
+            with self.subTest(marker=marker):
+                env["TMUX_WINDOWS_OUTPUT"] = f"@9\t*READY* {marker} *RUN* proj"
+                subprocess.run(
+                    [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+                    check=True,
+                    env=env,
+                )
+                add_calls = (
+                    self.codex_add_log.read_text(encoding="utf-8").splitlines()
+                    if self.codex_add_log.exists()
+                    else []
+                )
+                self.assertEqual(add_calls, [])
 
     def test_codex_restore_rejects_invalid_manifest_header(self):
         self.manifest.write_text("bad\theader\n", encoding="utf-8")
