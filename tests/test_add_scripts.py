@@ -755,6 +755,7 @@ exit 0
         autosave_timer_content = autosave_timer.read_text()
         autorestore_content = autorestore.read_text()
         self.assertIn("codex-save", autosave_content)
+        self.assertIn("After=tmux.service codex-autorestore.service", autosave_content)
         self.assertIn("--all-registered", autosave_content)
         self.assertIn("ExecStart=", autosave_content)
         self.assertIn("OnCalendar=*-*-* *:0/5:00", autosave_timer_content)
@@ -785,6 +786,43 @@ exit 0
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("timer could not be activated", result.stderr)
+
+    def test_restored_window_does_not_restart_opted_in_autoservices(self):
+        choice = Path(self.env["XDG_STATE_HOME"]) / "codexfarm" / "autoservice_choice"
+        choice.parent.mkdir(parents=True)
+        choice.write_text("yes\n")
+        service_log = self.tmpdir / "systemctl-restore.log"
+        make_executable(
+            self.tmpdir / "systemctl",
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$RESTORE_SERVICE_LOG"\n',
+        )
+        result = subprocess.run(
+            [
+                REPO_ROOT / "bin/codex-add",
+                "--session",
+                "recovered",
+                "-d",
+                str(self.tmpdir),
+            ],
+            env={
+                **self.env,
+                "CODEXFARM_RESTORE_PID": str(os.getpid()),
+                "RESTORE_SERVICE_LOG": str(service_log),
+            },
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(service_log.exists(), "restore must not restart its own service")
+        self.assertTrue(any(cmd[0] == "new-window" for cmd in self.read_tmux_commands()))
+        config_dir = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm"
+        self.assertEqual(
+            (config_dir / "farms.tsv").read_text().splitlines(),
+            [
+                "session\tmanifest",
+                f"recovered\t{config_dir / 'manifests' / 'recovered.tsv'}",
+            ],
+        )
 
     def test_autoservice_install_registers_multiple_farms_with_single_units(self):
         systemctl_log = self.tmpdir / "systemctl-session.log"
@@ -945,11 +983,19 @@ class SaveScriptTests(unittest.TestCase):
         )
         tmux_stub = """#!/usr/bin/env bash
 set -euo pipefail
+if [ -n "${SAVE_TMUX_LOG:-}" ]; then printf '%s\\n' "$*" >> "$SAVE_TMUX_LOG"; fi
 case "$1" in
   has-session)
     exit 0
     ;;
   list-windows)
+    if [ "${FAIL_LIST_WINDOWS:-0}" = "1" ]; then
+      exit 1
+    fi
+    if [ "${EMPTY_FARM:-0}" = "1" ]; then
+      printf '0\\n'
+      exit 0
+    fi
     if [ "${MULTI_SESSION:-0}" = "1" ]; then
       printf '0\\n1\\n2\\n3\\n4\\n5\\n6\\n'
     else
@@ -1205,6 +1251,30 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"codex\tresume {session_id}", self.manifest.read_text())
 
+    def test_save_prefers_provider_writer_over_incidental_child_transcript_read(self):
+        codex_home = self.tmpdir / "codex-home"
+        locks = codex_home / "thread-writer-locks"
+        locks.mkdir(parents=True)
+        lock = locks / f"{self.hook_session_id}.lock"
+        lock.touch()
+        proc = self.tmpdir / "proc" / "101"
+        (proc / "fd").mkdir(parents=True)
+        (proc / "fdinfo").mkdir()
+        (proc / "fd/42").symlink_to(lock)
+        (proc / "fdinfo/42").write_text("lock:\t1: FLOCK ADVISORY WRITE 101\n")
+        child = self.tmpdir / "proc" / "102" / "fd"
+        child.mkdir(parents=True)
+        (child / "7").symlink_to(self.codex_session_path)
+        with (self.tmpdir / "pgrep").open("a") as handle:
+            handle.write('if [ "$2" = "101" ]; then printf "102\\n"; fi\n')
+        result = self.run_save(
+            CODEX_HOME=str(codex_home),
+            CODEX_PROC_ROOT=str(proc.parent),
+            NO_CODEX_SESSION="1",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"codex\tresume {self.hook_session_id}", self.manifest.read_text())
+
     def test_codex_save_finds_custom_home_session_for_shell_started_codex(self):
         env = self.env.copy()
         env["SHELL_STARTED_CODEX"] = "1"
@@ -1454,12 +1524,10 @@ esac
     def test_codex_save_trims_quoted_command_with_trailing_space(self):
         env = self.env.copy()
         env["QUOTED_CODEX_START"] = "1"
-        env["NO_CODEX_SESSION"] = "1"
 
         subprocess.run(
             [
                 REPO_ROOT / "bin" / "codex-save",
-                "--allow-fallback",
                 str(self.manifest),
             ],
             check=True,
@@ -1467,7 +1535,9 @@ esac
         )
 
         rows = self.manifest.read_text(encoding="utf-8").splitlines()
-        self.assertIn("proj\t/tmp/project\tcodex\tresume --last", rows)
+        self.assertIn(
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4", rows
+        )
 
     def test_codex_save_refuses_fallback_and_preserves_existing_manifest(self):
         original = b"existing manifest must survive\n"
@@ -1486,7 +1556,7 @@ esac
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.manifest.read_bytes(), original)
         self.assertIn("exact codex session", result.stderr.lower())
-        self.assertIn("--allow-fallback", result.stderr)
+        self.assertNotIn("--allow-fallback", result.stderr)
         self.assertNotIn(self.hook_session_id, result.stderr)
 
     def test_codex_save_all_registered_writes_each_registered_manifest(self):
@@ -1511,7 +1581,7 @@ esac
             rows,
         )
 
-    def test_codex_save_all_registered_propagates_allow_fallback(self):
+    def test_codex_save_all_registered_rejects_allow_fallback(self):
         registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm" / "farms.tsv"
         registry.parent.mkdir(parents=True, exist_ok=True)
         work_manifest = self.tmpdir / "work-fallback.tsv"
@@ -1534,11 +1604,126 @@ esac
             check=False,
         )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(
-            "proj\t/tmp/project\tcodex\tresume --last",
-            work_manifest.read_text(encoding="utf-8").splitlines(),
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(work_manifest.exists())
+
+    def run_save(self, *args, **overrides):
+        return subprocess.run(
+            [REPO_ROOT / "bin" / "codex-save", *args, str(self.manifest)],
+            env={**self.env, **overrides},
+            text=True,
+            capture_output=True,
+            check=False,
         )
+
+    def test_failed_window_listing_does_not_replace_manifest(self):
+        self.manifest.write_text("previous snapshot\n")
+        result = self.run_save(FAIL_LIST_WINDOWS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.manifest.read_text(), "previous snapshot\n")
+
+    def test_save_targets_exact_farm_name(self):
+        log = self.tmpdir / "save-tmux.log"
+        result = self.run_save(CODEX_SESSION="work", SAVE_TMUX_LOG=str(log))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("has-session -t =work", log.read_text().splitlines())
+        self.assertIn("list-windows -t =work -F #{window_index}", log.read_text().splitlines())
+
+    def test_empty_farm_does_not_replace_manifest(self):
+        self.manifest.write_text("previous snapshot\n")
+        result = self.run_save(EMPTY_FARM="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.manifest.read_text(), "previous snapshot\n")
+
+    def test_save_archives_previous_snapshot_and_deduplicates_unchanged_saves(self):
+        result = self.run_save(MULTI_SESSION="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        original = self.manifest.read_bytes()
+        result = self.run_save()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        history = Path(str(self.manifest) + ".history")
+        snapshots = list(history.glob("*.tsv"))
+        self.assertIn(original, [path.read_bytes() for path in snapshots])
+        timestamp = self.manifest.stat().st_mtime_ns
+        result = self.run_save()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.manifest.stat().st_mtime_ns, timestamp)
+        self.assertEqual(list(history.glob("*.tsv")), snapshots)
+
+    def test_autosave_preserves_larger_snapshot_and_archives_current_farm(self):
+        result = self.run_save(MULTI_SESSION="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        original = self.manifest.read_bytes()
+        result = self.run_save("--autosave")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.manifest.read_bytes(), original)
+        self.assertIn("preserved", result.stdout.lower())
+        snapshots = list(Path(str(self.manifest) + ".history").glob("*.tsv"))
+        self.assertTrue(any(len(path.read_text().splitlines()) == 4 for path in snapshots))
+
+    def test_autosave_preserves_different_conversations_even_with_same_window_count(self):
+        result = self.run_save()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        original = self.manifest.read_bytes()
+        result = self.run_save(
+            "--autosave", HOOK_SESSION_ID=self.hook_session_id, HOOK_SESSION_PID="101"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.manifest.read_bytes(), original)
+
+    def test_autosave_promotes_snapshot_that_keeps_every_saved_session(self):
+        self.assertEqual(self.run_save().returncode, 0)
+        result = self.run_save("--autosave", MULTI_SESSION="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.manifest.read_text().splitlines()), 7)
+
+    def test_save_rejects_ambiguous_process_session_files(self):
+        proc_fd_dir = self.tmpdir / "proc" / "101" / "fd"
+        proc_fd_dir.mkdir(parents=True)
+        (proc_fd_dir / "7").symlink_to(self.codex_session_path)
+        (proc_fd_dir / "8").symlink_to(
+            self.codex_session_path.replace(
+                "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4", self.second_codex_session_id
+            )
+        )
+        result = self.run_save(CODEX_PROC_ROOT=str(self.tmpdir / "proc"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.manifest.exists())
+
+    def test_save_inspects_provider_wrapper_descendants(self):
+        pgrep = self.tmpdir / "pgrep"
+        with pgrep.open("a") as handle:
+            handle.write('if [ "$2" = "101" ]; then printf "102\\n"; fi\n')
+        proc_fd_dir = self.tmpdir / "proc" / "102" / "fd"
+        proc_fd_dir.mkdir(parents=True)
+        (proc_fd_dir / "7").symlink_to(self.custom_codex_session_path)
+        result = self.run_save(NO_CODEX_SESSION="1", CODEX_PROC_ROOT=str(self.tmpdir / "proc"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4", self.manifest.read_text())
+
+    @unittest.skipIf(fcntl is None, "advisory file locks are unavailable")
+    def test_save_does_not_trust_lock_marker_inherited_from_tmux(self):
+        lock_path = Path(str(self.manifest) + ".lock")
+        with lock_path.open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            child = subprocess.Popen(
+                [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
+                env={**self.env, "CODEXFARM_LOCKED_MANIFEST": str(self.manifest)},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    child.wait(timeout=3)
+                self.assertFalse(self.manifest.exists())
+                fcntl.flock(handle, fcntl.LOCK_UN)
+                stdout, stderr = child.communicate(timeout=10)
+                self.assertEqual(child.returncode, 0, stdout + stderr)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate()
 
 
 class RestoreScriptTests(unittest.TestCase):
@@ -1639,6 +1824,18 @@ exit 0
         proc.mkdir()
         (proc / "meminfo").write_text("MemTotal: 8000000 kB\nMemAvailable: 4000000 kB\n")
         self.env["CODEX_PROC_ROOT"] = str(proc)
+        identity_stub = self.tmpdir / "pane-identity"
+        make_executable(
+            identity_stub,
+            """#!/usr/bin/env bash
+case "$2" in
+  @9.0) printf 'codex\\t%s\\n' "${EXISTING_SESSION_ID:-019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4}" ;;
+  @10.0) printf 'codex\\t123e4567-e89b-42d3-a456-426614174001\\n' ;;
+  *) exit 1 ;;
+esac
+""",
+        )
+        self.env["CODEX_PANE_IDENTITY_BIN"] = str(identity_stub)
 
     def read_tmux_commands(self) -> list[list[str]]:
         lines = self.tmux_log.read_text(encoding="utf-8").splitlines()
@@ -2003,24 +2200,26 @@ exit 0
             env=env,
         )
 
-    def test_codex_restore_adds_legacy_codex_resume_last(self):
+    def test_codex_restore_rejects_legacy_codex_without_exact_id(self):
         self.manifest.write_text(
             f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tcodex\t\n",
             encoding="utf-8",
         )
 
-        subprocess.run(
+        result = subprocess.run(
             [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
-            check=True,
             env=self.env,
+            text=True,
+            capture_output=True,
         )
-
-        add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(add_calls, [f"proj|codex|resume --last|-d {self.project_dir}"])
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertFalse(self.tmux_log.exists())
 
     def test_codex_restore_uses_manifest_tool_for_claude(self):
+        session_id = "54f5b65c-a31c-4aa1-b91b-896b35e2a759"
         self.manifest.write_text(
-            f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tclaude\t--continue\n",
+            f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tclaude\t--resume {session_id}\n",
             encoding="utf-8",
         )
 
@@ -2031,11 +2230,12 @@ exit 0
         )
 
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(add_calls, [f"proj|claude|--continue|-d {self.project_dir}"])
+        self.assertEqual(add_calls, [f"proj|claude|--resume {session_id}|-d {self.project_dir}"])
 
     def test_codex_restore_uses_manifest_tool_for_gemini(self):
+        session_id = "27bd36d0-2977-4cce-9d5d-33764d915f1d"
         self.manifest.write_text(
-            f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tgemini\t--resume latest\n",
+            f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tgemini\t--resume {session_id}\n",
             encoding="utf-8",
         )
 
@@ -2046,7 +2246,7 @@ exit 0
         )
 
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(add_calls, [f"proj|gemini|--resume latest|-d {self.project_dir}"])
+        self.assertEqual(add_calls, [f"proj|gemini|--resume {session_id}|-d {self.project_dir}"])
 
     def test_codex_restore_keeps_wrapper_provider_for_a_custom_command(self):
         custom_agent = self.tmpdir / "custom-agent"
@@ -2129,8 +2329,9 @@ set -euo pipefail
 
     def test_codex_restore_falls_back_when_saved_directory_is_missing(self):
         missing_dir = self.tmpdir / "missing"
+        session_id = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"
         self.manifest.write_text(
-            f"name\tdir\tcmd\targs\nproj\t{missing_dir}\tcodex\tresume --last\n",
+            f"name\tdir\tcmd\targs\nproj\t{missing_dir}\tcodex\tresume {session_id}\n",
             encoding="utf-8",
         )
 
@@ -2141,7 +2342,161 @@ set -euo pipefail
         )
 
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(add_calls, [f"proj|codex|resume --last|-d {self.tmpdir}"])
+        self.assertEqual(add_calls, [f"proj|codex|resume {session_id}|-d {self.tmpdir}"])
+
+    def test_restore_validates_every_row_before_force_kills_windows(self):
+        with self.manifest.open("a") as handle:
+            handle.write(f"unsafe\t{self.project_dir}\tcodex\tresume --last\n")
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", "--force", str(self.manifest)],
+            env={**self.env, "TMUX_WINDOWS_OUTPUT": "@9\tproj"},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertFalse(self.tmux_log.exists())
+
+    def test_restore_rejects_two_child_ids_for_one_root_before_force(self):
+        first, second = self.write_duplicate_manifest()
+        root_id = "123e4567-e89b-42d3-a456-426614174099"
+        session_dir = self.tmpdir / ".codex" / "sessions"
+        session_dir.mkdir(parents=True)
+        for child_id in (first, second):
+            (session_dir / f"rollout-{child_id}.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": child_id,
+                            "session_id": root_id,
+                            "source": {"subagent": {}},
+                        },
+                    }
+                )
+                + "\n"
+            )
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", "--force", str(self.manifest)],
+            env={**self.env, "TMUX_WINDOWS_OUTPUT": "@9\tdup"},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertFalse(self.tmux_log.exists())
+
+    def test_restore_does_not_claim_success_for_same_name_with_different_conversation(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            env={
+                **self.env,
+                "TMUX_WINDOWS_OUTPUT": "@9\tproj",
+                "EXISTING_SESSION_ID": "123e4567-e89b-42d3-a456-426614174001",
+            },
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertIn("different or unverified conversation", result.stderr)
+
+    def test_restore_finds_exact_conversation_after_window_rename(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            env={**self.env, "TMUX_WINDOWS_OUTPUT": "@9\tchanged-name"},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.codex_add_log.exists())
+
+    def test_restore_continues_other_windows_after_one_launch_fails(self):
+        self.write_duplicate_manifest()
+        add_stub = self.tmpdir / "codex-add"
+        add_stub.write_text(
+            add_stub.read_text().replace(
+                "count=0",
+                'if [[ "$CODEX_ARGS" == *019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4 ]]; then exit 1; fi\ncount=0',
+            )
+        )
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(len(self.codex_add_log.read_text().splitlines()), 2)
+
+    def test_restore_releases_manifest_lock_before_attaching(self):
+        tmux_stub = self.tmpdir / "tmux"
+        tmux_stub.write_text(
+            tmux_stub.read_text().replace(
+                'case "$1" in',
+                """if [ "$1" = attach ]; then
+python3 - <<'PY'
+import fcntl, os
+with open(os.environ["ASSERT_UNLOCKED_MANIFEST"] + ".lock", "a") as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+PY
+fi
+case "$1" in""",
+                1,
+            )
+        )
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", "--attach", str(self.manifest)],
+            env={**self.env, "ASSERT_UNLOCKED_MANIFEST": str(self.manifest)},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_restore_marks_launches_to_avoid_recursive_service_start(self):
+        add_stub = self.tmpdir / "codex-add"
+        add_stub.write_text(
+            add_stub.read_text().replace(
+                "set -euo pipefail",
+                'set -euo pipefail\n[ "${CODEXFARM_RESTORE_PID:-}" = "$PPID" ]',
+                1,
+            )
+        )
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_restore_preserves_empty_directory_field_without_shifting_command(self):
+        session_id = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"
+        self.manifest.write_text(f"name\tdir\tcmd\targs\nproj\t\tcodex\tresume {session_id}\n")
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.codex_add_log.read_text().strip(),
+            f"proj|codex|resume {session_id}|-d {self.tmpdir}",
+        )
+
+    def test_restore_keeps_shell_panes_as_shells(self):
+        self.manifest.write_text(f"name\tdir\tcmd\targs\nshell\t{self.project_dir}\tbash\t\n")
+        result = subprocess.run(
+            [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.codex_add_log.read_text().strip(), f"shell|bash||-d {self.project_dir}"
+        )
 
     def test_codex_restore_all_registered_restores_each_farm_manifest(self):
         work_manifest = self.tmpdir / "work.tsv"

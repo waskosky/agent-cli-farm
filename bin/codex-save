@@ -2,19 +2,23 @@
 set -euo pipefail
 
 # Snapshot the current Codex tmux windows to a manifest file
-# Usage: codex-save [--allow-fallback] [manifest-path]
+# Usage: codex-save [--autosave] [manifest-path]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SESSION_META_BIN="${CODEX_SESSION_META_BIN:-$SCRIPT_DIR/codex-session-meta.py}"
+MANIFEST_BIN="$SCRIPT_DIR/codex-manifest.py"
+original_args=("$@")
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--all-registered] [--allow-fallback] [manifest-path]
+Usage: $(basename "$0") [--all-registered] [--autosave] [manifest-path]
 
 Snapshot tmux farm windows to a trusted restore manifest.
 
-Recognized provider panes require an exact session ID by default. Use
---allow-fallback to permit provider-specific latest-session resume commands.
+Recognized provider panes require an exact session ID. Latest-session fallbacks
+are disabled. All distinct snapshots are retained in <manifest-path>.history/.
+--autosave preserves the restore point when saved conversations would be lost.
+--all-registered always uses this conservative autosave policy.
 EOF
 }
 
@@ -142,6 +146,7 @@ session_id_from_path() {
       printf '%s' "$session_id"
       return 0
     fi
+    return 1
   fi
   session_id="$(extract_uuid_from_session_path "$path")"
   if [ -n "$session_id" ]; then
@@ -202,12 +207,11 @@ session_id_from_procfs() {
     if session_file_matches_tool "$tool" "$path"; then
       session_id="$(session_id_from_path "$tool" "$path" || true)"
       if [ -n "$session_id" ]; then
-        printf '%s' "$session_id"
-        return 0
+        printf '%s\n' "$session_id"
       fi
     fi
   done
-  return 1
+  return 0
 }
 
 session_id_from_process_files() {
@@ -218,14 +222,25 @@ session_id_from_process_files() {
   local pids=()
   [ -n "$pane_pid" ] || return 1
 
-  if [ -n "$provider_pid" ]; then
-    pids+=("$provider_pid")
-  else
-    while IFS= read -r pid; do
-      [ -n "$pid" ] && pids+=("$pid")
-    done < <(descendant_pids "$pane_pid")
+  # A uniquely held writer belongs to the pane's provider. Its helper processes
+  # may read other transcripts without changing the active conversation.
+  if [ "$tool" = codex ] && [ -n "$provider_pid" ] && [ -x "$SESSION_META_BIN" ]; then
+    if session_id="$("$SESSION_META_BIN" resolve-pid "$provider_pid" 2>/dev/null)"; then
+      if valid_session_id "$session_id"; then
+        printf '%s' "$session_id"
+        return 0
+      fi
+    else
+      resolution_status=$?
+      [ "$resolution_status" -ne 3 ] || return 3
+    fi
   fi
 
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && pids+=("$pid")
+  done < <(descendant_pids "${provider_pid:-$pane_pid}")
+
+  local candidates=""
   for pid in "${pids[@]}"; do
     if session_id="$(session_id_from_procfs "$tool" "$pid")"; then
       :
@@ -234,30 +249,35 @@ session_id_from_process_files() {
       [ "$resolution_status" -ne 3 ] || return 3
     fi
     if [ -n "$session_id" ]; then
-      printf '%s' "$session_id"
-      return 0
+      candidates+="$session_id"$'\n'
     fi
   done
 
-  command -v lsof >/dev/null 2>&1 || return 1
-  for pid in "${pids[@]}"; do
-    [ -z "$pid" ] && continue
-    while IFS= read -r line; do
-      case "$line" in
-        n*)
-          path="${line#n}"
-          if session_file_matches_tool "$tool" "$path"; then
-            session_id="$(session_id_from_path "$tool" "$path" || true)"
-            if [ -n "$session_id" ]; then
-              printf '%s' "$session_id"
-              return 0
+  if [ -z "$candidates" ] && command -v lsof >/dev/null 2>&1; then
+    for pid in "${pids[@]}"; do
+      [ -z "$pid" ] && continue
+      while IFS= read -r line; do
+        case "$line" in
+          n*)
+            path="${line#n}"
+            if session_file_matches_tool "$tool" "$path"; then
+              session_id="$(session_id_from_path "$tool" "$path" || true)"
+              if [ -n "$session_id" ]; then
+                candidates+="$session_id"$'\n'
+              fi
             fi
-          fi
-          ;;
-      esac
-    done < <(lsof -Fn -p "$pid" 2>/dev/null || true)
-  done
+            ;;
+        esac
+      done < <(lsof -Fn -p "$pid" 2>/dev/null || true)
+    done
+  fi
 
+  candidates="$(printf '%s' "$candidates" | sort -u)"
+  if valid_session_id "$candidates"; then
+    printf '%s' "$candidates"
+    return 0
+  fi
+  [ -z "$candidates" ] || echo "Ambiguous $tool session files in pane process tree; refusing to guess." >&2
   return 1
 }
 
@@ -286,8 +306,8 @@ tool_from_process_argv() {
     token="${token%\'}"
     base="${token##*/}"
     case "$base" in
-      codex|claude|gemini)
-        printf '%s' "$base"
+      codex|codex.js|codex.exe|claude|claude.exe|gemini|gemini.js|gemini.exe)
+        printf '%s' "${base%%.*}"
         return 0
         ;;
     esac
@@ -376,20 +396,39 @@ session_id_for_pane() {
   return 1
 }
 
+provider_for_pane() {
+  local pane_target="$1" pane_pid="$2" start_command="$3" current_command="$4"
+  local tool
+  tool="$(pane_option "$pane_target" @codexfarm_provider)"
+  case "$tool" in
+    codex|claude|gemini) ;;
+    *) tool="" ;;
+  esac
+  [ -n "$tool" ] || tool="$(tool_from_command "$start_command" || true)"
+  [ -n "$tool" ] || tool="$(tool_from_command "$current_command" || true)"
+  [ -n "$tool" ] || tool="$(tool_from_process_tree "$pane_pid" || true)"
+  printf '%s' "$tool"
+}
+
+inspect_pane() {
+  local pane="$1" start_command current_command pid dead tool provider_pid session_id
+  start_command=$(tmux display-message -p -t "$pane" '#{pane_start_command}') || return 1
+  current_command=$(tmux display-message -p -t "$pane" '#{pane_current_command}') || return 1
+  pid=$(tmux display-message -p -t "$pane" '#{pane_pid}') || return 1
+  dead=$(tmux display-message -p -t "$pane" '#{pane_dead}') || return 1
+  tool="$(provider_for_pane "$pane" "$pid" "$start_command" "$current_command")"
+  [ -n "$tool" ] || return 1
+  provider_pid="$(provider_pid_from_process_tree "$tool" "$pid" || true)"
+  session_id="$(session_id_for_pane "$tool" "$pane" "$pid" "$provider_pid" "$dead")" || return 1
+  printf '%s\t%s\n' "$tool" "$session_id"
+}
+
 exact_resume_args() {
   local tool="$1"
   local session_id="$2"
   case "$tool" in
     codex) printf 'resume %s' "$session_id" ;;
     claude|gemini) printf -- '--resume %s' "$session_id" ;;
-  esac
-}
-
-fallback_resume_args() {
-  case "$1" in
-    codex) printf 'resume --last' ;;
-    claude) printf -- '--continue' ;;
-    gemini) printf -- '--resume latest' ;;
   esac
 }
 
@@ -412,12 +451,8 @@ default_manifest_path_for_session() {
 
 save_all_registered() {
   local session manifest status count
-  local recursive_args=()
   status=0
   count=0
-  if [ "$allow_fallback" -eq 1 ]; then
-    recursive_args+=("--allow-fallback")
-  fi
   if [ ! -f "$AUTOSERVICE_REGISTRY" ]; then
     echo "No registered farms found at $AUTOSERVICE_REGISTRY"
     return 0
@@ -430,7 +465,7 @@ save_all_registered() {
     if [ -z "${manifest:-}" ]; then
       manifest="$(default_manifest_path_for_session "$session")"
     fi
-    if CODEX_SESSION="$session" "$0" "${recursive_args[@]}" "$manifest"; then
+    if CODEX_SESSION="$session" "$0" --autosave "$manifest"; then
       count=$((count + 1))
     else
       status=1
@@ -441,8 +476,15 @@ save_all_registered() {
   return "$status"
 }
 
+# Internal read-only identity query shared with restore. Never writes a manifest.
+if [ "${1:-}" = "--inspect-pane" ]; then
+  [ "$#" -eq 2 ] || exit 2
+  inspect_pane "$2"
+  exit $?
+fi
+
 all_registered=0
-allow_fallback=0
+autosave=0
 args_pos=()
 while (( "$#" )); do
   case "${1:-}" in
@@ -454,8 +496,8 @@ while (( "$#" )); do
       all_registered=1
       shift
       ;;
-    --allow-fallback)
-      allow_fallback=1
+    --autosave)
+      autosave=1
       shift
       ;;
     --)
@@ -494,12 +536,22 @@ fi
 SESSION="${CODEX_SESSION:-$DEFAULT_SESSION}"
 MANIFEST_PATH="${args_pos[0]:-$(default_manifest_path_for_session "$SESSION")}"
 
+if [ "${CODEXFARM_LOCKED_MANIFEST:-}" != "$MANIFEST_PATH" ] \
+  || [ "${CODEXFARM_LOCK_PARENT_PID:-}" != "$PPID" ]; then
+  exec python3 "$MANIFEST_BIN" lock-run "$MANIFEST_PATH" "$0" "${original_args[@]}"
+fi
+export CODEXFARM_LOCK_SCRIPT_PID=$$
+
 if ! command -v tmux >/dev/null; then
   echo "tmux not found" >&2
   exit 127
 fi
 
-if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
+  if [ "$autosave" -eq 1 ]; then
+    echo "Autosave skipped: farm '$SESSION' is not running; previous snapshot preserved."
+    exit 0
+  fi
   echo "Main session '$SESSION' is not running" >&2
   exit 1
 fi
@@ -512,11 +564,17 @@ trap 'rm -f "$tmpfile"' EXIT
 
 printf 'name\tdir\tcmd\targs\n' > "$tmpfile"
 unresolved_sessions=0
+saved_windows=0
+if ! window_indexes="$(tmux list-windows -t "=$SESSION" -F '#{window_index}')"; then
+  echo "Unable to list farm windows; previous snapshot preserved." >&2
+  exit 1
+fi
 
 # Collect windows, skipping the initial 'home' window if present
 while IFS=$'\n' read -r idx; do
-  pane_target="$SESSION:$idx.0"
-  name=$(tmux display-message -p -t "$SESSION:$idx" '#{window_name}')
+  [ -n "$idx" ] || continue
+  pane_target="=$SESSION:$idx.0"
+  name=$(tmux display-message -p -t "=$SESSION:$idx" '#{window_name}')
   name=$(strip_status_prefix "$name")
   stable_name="$(pane_option "$pane_target" @codexfarm_name)"
   if [ -n "$stable_name" ]; then
@@ -531,20 +589,7 @@ while IFS=$'\n' read -r idx; do
   pane_pid=$(tmux display-message -p -t "$pane_target" '#{pane_pid}')
   pane_dead=$(tmux display-message -p -t "$pane_target" '#{pane_dead}' 2>/dev/null || true)
   args=
-  tool="$(pane_option "$pane_target" @codexfarm_provider)"
-  case "$tool" in
-    codex|claude|gemini) ;;
-    *) tool="" ;;
-  esac
-  if [ -z "$tool" ]; then
-    tool="$(tool_from_command "$cmd" || true)"
-  fi
-  if [ -z "$tool" ]; then
-    tool="$(tool_from_command "$current_cmd" || true)"
-  fi
-  if [ -z "$tool" ]; then
-    tool="$(tool_from_process_tree "$pane_pid" || true)"
-  fi
+  tool="$(provider_for_pane "$pane_target" "$pane_pid" "$cmd" "$current_cmd")"
   provider_pid=""
   if [ -n "$tool" ]; then
     provider_pid="$(provider_pid_from_process_tree "$tool" "$pane_pid" || true)"
@@ -558,9 +603,6 @@ while IFS=$'\n' read -r idx; do
       cmd="$tool"
       if [ -n "$session_id" ]; then
         args="$(exact_resume_args "$tool" "$session_id")"
-      elif [ "$allow_fallback" -eq 1 ]; then
-        args="$(fallback_resume_args "$tool")"
-        echo "warning: using fallback resume for $tool window '$name'" >&2
       else
         unresolved_sessions=$((unresolved_sessions + 1))
         echo "Unable to resolve exact $tool session for window '$name'." >&2
@@ -568,21 +610,35 @@ while IFS=$'\n' read -r idx; do
       ;;
     *)
       cmd=$(trim_command_field "$cmd")
+      cmd="${cmd:-$current_cmd}"
       ;;
   esac
-  # Sanitize tabs
-  name=${name//$'\t'/ }
-  dir=${dir//$'\t'/ }
-  cmd=${cmd//$'\t'/ }
-  args=${args//$'\t'/ }
+  for field in "$name" "$dir" "$cmd" "$args"; do
+    if [[ "$field" == *$'\t'* || "$field" == *$'\n'* || "$field" == *$'\r'* ]]; then
+      echo "Window contains an unsupported TSV delimiter; previous snapshot preserved." >&2
+      exit 1
+    fi
+  done
   printf '%s\t%s\t%s\t%s\n' "$name" "$dir" "$cmd" "$args" >> "$tmpfile"
-done < <(tmux list-windows -t "$SESSION" -F '#{window_index}')
+  saved_windows=$((saved_windows + 1))
+done <<< "$window_indexes"
 
 if [ "$unresolved_sessions" -ne 0 ]; then
-  echo "Manifest was not replaced; rerun with --allow-fallback to permit latest-session resumes." >&2
+  echo "Manifest was not replaced. Exact session identity is required; latest-session guessing is disabled." >&2
+  echo "Check codex-doctor and the session hook, then retry after the provider has recorded a conversation." >&2
   exit 1
 fi
 
-mv "$tmpfile" "$MANIFEST_PATH"
-chmod 600 "$MANIFEST_PATH" 2>/dev/null || true
-echo "Saved manifest to $MANIFEST_PATH"
+if [ "$saved_windows" -eq 0 ]; then
+  echo "No restorable windows; previous snapshot preserved." >&2
+  [ "$autosave" -eq 1 ] && exit 0
+  exit 1
+fi
+if ! final_indexes="$(tmux list-windows -t "=$SESSION" -F '#{window_index}')" \
+  || [ "$final_indexes" != "$window_indexes" ]; then
+  echo "Farm windows changed during capture; previous snapshot preserved. Retry save." >&2
+  exit 1
+fi
+publish_args=()
+[ "$autosave" -eq 0 ] || publish_args+=(--autosave)
+python3 "$MANIFEST_BIN" publish "$tmpfile" "$MANIFEST_PATH" "${publish_args[@]}"

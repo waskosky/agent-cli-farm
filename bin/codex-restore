@@ -19,13 +19,18 @@ WRITER_WAIT_SECONDS="${CODEXFARM_RESTORE_WRITER_WAIT_SECONDS:-10}"
 RESTORE_DELAY="${CODEXFARM_RESTORE_DELAY_SECONDS:-2}"
 HEALTH_BIN="${CODEX_HEALTH_BIN:-$SCRIPT_DIR/codex-health}"
 ignore_memory=0
+MANIFEST_BIN="$SCRIPT_DIR/codex-manifest.py"
+PANE_IDENTITY_BIN="${CODEX_PANE_IDENTITY_BIN:-$SCRIPT_DIR/codex-save}"
+original_args=("$@")
 
 usage() {
   cat <<EOF
-Usage: $script_name [-a|--attach] [-f|--force] [--all-registered]
+Usage: $script_name [-a|--attach] [-f|--force] [--all-registered] [--list-snapshots]
        [--delay SECONDS] [--ignore-memory-pressure] [manifest-path]
 
 Restore tmux farm windows from a trusted executable manifest.
+Provider conversations require exact IDs; latest/continue resumes are disabled.
+Use --list-snapshots to find retained snapshots, then pass the chosen path here.
 Launches are spaced by 2 seconds (0..300, also CODEXFARM_RESTORE_DELAY_SECONDS).
 Critical host memory pressure stops restoration before opening more windows.
 --ignore-memory-pressure explicitly bypasses that check; it never stops running chats.
@@ -43,27 +48,6 @@ check_memory() {
   fi
   echo "Restore stopped by memory guard. Saved manifest is unchanged; rerun when memory is available." >&2
   return 1
-}
-
-trim_command_field() {
-  local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  if [ "${#value}" -ge 2 ]; then
-    case "$value" in
-      \"*\")
-        value="${value%\"}"
-        value="${value#\"}"
-        ;;
-      \'*\')
-        value="${value%\'}"
-        value="${value#\'}"
-        ;;
-    esac
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-  fi
-  printf '%s' "$value"
 }
 
 strip_status_prefix() {
@@ -110,7 +94,7 @@ existing_window_targets() {
     if [ "$base_name" = "$wanted_name" ]; then
       printf '%s\n' "$target"
     fi
-  done < <(tmux list-windows -t "$session" -F $'#{window_id}\t#{window_name}')
+  done < <(tmux list-windows -t "=$session" -F $'#{window_id}\t#{window_name}')
 }
 
 existing_window_target() {
@@ -133,89 +117,20 @@ valid_session_id() {
   [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
 }
 
-resolve_codex_session_id() {
-  local session_id="$1"
-  local resolved=""
-  if [ -x "$SESSION_META_BIN" ]; then
-    resolved="$("$SESSION_META_BIN" resolve-id "$session_id" 2>/dev/null || true)"
-  fi
-  if valid_session_id "$resolved"; then
-    printf '%s' "$resolved"
-  else
-    printf '%s' "$session_id"
-  fi
-}
-
 codex_session_is_writable() {
   local session_id="$1"
   [ -x "$SESSION_META_BIN" ] || return 0
   "$SESSION_META_BIN" wait-writable "$session_id" "$WRITER_WAIT_SECONDS" >/dev/null 2>&1
 }
 
-tool_from_command() {
-  local value
-  value="$(trim_command_field "$1")"
-  local first="${value%%[[:space:]]*}"
-  local base="${first##*/}"
-  case "$base" in
-    codex|claude|gemini)
-      printf '%s' "$base"
-      return 0
-      ;;
-  esac
-  return 1
-}
-
-command_args_after_tool() {
-  local value
-  value="$(trim_command_field "$1")"
-  local first="${value%%[[:space:]]*}"
-  if [ "$first" = "$value" ]; then
-    return 0
-  fi
-  value="${value#"$first"}"
-  value="${value#"${value%%[![:space:]]*}"}"
-  printf '%s' "$value"
-}
-
-default_resume_args_for_tool() {
-  case "$1" in
-    codex) printf '%s' "resume --last" ;;
-    claude) printf '%s' "--continue" ;;
-    gemini) printf '%s' "--resume latest" ;;
-  esac
-}
-
-normalize_restore_command() {
-  local raw_cmd="$1"
-  local raw_args="$2"
-  local parsed_tool parsed_args
-
-  RESTORE_CMD="$(trim_command_field "${raw_cmd:-}")"
-  RESTORE_ARGS="${raw_args:-}"
-
-  case "$RESTORE_CMD" in
-    sh|bash|zsh|'')
-      RESTORE_CMD="${CODEX_CMD:-$tool_name}"
-      ;;
-  esac
-
-  parsed_tool="$(tool_from_command "$RESTORE_CMD" || true)"
-  if [ -n "$parsed_tool" ]; then
-    parsed_args="$(command_args_after_tool "$RESTORE_CMD")"
-    RESTORE_CMD="$parsed_tool"
-    if [ -z "$RESTORE_ARGS" ]; then
-      RESTORE_ARGS="$parsed_args"
-    fi
-  fi
-
-  if [ -z "$RESTORE_ARGS" ]; then
-    RESTORE_ARGS="$(default_resume_args_for_tool "$RESTORE_CMD")"
-  fi
-
-  if [ -z "$RESTORE_ARGS" ]; then
-    RESTORE_ARGS="${CODEX_ARGS:-}"
-  fi
+# Bash treats tabs as IFS whitespace and collapses empty columns. Split each
+# delimiter explicitly so a missing directory never becomes the command.
+parse_manifest_row() {
+  local row="$1"
+  name="${row%%$'\t'*}"; row="${row#*$'\t'}"
+  dir="${row%%$'\t'*}"; row="${row#*$'\t'}"
+  cmd="${row%%$'\t'*}"
+  args="${row#*$'\t'}"
 }
 
 exact_session_id_from_restore() {
@@ -252,6 +167,14 @@ name_was_seen() {
   local value
   for value in "${force_names[@]}"; do
     [ "$value" = "$wanted" ] && return 0
+  done
+  return 1
+}
+
+session_already_present() {
+  local wanted="$1"$'\t'"$2" identity
+  for identity in "${existing_identities[@]}"; do
+    [ "$identity" = "$wanted" ] && return 0
   done
   return 1
 }
@@ -299,9 +222,6 @@ restore_all_registered() {
     case "${session:-}" in
       ""|"session"|\#*) continue ;;
     esac
-    if [ -z "$first_session" ]; then
-      first_session="$session"
-    fi
     if [ -z "${manifest:-}" ]; then
       manifest="$(default_manifest_path_for_session "$session")"
     fi
@@ -319,6 +239,7 @@ restore_all_registered() {
     fi
     if CODEX_SESSION="$session" "$0" "${restore_args[@]}"; then
       count=$((count + 1))
+      [ -n "$first_session" ] || first_session="$session"
     else
       status=1
     fi
@@ -334,6 +255,7 @@ restore_all_registered() {
 attach=0
 force=0
 all_registered=0
+list_snapshots=0
 args_pos=()
 while (( "$#" )); do
   case "${1:-}" in
@@ -345,6 +267,7 @@ while (( "$#" )); do
     --delay)
       if [ "$#" -lt 2 ]; then echo "Missing value for --delay" >&2; exit 2; fi
       RESTORE_DELAY="$2"; shift 2 ;;
+    --list-snapshots) list_snapshots=1; shift ;;
     --) shift; while (( "$#" )); do args_pos+=("$1"); shift; done ;;
     -*) echo "Unknown option: $1" >&2; exit 2 ;;
     *) args_pos+=("$1"); shift ;;
@@ -374,6 +297,14 @@ fi
 SESSION="${CODEX_SESSION:-$DEFAULT_SESSION}"
 MANIFEST_PATH="${args_pos[0]:-$(default_manifest_path_for_session "$SESSION")}"
 
+if [ "$list_snapshots" -eq 1 ]; then
+  if [ "$all_registered" -eq 1 ]; then
+    echo "--list-snapshots cannot be combined with --all-registered" >&2
+    exit 2
+  fi
+  exec python3 "$MANIFEST_BIN" history "$MANIFEST_PATH"
+fi
+
 if [ "$all_registered" -eq 1 ]; then
   if ! command -v tmux >/dev/null; then
     echo "tmux not found" >&2
@@ -388,11 +319,24 @@ if [ ! -f "$MANIFEST_PATH" ]; then
   exit 1
 fi
 
-IFS= read -r manifest_header < "$MANIFEST_PATH" || manifest_header=""
-if [ "$manifest_header" != $'name\tdir\tcmd\targs' ]; then
-  echo "Malformed manifest header: $MANIFEST_PATH" >&2
-  exit 2
+if [ "${CODEXFARM_LOCKED_MANIFEST:-}" != "$MANIFEST_PATH" ] \
+  || [ "${CODEXFARM_LOCK_PARENT_PID:-}" != "$PPID" ]; then
+  if python3 "$MANIFEST_BIN" lock-run "$MANIFEST_PATH" "$0" "${original_args[@]}"; then
+    # The snapshot transaction ends before attaching to an interactive client.
+    if [ "$attach" -eq 1 ]; then
+      attach_to_session "$SESSION"
+    fi
+    exit 0
+  else
+    exit $?
+  fi
 fi
+
+# Validate the entire manifest before touching tmux, including --force. Use one
+# stable, normalized copy throughout restore even if the source is replaced.
+validated_manifest=$(mktemp)
+trap 'rm -f "$validated_manifest"' EXIT
+python3 "$MANIFEST_BIN" validate --resolve-codex "$MANIFEST_PATH" > "$validated_manifest" || exit 2
 
 if ! command -v tmux >/dev/null; then
   echo "tmux not found" >&2
@@ -401,14 +345,27 @@ fi
 
 # Ensure session exists
 check_memory || exit 3
-tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
+tmux has-session -t "=$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
+
+existing_identities=()
+if [ "$force" -eq 0 ]; then
+  existing_windows=$(tmux list-windows -t "=$SESSION" -F $'#{window_id}\t#{window_name}')
+  while IFS= read -r window; do
+    [ -n "$window" ] || continue
+    target="${window%%$'\t'*}"
+    dead=$(tmux display-message -p -t "$target.0" '#{pane_dead}')
+    [ "$dead" != 1 ] || continue
+    identity=$("$PANE_IDENTITY_BIN" --inspect-pane "$target.0" 2>/dev/null || true)
+    [ -z "$identity" ] || existing_identities+=("$identity")
+  done <<< "$existing_windows"
+fi
 
 force_names=()
 if [ "$force" -eq 1 ]; then
   {
     IFS= read -r _header || true
-    while IFS=$'\t' read -r name _dir _cmd _args || [ -n "${name:-}" ]; do
-      [ -n "${name:-}" ] || continue
+    while IFS= read -r row; do
+      parse_manifest_row "$row"
       if name_was_seen "$name"; then
         continue
       fi
@@ -422,7 +379,7 @@ if [ "$force" -eq 1 ]; then
         fi
       done < <(existing_window_targets "$SESSION" "$name")
     done
-  } < "$MANIFEST_PATH"
+  } < "$validated_manifest"
 fi
 
 # Read manifest; skip header
@@ -432,24 +389,16 @@ restore_failures=0
 restored=0
 {
   IFS= read -r _header || true
-  while IFS=$'\t' read -r name dir cmd args || [ -n "${name:-}" ]; do
-    [ -z "${name:-}" ] && continue
+  while IFS= read -r row; do
+    parse_manifest_row "$row"
     next_name_occurrence "$name"
     restore_dir="${dir:-$HOME}"
     if [ ! -d "$restore_dir" ]; then
       echo "Warning: saved directory not found, using HOME: $restore_dir" >&2
       restore_dir="$HOME"
     fi
-    if [ "$force" -eq 0 ]; then
-      existing_target="$(
-        existing_window_target "$SESSION" "$name" "$window_occurrence" || true
-      )"
-      if [ -n "$existing_target" ]; then
-        echo "Skipping existing window: $name"
-        continue
-      fi
-    fi
-    normalize_restore_command "${cmd:-}" "${args:-}"
+    RESTORE_CMD="$cmd"
+    RESTORE_ARGS="$args"
     restore_provider="$tool_name"
     case "$RESTORE_CMD" in
       codex|claude|gemini) restore_provider="$RESTORE_CMD" ;;
@@ -458,13 +407,25 @@ restored=0
     exact_session_id="$(
       exact_session_id_from_restore "$RESTORE_CMD" "$RESTORE_ARGS" || true
     )"
-    if [ "$RESTORE_CMD" = "codex" ] && [ -n "$exact_session_id" ]; then
-      resolved_session_id="$(resolve_codex_session_id "$exact_session_id")"
-      if [ "$resolved_session_id" != "$exact_session_id" ]; then
-        exact_session_id="$resolved_session_id"
-        RESTORE_ARGS="resume $exact_session_id"
-        echo "Repairing saved child-thread reference for window: $name" >&2
+    if [ "$force" -eq 0 ]; then
+      if [ -n "$exact_session_id" ] && session_already_present "$RESTORE_CMD" "$exact_session_id"; then
+        echo "Skipping existing conversation: $name"
+        continue
       fi
+      existing_target="$(
+        existing_window_target "$SESSION" "$name" "$window_occurrence" || true
+      )"
+      if [ -n "$existing_target" ]; then
+        if [ -n "$exact_session_id" ]; then
+          echo "Existing window '$name' has a different or unverified conversation; use --force to replace it or restore into another farm." >&2
+          restore_failures=$((restore_failures + 1))
+        else
+          echo "Skipping existing window: $name"
+        fi
+        continue
+      fi
+    fi
+    if [ "$RESTORE_CMD" = "codex" ] && [ -n "$exact_session_id" ]; then
       if ! codex_session_is_writable "$exact_session_id"; then
         echo "Unable to restore Codex window '$name': its conversation is active in another Codex process." >&2
         echo "Switch to it with /resume in the owning TUI, or exit that Codex process and rerun codex-restore." >&2
@@ -477,11 +438,16 @@ restored=0
       sleep "$RESTORE_DELAY"
     fi
     check_memory || exit 3
-    CODEX_TOOL_NAME="$restore_provider" \
+    if ! CODEXFARM_RESTORE_PID="$$" \
+      CODEX_TOOL_NAME="$restore_provider" \
       CODEX_NAME="$name" \
       CODEX_CMD="$RESTORE_CMD" \
       CODEX_ARGS="$RESTORE_ARGS" \
-      "$ADD_BIN" -d "$restore_dir"
+      "$ADD_BIN" -d "$restore_dir"; then
+      echo "Unable to launch saved window: $name" >&2
+      restore_failures=$((restore_failures + 1))
+      continue
+    fi
     restored=$((restored + 1))
 
     if [ -n "$exact_session_id" ]; then
@@ -501,15 +467,11 @@ restored=0
       fi
     fi
   done
-} < "$MANIFEST_PATH"
+} < "$validated_manifest"
 
 if [ "$restore_failures" -ne 0 ]; then
-  echo "Restore incomplete: $restore_failures Codex window(s) still have an active writer." >&2
+  echo "Restore incomplete: $restore_failures window(s) could not be restored." >&2
   exit 1
-fi
-
-if [ "$attach" -eq 1 ]; then
-  attach_to_session "$SESSION"
 fi
 
 echo "Restore complete from $MANIFEST_PATH"

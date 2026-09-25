@@ -398,7 +398,7 @@ install_autoservice_units() {
   cat > "$SYSTEMD_DIR/codex-autosave.service" <<EOF
 [Unit]
 Description=Codex autosave tmux windows
-After=tmux.service
+After=tmux.service codex-autorestore.service
 
 [Service]
 Type=oneshot
@@ -466,6 +466,15 @@ maybe_prompt_autoservice() {
 
   if [ "$install_autoservice_only" -eq 1 ]; then
     choice="yes"
+  fi
+
+  # A restore must not synchronously restart the service that is running it.
+  # Bind the marker to our immediate parent so panes cannot inherit a lasting opt-out.
+  if [ "${CODEXFARM_RESTORE_PID:-}" = "$PPID" ] && [ "$install_autoservice_only" -ne 1 ]; then
+    case "${choice:-${CODEX_AUTOSERVICE_CHOICE:-}}" in
+      y|Y|yes|YES|Yes) register_autoservice_farm ;;
+    esac
+    return 0
   fi
 
   if [ -z "$choice" ]; then

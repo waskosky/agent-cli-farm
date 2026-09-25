@@ -23,7 +23,6 @@ Options:
   -a, --attach           Attach or switch to the restored farm (default)
   -d, --detach           Restore without attaching
       --no-attach        Alias for --detach
-      --allow-fallback   Permit latest-session fallback during the save step
   -h, --help             Show this help
 
 Run this command outside the target farm and its board session. The saved
@@ -58,7 +57,6 @@ resolve_executable() {
 }
 
 attach=1
-allow_fallback=0
 session_arg=""
 positionals=()
 while (( "$#" )); do
@@ -76,9 +74,6 @@ while (( "$#" )); do
       ;;
     -d|--detach|--no-attach)
       attach=0
-      ;;
-    --allow-fallback)
-      allow_fallback=1
       ;;
     -h|--help)
       usage
@@ -170,12 +165,7 @@ fi
 
 printf 'Saving farm %s...\n' "$SESSION"
 save_farm() {
-  if [ "$allow_fallback" -eq 1 ]; then
-    CODEX_TOOL_NAME="$tool_name" CODEX_SESSION="$SESSION" \
-      "$SAVE_BIN" --allow-fallback
-  else
-    CODEX_TOOL_NAME="$tool_name" CODEX_SESSION="$SESSION" "$SAVE_BIN"
-  fi
+  CODEX_TOOL_NAME="$tool_name" CODEX_SESSION="$SESSION" "$SAVE_BIN"
 }
 if ! save_farm; then
   echo "Save failed; farm '$SESSION' was not stopped." >&2

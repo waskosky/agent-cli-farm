@@ -111,7 +111,7 @@ check_static_behavior() {
     require_output "codex-board help" "Usage:" "$repo_root/bin/codex-board" --help
     require_output "codex-farm-reboot help" "Usage:" "$repo_root/bin/codex-farm-reboot" --help
     require_output "codex-doctor help" "Usage:" "$repo_root/bin/codex-doctor" --help
-    require_output "codex-save exact-session help" "allow-fallback" \
+    require_output "codex-save exact-session help" "exact session ID" \
         "$repo_root/bin/codex-save" --help
     require_output "session hook installer help" "session-identity hook" \
         python3 "$repo_root/bin/codex-session-hook-install.py" --help

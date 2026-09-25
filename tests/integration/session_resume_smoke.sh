@@ -71,12 +71,12 @@ printf '{"sessionId":"%s","projectHash":"project-hash"}\n' \
   "$gemini_b" > "$gemini_b_file"
 
 {
-  printf 'codex-a\t%s\n' "$codex_a_file"
-  printf 'codex-b\t%s\n' "$codex_b_file"
-  printf 'claude-a\t%s\n' "$claude_a_file"
-  printf 'claude-b\t%s\n' "$claude_b_file"
-  printf 'gemini-a\t%s\n' "$gemini_a_file"
-  printf 'gemini-b\t%s\n' "$gemini_b_file"
+  printf 'codex-a\t%s\t%s\n' "$codex_a_file" "$codex_a"
+  printf 'codex-b\t%s\t%s\n' "$codex_b_file" "$codex_b"
+  printf 'claude-a\t%s\t%s\n' "$claude_a_file" "$claude_a"
+  printf 'claude-b\t%s\t%s\n' "$claude_b_file" "$claude_b"
+  printf 'gemini-a\t%s\t%s\n' "$gemini_a_file" "$gemini_a"
+  printf 'gemini-b\t%s\t%s\n' "$gemini_b_file" "$gemini_b"
 } > "$session_map"
 
 for provider in codex claude gemini; do
@@ -91,21 +91,21 @@ provider="${0##*/}"
 printf "%s|%s\n" "$provider" "$*" >> "$MOCK_PROVIDER_INVOCATION_LOG"
 label="${1:-}"
 session_file=""
-while IFS=$'"'"'\t'"'"' read -r candidate path; do
+last_arg=""
+for value in "$@"; do last_arg="$value"; done
+ready_key="$provider-$last_arg"
+while IFS=$'"'"'\t'"'"' read -r candidate path identity; do
   if [ "$candidate" = "$label" ]; then
+    session_file="$path"
+    ready_key="$label"
+    break
+  elif [ "$identity" = "$last_arg" ]; then
     session_file="$path"
     break
   fi
 done < "$MOCK_PROVIDER_SESSION_MAP"
 if [ -n "$session_file" ]; then
   exec 9< "$session_file"
-  ready_key="$label"
-else
-  last_arg=""
-  for value in "$@"; do
-    last_arg="$value"
-  done
-  ready_key="$provider-$last_arg"
 fi
 : > "$MOCK_PROVIDER_READY_DIR/$ready_key"
 trap "exit 0" TERM INT
@@ -239,5 +239,22 @@ for label in codex-a codex-b claude-a claude-b gemini-a gemini-b; do
   tmux list-windows -t "$session" -F '#{window_name}' | grep -Fqx "$label"
 done
 echo "[OK] restore launched all six exact provider conversations"
+
+: > "$invocation_log"
+CODEX_SESSION="$session" "$repo_root/bin/codex-restore" "$manifest" >/dev/null
+if [ -s "$invocation_log" ]; then
+  echo "Repeated restore launched duplicate conversations" >&2
+  exit 1
+fi
+echo "[OK] repeated restore recognized exact live conversation identities"
+
+cp "$manifest" "$tmp_root/substantial.tsv"
+for label in codex-b claude-a claude-b gemini-a gemini-b; do
+  tmux kill-window -t "$session:$label"
+done
+CODEX_SESSION="$session" "$repo_root/bin/codex-save" --autosave "$manifest" >/dev/null
+cmp "$manifest" "$tmp_root/substantial.tsv"
+python3 "$repo_root/bin/codex-manifest.py" history "$manifest" | grep -q '^1 windows'
+echo "[OK] one idle conversation could not overwrite the earlier six-session snapshot"
 
 echo "=== Exact Multi-Session Resume Integration Complete ==="

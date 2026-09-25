@@ -221,15 +221,16 @@ codex-save              # writes to ~/.config/codexfarm/manifest.tsv
 CODEX_SESSION=work codex-save
 # writes to ~/.config/codexfarm/manifests/work.tsv
 codex-save --all-registered
-# writes one manifest per farm registered for autoservice
+# conservatively autosaves each registered farm
 
-# Explicitly permit legacy latest-session fallbacks:
-codex-save --allow-fallback
+codex-save --autosave   # preserve the restore point if conversations are missing
 ```
 
 Restore them later (e.g., after reboot or on SSH login):
 ```bash
 codex-restore -a        # recreates and attaches to the session
+codex-restore --list-snapshots  # list retained snapshots and window counts
+codex-restore /path/from/the/list.tsv  # restore a chosen earlier snapshot
 ```
 
 Reboot a running farm through the complete save, stop, and restore sequence:
@@ -238,9 +239,8 @@ Reboot a running farm through the complete save, stop, and restore sequence:
 codex-farm-reboot              # reboot the default farm and attach
 codex-farm-reboot --detach     # restore without attaching
 codex-farm-reboot work         # reboot the named "work" farm
-codex-farm-reboot --allow-fallback --detach
-claude-farm-reboot --detach    # use Claude defaults for fallback restore commands
-gemini-farm-reboot --detach    # use Gemini defaults for fallback restore commands
+claude-farm-reboot --detach
+gemini-farm-reboot --detach
 ```
 
 The reboot command saves before stopping anything, stops a linked board before the main
@@ -251,23 +251,45 @@ exact provider-session discovery is best-effort.
 
 Use `-f` to force re-creation of existing-named windows.
 Managed panes keep a stable logical name in tmux metadata even while a CLI
-changes its visible native title. Duplicate logical names are valid: restore
-matches the first manifest occurrence to the first existing window, the second
-to the second, and so on. Force restore removes all matching occurrences before
-recreating every row.
+changes its visible native title. Duplicate logical names are valid. Restore
+checks exact conversation identity across existing windows, including renamed
+windows. If a same-named window contains a different or unverified conversation,
+restore reports a conflict; use a separate farm or `--force` to deliberately
+replace it. Force restore removes all matching name occurrences before
+recreating every row. Duplicate conversation IDs in a manifest are rejected.
 
-Saved Codex, Claude, and Gemini windows require exact session IDs by default.
+Saved Codex, Claude, and Gemini windows require exact session IDs.
 Codex first uses fresh hook metadata owned by the pane's current provider
-process; all providers can fall back to live session-file discovery. Codex
+process, then its held session writer lock; all providers can fall back to live
+session-file discovery. Codex
 rollout metadata is checked before an ID is saved: multi-agent child threads are
 mapped to their resumable root session, while ordinary forks retain their own
 independent thread IDs. Restore applies the same check, so manifests saved with
 an older farm version are repaired as they are launched. If any recognized
 provider ID is unresolved, `codex-save` exits nonzero and leaves the previous
-manifest intact. `--allow-fallback` explicitly permits
-`codex resume --last`, `claude --continue`, or `gemini --resume latest`.
+manifest intact. Without authoritative hook or writer metadata, multiple
+unrelated session files are treated as ambiguous.
+Latest-session resumes (`codex resume --last`, `claude --continue`, and
+`gemini --resume latest`) and the old `--allow-fallback` option are no longer
+supported. Restore rejects legacy manifests without exact provider IDs before
+creating or removing windows, including with `--force`. Resave the running farm
+or choose a retained exact snapshot to repair an old manifest.
 Only pane 0 is saved. Split layouts and scrollback are not reconstructed. Missing saved directories fall back to `$HOME` with a warning.
-Manifests are written owner-only and via atomic replacement, but they are still trusted executable input because restore launches the recorded commands.
+Manifests are written owner-only, flushed to disk, and atomically replaced.
+Save and restore operations on the same manifest are serialized. Manifests
+remain trusted executable input because restore launches the recorded commands.
+
+Every distinct snapshot is retained beside its manifest in `<manifest>.history/`.
+An unchanged save leaves the restore point and timestamp alone. A manual save
+deliberately replaces the restore point and retains its predecessor. Autosave
+only promotes a snapshot that retains every previously saved conversation and
+generic window. If the farm shrinks, or replaces conversations even at the same
+window count, autosave archives the current snapshot and preserves the prior
+restore point. This protects a substantial earlier farm from an idle single
+session, a partial restore, or windows being closed. Use `codex-save` manually
+when that reduction is intentional. Empty farms never replace a snapshot;
+missing farms are skipped during autosave. History is deduplicated by contents
+and is not automatically pruned.
 
 Codex permits only one writer for a conversation. Restore waits up to 10 seconds
 for a writer left behind by tmux shutdown to exit, then leaves that window
@@ -330,7 +352,7 @@ codex-add --session work --install-autoservice
 codex-add --session personal --install-autoservice
 ```
 
-Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session.
+Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session. Autosave uses the conservative policy above and runs after autorestore when both services start together. Re-run `codex-add --install-autoservice` to refresh existing service definitions. Older units that already invoke `codex-save --all-registered` also receive the conservative policy automatically.
 
 Autosave runs `codex-backup`, which attempts the strict manifest save and then
 preserves Codex history even if session discovery fails. Failure remains a
@@ -473,9 +495,9 @@ Tuning and controls:
 - **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
 - **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
 - **`codex-doctor [--session NAME] [--source DIR] [manifest]`** - Check installed-helper freshness and manifest resume coverage without displaying session IDs
-- **`codex-save [--allow-fallback] [manifest]`** - Snapshot current windows to a manifest (TSV), requiring exact provider IDs by default
-- **`codex-restore [-a] [-f] [manifest]`** - Restore windows from a manifest
-- **`codex-farm-reboot [--detach] [--allow-fallback] [session]`** - Safely save, stop, restore, and optionally attach to a farm
+- **`codex-save [--autosave] [manifest]`** - Save exact conversations with retained snapshot history
+- **`codex-restore [-a] [-f] [--list-snapshots] [manifest]`** - Restore or list retained snapshots
+- **`codex-farm-reboot [--detach] [session]`** - Safely save, stop, restore, and optionally attach to a farm
 
 ### Claude and Gemini Wrappers
 
@@ -534,8 +556,9 @@ CODEX_CMD="cursor" CODEX_ARGS="--wait" codex-add /my/project
 Flags:
 - `codex-add -d`: start without attaching (useful in SSH automation)
 - `codex-restore -a`: attach after restoring; `-f` to replace same-named windows
-- `codex-save --allow-fallback`: explicitly allow provider latest/continue resume commands
-- `codex-farm-reboot -d`: save, stop, and restore without attaching; add `--allow-fallback` only when exact identity cannot be recovered
+- `codex-save --autosave`: retain the previous restore point if conversations are missing
+- `codex-restore --list-snapshots`: find an earlier snapshot to restore by path
+- `codex-farm-reboot -d`: save, stop, and restore without attaching
 
 ## Advanced Usage
 
@@ -676,7 +699,7 @@ agent-cli-farm/
   submitted Codex prompt before hook metadata appears. Save also inspects live
   process file descriptors: Codex under `~/.codex/sessions`, Claude under
   `~/.claude/projects`, and Gemini under a `.gemini/.../chats` directory.
-  Missing provider IDs stop save unless fallback behavior is explicitly enabled.
+  Missing or ambiguous provider IDs stop save and preserve the previous snapshot.
 - A Codex conversation cannot be resumed by two processes at once. In-TUI
   `/fork` can retain the original thread's writer ownership until that process
   unloads it; use the same TUI's `/resume` picker or close the owning process.
