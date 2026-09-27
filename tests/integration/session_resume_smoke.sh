@@ -229,7 +229,7 @@ do
   session_id="${provider_and_id#*:}"
   wait_for_file "$ready_dir/$provider-$session_id"
   case "$provider" in
-    codex) require_invocation "codex|resume $session_id" ;;
+    codex) require_invocation "codex|-c check_for_update_on_startup=false resume $session_id" ;;
     claude) require_invocation "claude|--resume $session_id" ;;
     gemini) require_invocation "gemini|--resume $session_id" ;;
   esac

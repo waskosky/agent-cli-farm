@@ -274,6 +274,11 @@ Latest-session resumes (`codex resume --last`, `claude --continue`, and
 supported. Restore rejects legacy manifests without exact provider IDs before
 creating or removing windows, including with `--force`. Resave the running farm
 or choose a retained exact snapshot to repair an old manifest.
+Restored Codex sessions skip the startup update prompt using the per-launch
+[`check_for_update_on_startup=false`](https://learn.chatgpt.com/docs/config-file/config-reference)
+override, so recovery proceeds directly to the saved conversation. This does
+not change your Codex configuration or saved session IDs; update Codex separately
+when convenient.
 Only pane 0 is saved. Split layouts and scrollback are not reconstructed. Missing saved directories fall back to `$HOME` with a warning.
 Manifests are written owner-only, flushed to disk, and atomically replaced.
 Save and restore operations on the same manifest are serialized. Manifests

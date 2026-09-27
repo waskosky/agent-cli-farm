@@ -1853,6 +1853,7 @@ esac
         return first_id, second_id
 
     def test_codex_restore_launches_saved_codex_resume_command(self):
+        original_manifest = self.manifest.read_bytes()
         subprocess.run(
             [REPO_ROOT / "bin" / "codex-restore", str(self.manifest)],
             check=True,
@@ -1866,8 +1867,12 @@ esac
         )
         self.assertEqual(
             add_calls,
-            [f"proj|codex|resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4|-d {self.project_dir}"],
+            [
+                "proj|codex|-c check_for_update_on_startup=false "
+                f"resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4|-d {self.project_dir}"
+            ],
         )
+        self.assertEqual(self.manifest.read_bytes(), original_manifest)
         self.assertFalse(
             any(cmd and cmd[0] == "send-keys" for cmd in self.read_tmux_commands()),
             "restore should launch the resume command instead of typing it into a running CLI",
@@ -1976,7 +1981,13 @@ esac
 
         self.assertEqual(result.returncode, 0, result.stderr)
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(add_calls, [f"proj|codex|resume {root_id}|-d {self.project_dir}"])
+        self.assertEqual(
+            add_calls,
+            [
+                f"proj|codex|-c check_for_update_on_startup=false resume {root_id}"
+                f"|-d {self.project_dir}"
+            ],
+        )
         self.assertNotIn(child_id, result.stdout + result.stderr)
 
     @unittest.skipIf(fcntl is None, "advisory file locks are unavailable")
@@ -2048,8 +2059,10 @@ esac
         self.assertEqual(
             add_calls,
             [
-                f"dup|codex|resume {first_id}|-d {self.project_dir}",
-                f"dup|codex|resume {second_id}|-d {self.project_dir}",
+                f"dup|codex|-c check_for_update_on_startup=false resume {first_id}"
+                f"|-d {self.project_dir}",
+                f"dup|codex|-c check_for_update_on_startup=false resume {second_id}"
+                f"|-d {self.project_dir}",
             ],
         )
 
@@ -2071,7 +2084,10 @@ esac
         )
         self.assertEqual(
             add_calls,
-            [f"dup|codex|resume {second_id}|-d {self.project_dir}"],
+            [
+                f"dup|codex|-c check_for_update_on_startup=false resume {second_id}"
+                f"|-d {self.project_dir}"
+            ],
         )
 
     def test_codex_restore_is_idempotent_with_two_existing_duplicates(self):
@@ -2342,7 +2358,12 @@ set -euo pipefail
         )
 
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(add_calls, [f"proj|codex|resume {session_id}|-d {self.tmpdir}"])
+        self.assertEqual(
+            add_calls,
+            [
+                f"proj|codex|-c check_for_update_on_startup=false resume {session_id}|-d {self.tmpdir}"
+            ],
+        )
 
     def test_restore_validates_every_row_before_force_kills_windows(self):
         with self.manifest.open("a") as handle:
@@ -2482,7 +2503,7 @@ case "$1" in""",
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             self.codex_add_log.read_text().strip(),
-            f"proj|codex|resume {session_id}|-d {self.tmpdir}",
+            f"proj|codex|-c check_for_update_on_startup=false resume {session_id}|-d {self.tmpdir}",
         )
 
     def test_restore_keeps_shell_panes_as_shells(self):

@@ -432,6 +432,9 @@ restored=0
         restore_failures=$((restore_failures + 1))
         continue
       fi
+      # Keep recovery on the exact conversation instead of entering the updater.
+      # This override belongs to the launch, never the saved manifest or user config.
+      RESTORE_ARGS="-c check_for_update_on_startup=false $RESTORE_ARGS"
     fi
 
     if [ "$restored" -gt 0 ]; then
