@@ -23,6 +23,14 @@ CLAUDE_PROCESSING_PATTERN = (
     rf"|(?:^|\n)\s*{CLAUDE_SPINNER_PATTERN}\s+\S[^\n]*\u2026[^\n]*"
     r"(?:tokens|thinking|effort|\d+s|\d+m)"
 )
+GEMINI_IDLE_PROMPT_PATTERN = r"(?:>|❯|gemini>)"
+GEMINI_WAITING_PATTERN = (
+    r"^(?:Allow|Approve|Do you want to proceed)\b.*(?:\(y/[nN]\)|\(y/n\)|yes/no|\?)"
+)
+GEMINI_ERROR_PATTERN = (
+    r"^(?:Error:|ERROR:|Failed:|Authentication failed|Traceback \(most recent call last\):)"
+)
+GEMINI_PROCESSING_PATTERN = r"^(?:[⠁-⣿]|[✦✧✳])\s*(?:Thinking|Working|Processing|Running|Searching|Reading|Writing)\b|^(?:Thinking|Working|Processing|Running|Searching|Reading|Writing)\.\.\."
 
 
 def strip_ansi(text: str) -> str:
@@ -44,6 +52,10 @@ def is_codex_command(cmd: str) -> bool:
 
 def is_claude_command(cmd: str) -> bool:
     return bool(re.search(r"\bclaude\b", cmd, re.IGNORECASE))
+
+
+def is_gemini_command(cmd: str) -> bool:
+    return bool(re.search(r"\bgemini\b", cmd, re.IGNORECASE))
 
 
 def classify_codex_output(output: str | None) -> str:
@@ -103,6 +115,22 @@ def classify_claude_output(output: str | None) -> str:
     if re.search(CLAUDE_IDLE_PROMPT_AT_END_PATTERN, tail_output, re.MULTILINE):
         return "READY"
     if re.search(CLAUDE_PROCESSING_PATTERN, tail_output, re.MULTILINE):
+        return "RUN"
+    return "READY"
+
+
+def classify_gemini_output(output: str | None) -> str:
+    if not output:
+        return "ERR"
+    recent = tail_lines(strip_ansi(output))
+    if re.search(rf"^\s*{GEMINI_IDLE_PROMPT_PATTERN}\s*\Z", recent, re.MULTILINE):
+        return "READY"
+    tail = non_empty_tail_lines(recent, 8)
+    if re.search(GEMINI_WAITING_PATTERN, tail, re.IGNORECASE | re.MULTILINE):
+        return "READY"
+    if re.search(GEMINI_ERROR_PATTERN, tail, re.IGNORECASE | re.MULTILINE):
+        return "ERR"
+    if re.search(GEMINI_PROCESSING_PATTERN, tail, re.IGNORECASE | re.MULTILINE):
         return "RUN"
     return "READY"
 

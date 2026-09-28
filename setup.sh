@@ -21,9 +21,9 @@ codexfarm_setup_main() (
         cat <<'EOF'
 Usage: setup.sh [--with-deep-history] [--without-session-hook]
 
-Install Agent CLI Farm helpers and the Codex session-identity hook. The
+Install Agent CLI Farm helpers and provider session-identity hooks. The
 --with-deep-history flag also installs the checksum-pinned history backend.
-Use --without-session-hook to leave ~/.codex/hooks.json unchanged.
+Use --without-session-hook to leave provider hook settings unchanged.
 EOF
         exit 0
         ;;
@@ -285,10 +285,19 @@ EOF
     echo ""
     echo "Installing Codex session-identity hook..."
     "$setup_python" "$HOME/bin/codex-session-hook-install.py" \
+      --provider codex \
       --hooks-file "$codex_hooks_file" \
       --hook-command "$HOME/bin/codex-session-hook.py" \
       --python-command "$setup_python"
     echo "Review and trust it with /hooks in Codex CLI."
+    for provider in claude gemini; do
+      echo "Installing $provider session-identity hook..."
+      "$setup_python" "$HOME/bin/codex-session-hook-install.py" \
+        --provider "$provider" \
+        --hooks-file "$HOME/.$provider/settings.json" \
+        --hook-command "$HOME/bin/codex-session-hook.py" \
+        --python-command "$setup_python"
+    done
   else
     echo ""
     echo "Session hook installation skipped."

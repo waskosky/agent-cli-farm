@@ -205,6 +205,69 @@ class LooperCoreTests(unittest.TestCase):
             ],
         )
 
+    def test_native_looper_resumes_only_an_exact_session(self) -> None:
+        context = self.looper.CommandContext(
+            prompt="continue",
+            session="farm",
+            session_id="123e4567-e89b-42d3-a456-426614174001",
+            loop=1,
+            prompt_index=2,
+            label="farm",
+            run_dir=Path("runs/x"),
+        )
+        gemini = self.looper.default_agents()["gemini"]
+        self.assertEqual(gemini.kind, "gemini")
+        self.assertEqual(
+            self.looper.build_command(
+                agent=gemini, context=context, is_first_prompt_in_session=True
+            ),
+            ["gemini", "--output-format", "stream-json", "-p", "continue"],
+        )
+        self.assertEqual(
+            self.looper.build_command(
+                agent=gemini, context=context, is_first_prompt_in_session=False
+            ),
+            [
+                "gemini",
+                "--output-format",
+                "stream-json",
+                "--resume",
+                context.session_id,
+                "-p",
+                "continue",
+            ],
+        )
+        missing = self.looper.CommandContext(
+            prompt="continue",
+            session="farm",
+            session_id="",
+            loop=1,
+            prompt_index=2,
+            label="farm",
+            run_dir=Path("runs/x"),
+        )
+        for agent in (
+            gemini,
+            self.looper.AgentConfig(name="codex", kind="codex"),
+            self.looper.AgentConfig(name="claude", kind="claude"),
+        ):
+            with self.subTest(agent=agent.name):
+                with self.assertRaisesRegex(self.looper.CommandTemplateError, "exact session ID"):
+                    self.looper.build_command(
+                        agent=agent, context=missing, is_first_prompt_in_session=False
+                    )
+
+    def test_gemini_stream_init_records_exact_session(self) -> None:
+        session_id = "123e4567-e89b-42d3-a456-426614174001"
+        parsed = self.looper.parse_output_line(
+            line=json.dumps({"type": "init", "session_id": session_id}) + "\n",
+            stream="stdout",
+            agent_kind="gemini",
+            patterns=self.looper.compile_stop_patterns([r"rate limit"]),
+            scan_stdout=False,
+        )
+        self.assertEqual(parsed.session_id, session_id)
+
     def test_builds_codex_command_with_model_and_effort_sugar(self) -> None:
         agent = self.looper.AgentConfig(
             name="codex",
@@ -295,7 +358,7 @@ class LooperCoreTests(unittest.TestCase):
         context = self.looper.CommandContext(
             prompt="do it",
             session="label-loop-0001",
-            session_id="",
+            session_id="54f5b65c-a31c-4aa1-b91b-896b35e2a759",
             loop=1,
             prompt_index=1,
             label="label",
@@ -339,7 +402,7 @@ class LooperCoreTests(unittest.TestCase):
                 "--max-turns",
                 "20",
                 "--resume",
-                "label-loop-0001",
+                "54f5b65c-a31c-4aa1-b91b-896b35e2a759",
                 "do it",
             ],
         )

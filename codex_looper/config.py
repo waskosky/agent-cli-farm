@@ -294,13 +294,7 @@ def default_agents() -> dict[str, AgentConfig]:
     return {
         "claude": AgentConfig(name="claude", kind="claude", interface="hybrid"),
         "codex": AgentConfig(name="codex", kind="codex", interface="hybrid"),
-        "gemini": AgentConfig(
-            name="gemini",
-            kind="generic",
-            first_command=["gemini", "-p", "{prompt}"],
-            resume_command=["gemini", "-p", "{prompt}"],
-            scan_stdout_for_stop_patterns=True,
-        ),
+        "gemini": AgentConfig(name="gemini", kind="gemini"),
     }
 
 
@@ -525,8 +519,8 @@ def load_config(
         kind = _as_str(
             value.get("kind"), f"agents.{name}.kind", base.kind if base else name, nonempty=True
         )
-        if kind not in {"claude", "codex", "generic"}:
-            raise ConfigError(f"agents.{name}.kind must be claude, codex, or generic")
+        if kind not in {"claude", "codex", "gemini", "generic"}:
+            raise ConfigError(f"agents.{name}.kind must be claude, codex, gemini, or generic")
         interface = _agent_interface(
             value.get("interface"),
             f"agents.{name}.interface",

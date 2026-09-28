@@ -75,12 +75,9 @@ kind = "codex"
 extra_args = []
 
 [agents.gemini]
-kind = "generic"
-# Gemini CLI prompt/resume flags may vary by version; override these templates
-# if your installed Gemini CLI uses a different non-interactive interface.
-first_command = ["gemini", "-p", "{{prompt}}"]
-resume_command = ["gemini", "-p", "{{prompt}}"]
-scan_stdout_for_stop_patterns = true
+kind = "gemini"
+# Uses Gemini stream-json output and exact session IDs for subsequent prompts.
+extra_args = []
 
 # For other coding agents, define command templates. Placeholders are:
 # {{prompt}}, {{session}}, {{session_id}}, {{loop}}, {{prompt_index}}, {{label}}, {{run_dir}}

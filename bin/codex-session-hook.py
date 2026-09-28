@@ -167,6 +167,11 @@ def main() -> int:
     except Exception:
         # Hooks must never interrupt the interactive provider.
         pass
+    if (
+        os.environ.get("CODEXFARM_HOOK_FORMAT") == "json"
+        or os.environ.get("CODEXFARM_PROVIDER") == "gemini"
+    ):
+        print("{}")
     return 0
 
 

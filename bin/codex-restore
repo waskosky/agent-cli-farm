@@ -179,6 +179,37 @@ session_already_present() {
   return 1
 }
 
+conversation_active_in_other_farm() {
+  local wanted="$1"$'\t'"$2" other_sessions other_session windows window target dead identity
+  local own_windows own_window linked_here
+  own_windows=$(tmux list-windows -t "=$SESSION" -F $'#{window_id}\t#{window_name}') || return 2
+  other_sessions=$(tmux list-sessions -F '#{session_name}') || return 2
+  while IFS= read -r other_session; do
+    [ -n "$other_session" ] || continue
+    [ "$other_session" != "$SESSION" ] || continue
+    windows=$(tmux list-windows -t "=$other_session" -F $'#{window_id}\t#{window_name}') || continue
+    while IFS= read -r window; do
+      [ -n "$window" ] || continue
+      target="${window%%$'\t'*}"
+      # Board sessions can link the same tmux window. A linked window is not
+      # another writer, even when it appears under a different session name.
+      linked_here=0
+      while IFS= read -r own_window; do
+        if [ "$target" = "${own_window%%$'\t'*}" ]; then
+          linked_here=1
+          break
+        fi
+      done <<< "$own_windows"
+      [ "$linked_here" -eq 0 ] || continue
+      dead=$(tmux display-message -p -t "$target.0" '#{pane_dead}') || continue
+      [ "$dead" != 1 ] || continue
+      identity=$("$PANE_IDENTITY_BIN" --inspect-pane "$target.0" 2>/dev/null || true)
+      [ "$identity" != "$wanted" ] || return 0
+    done <<< "$windows"
+  done <<< "$other_sessions"
+  return 1
+}
+
 DEFAULT_SESSION="codexfarm"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/codexfarm"
 AUTOSERVICE_REGISTRY="$CONFIG_DIR/farms.tsv"
@@ -362,6 +393,25 @@ fi
 
 force_names=()
 if [ "$force" -eq 1 ]; then
+  # Force must not remove a local window when the replacement conversation is
+  # already live elsewhere (or other farms cannot be inspected).
+  {
+    IFS= read -r _header || true
+    while IFS= read -r row; do
+      parse_manifest_row "$row"
+      preflight_id="$(exact_session_id_from_restore "$cmd" "$args" || true)"
+      [ -n "$preflight_id" ] || continue
+      preflight_status=0
+      conversation_active_in_other_farm "$cmd" "$preflight_id" || preflight_status=$?
+      if [ "$preflight_status" -eq 0 ]; then
+        echo "Cannot force restore '$name': its conversation is active in another farm." >&2
+        exit 1
+      elif [ "$preflight_status" -ne 1 ]; then
+        echo "Cannot inspect other tmux farms before force restoring '$name'." >&2
+        exit 1
+      fi
+    done
+  } < "$validated_manifest"
   {
     IFS= read -r _header || true
     while IFS= read -r row; do
@@ -407,6 +457,18 @@ restored=0
     exact_session_id="$(
       exact_session_id_from_restore "$RESTORE_CMD" "$RESTORE_ARGS" || true
     )"
+    if [ -n "$exact_session_id" ]; then
+      other_farm_status=0
+      conversation_active_in_other_farm "$RESTORE_CMD" "$exact_session_id" || other_farm_status=$?
+      if [ "$other_farm_status" -eq 0 ]; then
+        echo "Skipping existing conversation in another farm: $name"
+        continue
+      elif [ "$other_farm_status" -ne 1 ]; then
+        echo "Unable to inspect other tmux farms before restoring '$name'." >&2
+        restore_failures=$((restore_failures + 1))
+        continue
+      fi
+    fi
     if [ "$force" -eq 0 ]; then
       if [ -n "$exact_session_id" ] && session_already_present "$RESTORE_CMD" "$exact_session_id"; then
         echo "Skipping existing conversation: $name"
@@ -443,6 +505,7 @@ restored=0
     check_memory || exit 3
     if ! CODEXFARM_RESTORE_PID="$$" \
       CODEX_TOOL_NAME="$restore_provider" \
+      CODEX_SESSION="$SESSION" \
       CODEX_NAME="$name" \
       CODEX_CMD="$RESTORE_CMD" \
       CODEX_ARGS="$RESTORE_ARGS" \
@@ -452,6 +515,9 @@ restored=0
       continue
     fi
     restored=$((restored + 1))
+    if [ "$force" -eq 0 ] && [ -n "$exact_session_id" ]; then
+      existing_identities+=("$RESTORE_CMD"$'\t'"$exact_session_id")
+    fi
 
     if [ -n "$exact_session_id" ]; then
       created_target="$(

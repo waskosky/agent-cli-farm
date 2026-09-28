@@ -49,7 +49,7 @@ source ./setup.sh --with-deep-history
 This will:
 - Report missing `tmux` and `multitail` commands without running package-manager installs
 - Create helper scripts in `$HOME/bin/`
-- Merge the session-identity hook into `${CODEX_HOME:-~/.codex}/hooks.json`
+- Merge the session-identity hook into `${CODEX_HOME:-~/.codex}/hooks.json`, `~/.claude/settings.json`, and `~/.gemini/settings.json`
 - Set up logging directories
 - Add `$HOME/bin` to your PATH automatically (bash/zsh/fish) and the current session
 - Verify and install the pinned `tmux-deep-history` release under `$XDG_DATA_HOME/codexfarm/plugins/` (or `~/.local/share/codexfarm/plugins/`)
@@ -61,11 +61,11 @@ After updating an existing checkout, include `--with-deep-history` again if you 
 its compatibility launcher stays in sync with the copied farm commands.
 
 Codex requires review for non-managed command hooks. Open `/hooks` in Codex CLI
-after setup and trust the Agent CLI Farm hook. It receives the active Codex
-`session_id` on `SessionStart` and `UserPromptSubmit`, then records it as an
-invisible tmux pane option. Use `./setup.sh --without-session-hook` (or
-`CODEXFARM_INSTALL_SESSION_HOOK=0`) when you do not want setup to change the
-user hook file.
+after setup and trust the Agent CLI Farm hook. Provider hooks receive the active
+`session_id` on `SessionStart` and `UserPromptSubmit`, then record it as an
+invisible tmux pane option. Existing unrelated hooks and settings are preserved.
+Use `./setup.sh --without-session-hook` (or `CODEXFARM_INSTALL_SESSION_HOOK=0`)
+when you do not want setup to change user hook files.
 
 To explicitly inspect the ID recorded for the current pane, run this inside that
 pane (the command intentionally prints the otherwise hidden conversation ID):
@@ -255,7 +255,8 @@ changes its visible native title. Duplicate logical names are valid. Restore
 checks exact conversation identity across existing windows, including renamed
 windows. If a same-named window contains a different or unverified conversation,
 restore reports a conflict; use a separate farm or `--force` to deliberately
-replace it. Force restore removes all matching name occurrences before
+replace it. An exact conversation already live in another tmux farm is skipped
+during normal restore; `--force` refuses before removing any windows. Force restore removes all matching name occurrences before
 recreating every row. Duplicate conversation IDs in a manifest are rejected.
 
 Saved Codex, Claude, and Gemini windows require exact session IDs.
@@ -360,7 +361,7 @@ codex-add --session personal --install-autoservice
 Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session. Autosave uses the conservative policy above and runs after autorestore when both services start together. Re-run `codex-add --install-autoservice` to refresh existing service definitions. Older units that already invoke `codex-save --all-registered` also receive the conservative policy automatically.
 
 Autosave runs `codex-backup`, which attempts the strict manifest save and then
-preserves Codex history even if session discovery fails. Failure remains a
+preserves provider conversation history even if session discovery fails. Failure remains a
 nonzero service result. Installation reports failure if the user service
 manager or timer cannot be activated. Units preserve the installation PATH so
 Node/NVM commands remain available outside an interactive shell.
@@ -378,8 +379,9 @@ codex-backup --watch --min-age 3600   # foreground fallback when systemd is unav
 
 Backups are private local `snapshot-*.tar.gz` archives under
 `~/.local/state/codexfarm/backups` (or `--destination`). They contain Codex
-rollouts, archived rollouts, history/index files, individually consistent SQLite
-copies of session/history/goal/queue databases, and farm TSV manifests. SQLite
+rollouts, archived rollouts, history/index files, Claude project chat JSONL,
+Gemini chat JSON/JSONL, individually consistent SQLite copies of Codex
+session/history/goal/queue databases, and farm TSV manifests. SQLite
 copies include committed WAL data. The snapshot inventory and `latest.json`
 record save coverage and an archive SHA-256. Authentication files,
 configuration, provider logs, and unrelated home files are excluded. Chats can
@@ -709,7 +711,8 @@ agent-cli-farm/
   `/fork` can retain the original thread's writer ownership until that process
   unloads it; use the same TUI's `/resume` picker or close the owning process.
 - A single positional argument to `codex-add` is interpreted as a farm name when it does not look like a path. Use `--session NAME` to force farm selection when needed.
-- Gemini looper support is generic command execution, not a verified resumable protocol.
+- Gemini JSON-mode looper continuation requires the CLI's `init` event to report
+  a session ID; if it does not, the looper stops before sending another prompt.
 
 ## License
 

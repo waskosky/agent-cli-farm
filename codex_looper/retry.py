@@ -209,6 +209,11 @@ def parse_output_line(
             if isinstance(session_id, str) and session_id:
                 parsed.session_id = session_id
 
+        if agent_kind == "gemini" and event_type == "init":
+            session_id = data.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                parsed.session_id = session_id
+
         if event_type == "rate_limit_event":
             info = data.get("rate_limit_info", {})
             status = info.get("status") if isinstance(info, dict) else None
@@ -222,7 +227,7 @@ def parse_output_line(
 
         if (
             event_type == "result"
-            and subtype == "success"
+            and (subtype == "success" or (agent_kind == "gemini" and data.get("error") is None))
             and data.get("is_error") is not True
             and data.get("api_error_status") in {None, ""}
         ):

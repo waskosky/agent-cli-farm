@@ -128,6 +128,12 @@ class SetupScriptTests(unittest.TestCase):
         self.assertEqual(commands, [expected_command, expected_command])
         self.assertEqual(stat.S_IMODE(hooks_file.stat().st_mode), 0o600)
         self.assertIn("Review and trust it with /hooks", first.stdout)
+        for provider in ("claude", "gemini"):
+            settings = Path(self.env["HOME"]) / f".{provider}" / "settings.json"
+            config = json.loads(settings.read_text(encoding="utf-8"))
+            self.assertEqual(stat.S_IMODE(settings.stat().st_mode), 0o600)
+            self.assertEqual(len(config["hooks"]["SessionStart"]), 1)
+            self.assertEqual(len(config["hooks"]["UserPromptSubmit"]), 1)
 
     def test_without_session_hook_skips_user_config_change(self) -> None:
         (self.bin_dir / "python3").unlink()
@@ -140,6 +146,8 @@ class SetupScriptTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(hooks_file.exists())
+        self.assertFalse((Path(self.env["HOME"]) / ".claude/settings.json").exists())
+        self.assertFalse((Path(self.env["HOME"]) / ".gemini/settings.json").exists())
         self.assertIn("Session hook installation skipped", result.stdout)
 
     def test_sourced_setup_forwards_deep_history_flag(self) -> None:

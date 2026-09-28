@@ -31,10 +31,19 @@ EOF
 }
 
 get_env() {
-  # Prefer tool-specific env var, then CODEX_*, then default.
+  # A restore's exact manifest values must win over ambient provider defaults.
+  # The marker is valid only for the immediate codex-restore -> codex-add hop.
   local key="${TOOL_PREFIX}_$1"
   local fallback="CODEX_$1"
   local default="${2:-}"
+  case "$1" in
+    SESSION|NAME|CMD|ARGS)
+      if [ "${CODEXFARM_RESTORE_PID:-}" = "$PPID" ] && [ -n "${!fallback:-}" ]; then
+        printf '%s' "${!fallback}"
+        return
+      fi
+      ;;
+  esac
   local val="${!key:-}"
   if [ -z "$val" ]; then
     val="${!fallback:-}"

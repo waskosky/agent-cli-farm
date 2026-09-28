@@ -48,7 +48,11 @@ def build_command(
         base.extend(agent_extra_args(agent))
         if is_first_prompt_in_session:
             return [*base, "--name", context.session, context.prompt]
-        return [*base, "--resume", context.session, context.prompt]
+        if not context.session_id:
+            raise CommandTemplateError(
+                "Claude resume needs an exact session ID from the first turn"
+            )
+        return [*base, "--resume", context.session_id, context.prompt]
 
     if agent.kind == "codex":
         base = ["codex", "exec", "--json"]
@@ -57,7 +61,18 @@ def build_command(
             return [*base, context.prompt]
         if context.session_id:
             return [*base, "resume", context.session_id, context.prompt]
-        return [*base, "resume", "--last", context.prompt]
+        raise CommandTemplateError("Codex resume needs an exact session ID from the first turn")
+
+    if agent.kind == "gemini":
+        base = ["gemini", "--output-format", "stream-json"]
+        base.extend(agent_extra_args(agent))
+        if is_first_prompt_in_session:
+            return [*base, "-p", context.prompt]
+        if not context.session_id:
+            raise CommandTemplateError(
+                "Gemini resume needs an exact session ID from the first turn"
+            )
+        return [*base, "--resume", context.session_id, "-p", context.prompt]
 
     if agent.kind == "generic":
         if not agent.first_command:

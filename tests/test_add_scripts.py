@@ -144,6 +144,41 @@ esac
             "claude command should receive expanded -dsp flag",
         )
 
+    def test_restore_launch_overrides_inherited_provider_settings(self):
+        target_dir = self.tmpdir / "restored"
+        target_dir.mkdir()
+        session_id = "54f5b65c-a31c-4aa1-b91b-896b35e2a759"
+        for provider in ("claude", "gemini"):
+            with self.subTest(provider=provider):
+                self.tmux_log.unlink(missing_ok=True)
+                env = {
+                    **self.env,
+                    "CODEXFARM_RESTORE_PID": str(os.getpid()),
+                    "CODEX_TOOL_NAME": provider,
+                    "CODEX_SESSION": "restored-farm",
+                    "CODEX_NAME": "saved-name",
+                    "CODEX_CMD": provider,
+                    "CODEX_ARGS": f"--resume {session_id}",
+                    f"{provider.upper()}_SESSION": "wrong-farm",
+                    f"{provider.upper()}_NAME": "wrong-name",
+                    f"{provider.upper()}_CMD": "wrong-command",
+                    f"{provider.upper()}_ARGS": "--resume latest",
+                }
+                result = subprocess.run(
+                    [REPO_ROOT / "bin/codex-add", "-d", str(target_dir)],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                commands = self.read_tmux_commands()
+                new_window = next(cmd for cmd in commands if cmd[0] == "new-window")
+                self.assertIn("restored-farm", new_window)
+                self.assertIn("saved-name", new_window)
+                command_text = " ".join(new_window)
+                self.assertIn(f"{provider} --resume {session_id}", command_text)
+                self.assertNotIn("latest", command_text)
+
     def test_codex_add_passes_unknown_flags_to_tool(self):
         target_dir = self.tmpdir / "proj2"
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -1743,17 +1778,29 @@ case "$1" in
   has-session)
     exit 1
     ;;
+  list-sessions)
+    if [ -n "${TMUX_OTHER_SESSION:-}" ]; then
+      printf '%s\n' "$TMUX_OTHER_SESSION"
+    fi
+    exit 0
+    ;;
   list-windows)
     format=""
+    target=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
         -F) format="$2"; shift 2 ;;
+        -t) target="$2"; shift 2 ;;
         *) shift ;;
       esac
     done
     if [ "${REQUIRE_REAL_TAB:-0}" = "1" ] && [ "$format" != $'#{window_id}\\t#{window_name}' ]; then
       printf 'list-windows format does not contain a real tab\\n' >&2
       exit 64
+    fi
+    if [ "$target" = "=${TMUX_OTHER_SESSION:-}" ] && [ -n "${TMUX_OTHER_WINDOWS_OUTPUT:-}" ]; then
+      printf '%s\n' "$TMUX_OTHER_WINDOWS_OUTPUT"
+      exit 0
     fi
     if [ -n "${TMUX_WINDOWS_OUTPUT:-}" ]; then
       printf '%s\n' "${TMUX_WINDOWS_OUTPUT}"
@@ -1829,7 +1876,8 @@ exit 0
             identity_stub,
             """#!/usr/bin/env bash
 case "$2" in
-  @9.0) printf 'codex\\t%s\\n' "${EXISTING_SESSION_ID:-019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4}" ;;
+  @1.0) if [ "${BOARD_LINK_IDENTITY:-0}" = "1" ]; then printf 'claude\\t019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4\\n'; else exit 1; fi ;;
+  @9.0) printf '%s\\t%s\\n' "${EXISTING_PROVIDER:-codex}" "${EXISTING_SESSION_ID:-019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4}" ;;
   @10.0) printf 'codex\\t123e4567-e89b-42d3-a456-426614174001\\n' ;;
   *) exit 1 ;;
 esac
@@ -2263,6 +2311,75 @@ esac
 
         add_calls = self.codex_add_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(add_calls, [f"proj|gemini|--resume {session_id}|-d {self.project_dir}"])
+
+    def test_restore_skips_exact_provider_conversation_active_in_another_farm(self):
+        session_id = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"
+        for provider in ("claude", "gemini"):
+            with self.subTest(provider=provider):
+                self.tmux_log.unlink(missing_ok=True)
+                self.codex_add_log.unlink(missing_ok=True)
+                Path(self.env["TMUX_STATE_FILE"]).unlink(missing_ok=True)
+                self.manifest.write_text(
+                    f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\t{provider}\t--resume {session_id}\n"
+                )
+                env = {
+                    **self.env,
+                    "TMUX_OTHER_SESSION": "other-farm",
+                    "TMUX_OTHER_WINDOWS_OUTPUT": "@9\tforeign",
+                    "EXISTING_PROVIDER": provider,
+                }
+                result = subprocess.run(
+                    [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Skipping existing conversation", result.stdout)
+                self.assertFalse(self.codex_add_log.exists())
+
+    def test_force_restore_checks_other_farms_before_removing_windows(self):
+        session_id = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"
+        self.manifest.write_text(
+            f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tclaude\t--resume {session_id}\n"
+        )
+        env = {
+            **self.env,
+            "TMUX_OTHER_SESSION": "other-farm",
+            "TMUX_OTHER_WINDOWS_OUTPUT": "@9\tforeign",
+            "EXISTING_PROVIDER": "claude",
+            "TMUX_WINDOWS_OUTPUT": "@1\tproj",
+        }
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--force", str(self.manifest)],
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertFalse(any(cmd[0] == "kill-window" for cmd in self.read_tmux_commands()))
+
+    def test_force_restore_allows_a_board_link_to_its_own_window(self):
+        session_id = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"
+        self.manifest.write_text(
+            f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tclaude\t--resume {session_id}\n"
+        )
+        env = {
+            **self.env,
+            "TMUX_OTHER_SESSION": "board",
+            "TMUX_OTHER_WINDOWS_OUTPUT": "@1\tproj",
+            "TMUX_WINDOWS_OUTPUT": "@1\tproj",
+            "BOARD_LINK_IDENTITY": "1",
+        }
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--force", str(self.manifest)],
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(any(cmd[0] == "kill-window" for cmd in self.read_tmux_commands()))
 
     def test_codex_restore_keeps_wrapper_provider_for_a_custom_command(self):
         custom_agent = self.tmpdir / "custom-agent"

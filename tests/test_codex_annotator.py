@@ -58,6 +58,14 @@ class RunTmuxStub:
 
 
 class AnnotatorWindowTests(unittest.TestCase):
+    def test_gemini_node_pane_uses_provider_status(self):
+        annotator = load_annotator_module()
+        annotator.capture_pane_output = lambda pane_id, *, verbose: "⠋ Thinking..."
+        pane = annotator.PaneInfo(
+            pid="%7", current_command="node", start_command="/usr/local/bin/gemini", dead=False
+        )
+        self.assertEqual(annotator.classify_pane(pane, re.compile(r"node"), verbose=False), "RUN")
+
     def test_window_panes_capture_process_pid_for_descendant_detection(self):
         annotator = load_annotator_module()
         annotator.run_tmux = lambda cmd, *, verbose=False: "%1\tnode\t0\t\t123\n"

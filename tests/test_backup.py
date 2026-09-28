@@ -30,6 +30,7 @@ class BackupTests(unittest.TestCase):
         self.destination = self.root / "backup"
         self.env = {
             **os.environ,
+            "HOME": str(self.root),
             "CODEX_HOME": str(self.codex),
             "XDG_CONFIG_HOME": str(self.root / "config"),
             "XDG_STATE_HOME": str(self.root / "state"),
@@ -85,6 +86,34 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(self.destination.stat().st_mode & 0o777, 0o700)
         finally:
             connection.close()
+
+    def test_snapshot_includes_only_claude_and_gemini_conversations(self):
+        claude_chat = self.root / ".claude/projects/-tmp-project/chat.jsonl"
+        gemini_chat = self.root / ".gemini/tmp/project/chats/session-1.json"
+        gemini_legacy_chat = self.root / ".gemini/tmp/project/chats/session-2.jsonl"
+        for path in (claude_chat, gemini_chat, gemini_legacy_chat):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"conversation":"saved"}\n')
+        (self.root / ".claude/settings.json").write_text("CLAUDE_SECRET")
+        (self.root / ".gemini/oauth_creds.json").write_text("GEMINI_SECRET")
+
+        result = self.run_backup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        archive = next(self.destination.glob("*.tar.gz"))
+        with tarfile.open(archive) as bundle:
+            self.assertIn("claude/projects/-tmp-project/chat.jsonl", bundle.getnames())
+            self.assertIn("gemini/tmp/project/chats/session-1.json", bundle.getnames())
+            self.assertIn("gemini/tmp/project/chats/session-2.jsonl", bundle.getnames())
+            self.assertNotIn("claude/settings.json", bundle.getnames())
+            self.assertNotIn("gemini/oauth_creds.json", bundle.getnames())
+
+    def test_provider_only_history_can_be_snapshotted(self):
+        (self.sessions / "rollout-chat.jsonl").unlink()
+        claude_chat = self.root / ".claude/projects/-tmp-project/chat.jsonl"
+        claude_chat.parent.mkdir(parents=True)
+        claude_chat.write_text('{"conversation":"saved"}\n')
+        result = self.run_backup("--skip-save")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_failed_manifest_save_still_preserves_chats_and_reports_failure(self):
         self.save.write_text("#!/usr/bin/env bash\nexit 1\n")

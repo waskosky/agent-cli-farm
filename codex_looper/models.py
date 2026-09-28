@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 VERSION = "0.3.2"
-AgentKind = Literal["claude", "codex", "generic"]
+AgentKind = Literal["claude", "codex", "gemini", "generic"]
 AgentInterface = Literal["json", "hybrid"]
 LooperMode = Literal["single", "sequence"]
 TmuxLayout = Literal["auto", "single", "split"]

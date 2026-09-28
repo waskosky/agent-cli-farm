@@ -128,7 +128,7 @@ Numeric constraints are strict. Integer counters must be whole numbers and finit
 | `--farm-session [NAME]` | default farm | optional session string | Select the farm tmux session for `codex-add`. Omitting NAME uses the default farm session. |
 | `--farm-attach` | off | boolean flag | Attach after `--farm-session` launch. |
 | `--farm-add-bin PATH` | `codex-add` | executable name or path | Launcher compatible with `codex-add`. |
-| `-- AGENT_ARGS...` | unset | argv tokens | Pass native flags to built-in Codex/Claude command templates. |
+| `-- AGENT_ARGS...` | unset | argv tokens | Pass native flags to built-in Codex, Claude, or Gemini command templates. |
 
 Use `--` for one-off agent-native flags. For Claude, the correct spelling is `--dangerously-skip-permissions`; local Claude help recommends it only for isolated sandboxes. To make it permanent for a project, put the same values in `[agents.claude].extra_args`.
 
@@ -168,11 +168,11 @@ Agent defaults:
 
 | Agent | Command behavior |
 | --- | --- |
-| `codex` | Default hybrid: start a visible `codex --no-alt-screen` TTY pane, paste prompts, and detect turn completion from pane readiness plus Codex session JSONL advancement. With `fresh_session_per_loop = true`, replace the pane/process between loops; otherwise reuse it. With `interface = "json"`: first prompt uses `codex exec --json <prompt>`; later prompts resume by Codex thread ID when available, otherwise `resume --last`. |
-| `claude` | Default hybrid: start a visible `claude` TTY pane, paste prompts, and detect turn completion from Claude session JSONL terminal events plus pane readiness. With `fresh_session_per_loop = true`, replace the pane/process between loops; otherwise reuse it. With `interface = "json"`: first prompt uses `claude -p --output-format stream-json --verbose --name <session> <prompt>`; later prompts use `--resume <session>`. |
-| `gemini` | Generic default: `gemini -p <prompt>` for every prompt. Override this if your Gemini CLI supports a better noninteractive/resume mode. |
+| `codex` | Default hybrid: start a visible `codex --no-alt-screen` TTY pane, paste prompts, and detect turn completion from pane readiness plus Codex session JSONL advancement. With `fresh_session_per_loop = true`, replace the pane/process between loops; otherwise reuse it. With `interface = "json"`: first prompt uses `codex exec --json <prompt>`; later prompts require the exact Codex thread ID. |
+| `claude` | Default hybrid: start a visible `claude` TTY pane, paste prompts, and detect turn completion from Claude session JSONL terminal events plus pane readiness. With `fresh_session_per_loop = true`, replace the pane/process between loops; otherwise reuse it. With `interface = "json"`: first prompt uses `claude -p --output-format stream-json --verbose --name <session> <prompt>`; later prompts require the exact Claude session ID reported by the stream. |
+| `gemini` | JSON interface: first prompt uses `gemini --output-format stream-json -p <prompt>`; later prompts resume the exact session ID reported by Gemini's `init` event. If no ID is reported, continuation stops instead of selecting a recent unrelated chat. |
 
-Built-in Codex and Claude agents accept `model` and `effort` config sugar. `model` is appended after `extra_args` as `--model <value>`. Claude receives effort as `--effort <value>`; Codex receives it through `--config model_reasoning_effort="<value>"`, which is the Codex CLI's supported form:
+Built-in Codex, Claude, and Gemini agents accept `model` config sugar. `model` is appended after `extra_args` as `--model <value>`. Claude and Codex also accept `effort`: Claude receives `--effort <value>`; Codex receives `--config model_reasoning_effort="<value>"`:
 
 ```toml
 [agents.codex]
@@ -379,7 +379,8 @@ codex-status loopers
 - It does not bypass authentication, permissions, sandboxing, or provider limits unless you explicitly pass agent-native flags that do so.
 - Provider status and stop detection are heuristic because Codex/Claude/Gemini CLIs do not expose a shared structured status protocol.
 - Claude hybrid mode requires tmux because the real Claude interface lives in a managed pane. Use `--interface json` for local non-tmux runs or scripted noninteractive behavior.
-- The Gemini backend is intentionally generic until a stable noninteractive resume interface is confirmed.
+- Gemini JSON-mode continuation requires a `session_id` in the CLI's `init`
+  stream event. A missing ID stops the next prompt instead of selecting a recent chat.
 - There is no per-worktree run lock. Starting multiple write-enabled loopers against the same checkout can race or overwrite work.
 - Backup branches protect committed `HEAD`, not dirty worktree state.
 - Use write-enabled agent flags only in repositories, worktrees, containers, or runners where automated edits are acceptable.

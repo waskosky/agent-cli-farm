@@ -128,6 +128,28 @@ class SessionHookRuntimeTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(self.tmux_commands(), [])
 
+    def test_gemini_hook_returns_valid_json_even_when_unmanaged(self) -> None:
+        result = self.run_hook(
+            f'{{"hook_event_name":"SessionStart","session_id":"{SESSION_ID}"}}',
+            env={
+                **self.env,
+                "CODEXFARM_PROVIDER": "gemini",
+                "CODEXFARM_MANAGED": "0",
+                "CODEXFARM_HOOK_FORMAT": "json",
+            },
+            through_provider=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout), {})
+
+    def test_gemini_global_hook_returns_json_outside_a_farm(self) -> None:
+        env = {**self.env, "CODEXFARM_HOOK_FORMAT": "json"}
+        env.pop("CODEXFARM_PROVIDER")
+        env.pop("CODEXFARM_MANAGED")
+        result = self.run_hook("{}", env=env, through_provider=False)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout), {})
+
     def test_ignores_malformed_input_invalid_pane_and_invalid_uuid(self) -> None:
         cases = [
             ("not-json", self.env),
@@ -247,6 +269,31 @@ class SessionHookInstallerTests(unittest.TestCase):
         config = self.read_config()
         self.assertEqual(len(self.farm_handlers(config, "SessionStart")), 1)
         self.assertEqual(len(self.farm_handlers(config, "UserPromptSubmit")), 1)
+
+    def test_installs_claude_and_gemini_in_provider_settings(self) -> None:
+        for provider in ("claude", "gemini"):
+            with self.subTest(provider=provider):
+                settings = self.root / provider / "settings.json"
+                settings.parent.mkdir()
+                settings.write_text(json.dumps({"model": "test", "hooks": {"Stop": []}}))
+                first = self.run_installer("--provider", provider, hooks_file=settings)
+                self.assertEqual(first.returncode, 0, first.stderr)
+                data = json.loads(settings.read_text())
+                self.assertEqual(data["model"], "test")
+                self.assertEqual(data["hooks"]["Stop"], [])
+                self.assertEqual(len(self.farm_handlers(data, "SessionStart")), 1)
+                self.assertEqual(len(self.farm_handlers(data, "UserPromptSubmit")), 1)
+                if provider == "gemini":
+                    self.assertEqual(self.farm_handlers(data, "SessionStart")[0]["timeout"], 3000)
+                    self.assertNotIn("matcher", data["hooks"]["SessionStart"][0])
+                    self.assertIn(
+                        "CODEXFARM_HOOK_FORMAT=json",
+                        self.farm_handlers(data, "SessionStart")[0]["command"],
+                    )
+                before = settings.read_bytes()
+                again = self.run_installer("--provider", provider, hooks_file=settings)
+                self.assertEqual(again.returncode, 0, again.stderr)
+                self.assertEqual(settings.read_bytes(), before)
 
     def test_preserves_unrelated_hooks_and_replaces_old_farm_handlers(self) -> None:
         self.hooks_file.parent.mkdir(parents=True)

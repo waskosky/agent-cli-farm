@@ -28,8 +28,10 @@ from codex_looper.pane_status import (  # noqa: E402
     aggregate_window_state,
     classify_claude_output,
     classify_codex_output,
+    classify_gemini_output,
     is_claude_command,
     is_codex_command,
+    is_gemini_command,
 )
 
 DEFAULT_SESSION_PATTERN = os.environ.get("CODEX_ANNOTATOR_SESSION_REGEX", r"^codex")
@@ -331,6 +333,7 @@ def classify_pane(
         and current_command_name in {"node", "nodejs"}
         and not is_codex_command(provider_context)
         and not is_claude_command(provider_context)
+        and not is_gemini_command(provider_context)
     ):
         descendant_context = process_tree_command_context(pane.process_pid)
         if descendant_context:
@@ -343,6 +346,9 @@ def classify_pane(
     if is_claude_command(provider_context):
         output = capture_pane_output(pane.pid, verbose=verbose)
         return classify_claude_output(output)
+    if is_gemini_command(provider_context):
+        output = capture_pane_output(pane.pid, verbose=verbose)
+        return classify_gemini_output(output)
     if running_regex.search(command_context):
         return "RUN"
     return "READY"

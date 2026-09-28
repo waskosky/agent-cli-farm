@@ -67,6 +67,28 @@ class AnnotatorStatusTests(unittest.TestCase):
         output = "Output line without prompt"
         self.assertEqual(self.mod.classify_claude_output(output), "READY")
 
+    def test_gemini_classifies_prompt_processing_and_error(self):
+        cases = [
+            ("Done\n> ", "READY"),
+            ("Allow this tool call? (y/N)", "READY"),
+            ("⠋ Thinking...", "RUN"),
+            ("Error: authentication failed", "ERR"),
+            ("⠋ Thinking...\nDone\n> ", "READY"),
+        ]
+        for output, expected in cases:
+            with self.subTest(output=output):
+                self.assertEqual(self.mod.classify_gemini_output(output), expected)
+
+    def test_node_launched_gemini_uses_output_before_running_heuristic(self):
+        pane = self.mod.PaneInfo(
+            pid="%1", current_command="node", start_command="/usr/local/bin/gemini", dead=False
+        )
+        self.mod.capture_pane_output = lambda pane_id, *, verbose: "Error: authentication failed"
+        self.assertEqual(
+            self.mod.classify_pane(pane, self.mod.re.compile(r"node"), verbose=False),
+            "ERR",
+        )
+
     def test_window_state_prefers_run(self):
         states = ["READY", "RUN", "READY"]
         self.assertEqual(self.mod.aggregate_window_state(states), "RUN")

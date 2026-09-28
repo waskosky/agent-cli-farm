@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the Codex Farm session-identity hook without replacing user hooks."""
+"""Install provider session-identity hooks without replacing user hooks."""
 
 from __future__ import annotations
 
@@ -21,9 +21,13 @@ class ConfigError(ValueError):
     pass
 
 
-def default_hooks_file() -> Path:
-    codex_home = os.environ.get("CODEX_HOME")
-    return Path(codex_home) / "hooks.json" if codex_home else Path.home() / ".codex" / "hooks.json"
+def default_hooks_file(provider: str = "codex") -> Path:
+    if provider == "codex":
+        codex_home = os.environ.get("CODEX_HOME")
+        return (
+            Path(codex_home) / "hooks.json" if codex_home else Path.home() / ".codex" / "hooks.json"
+        )
+    return Path.home() / f".{provider}" / "settings.json"
 
 
 def load_config(path: Path, *, missing_ok: bool) -> dict[str, Any] | None:
@@ -85,14 +89,16 @@ def remove_farm_handlers(hooks: dict[str, Any]) -> None:
             hooks.pop(event, None)
 
 
-def farm_handler(command: str) -> dict[str, Any]:
-    return {"type": "command", "command": command, "timeout": 3}
+def farm_handler(command: str, provider: str = "codex") -> dict[str, Any]:
+    return {"type": "command", "command": command, "timeout": 3000 if provider == "gemini" else 3}
 
 
-def hook_command(hook_path: Path, python_command: str | None) -> str:
+def hook_command(hook_path: Path, python_command: str | None, provider: str = "codex") -> str:
     command = [str(hook_path)]
     if python_command:
         command.insert(0, python_command)
+    if provider == "gemini":
+        command = ["env", "CODEXFARM_HOOK_FORMAT=json", *command]
     return shlex.join(command)
 
 
@@ -100,28 +106,29 @@ def merge_config(
     config: dict[str, Any],
     hook_path: Path,
     python_command: str | None,
+    provider: str = "codex",
 ) -> dict[str, Any]:
     updated = dict(config)
     hooks = dict(updated.get("hooks", {}))
     remove_farm_handlers(hooks)
-    command = hook_command(hook_path, python_command)
-    hooks.setdefault("SessionStart", []).append(
-        {
-            "matcher": SESSION_START_MATCHER,
-            "hooks": [farm_handler(command)],
-        }
-    )
-    hooks.setdefault("UserPromptSubmit", []).append({"hooks": [farm_handler(command)]})
+    command = hook_command(hook_path, python_command, provider)
+    session_group: dict[str, Any] = {"hooks": [farm_handler(command, provider)]}
+    if provider != "gemini":
+        session_group["matcher"] = (
+            SESSION_START_MATCHER if provider == "codex" else SESSION_START_MATCHER + "|fork"
+        )
+    hooks.setdefault("SessionStart", []).append(session_group)
+    hooks.setdefault("UserPromptSubmit", []).append({"hooks": [farm_handler(command, provider)]})
     updated["hooks"] = hooks
     return updated
 
 
-def handler_is_current(handler: object, command: str) -> bool:
+def handler_is_current(handler: object, command: str, provider: str = "codex") -> bool:
     return (
         isinstance(handler, dict)
         and handler.get("type") == "command"
         and handler.get("command") == command
-        and handler.get("timeout") == 3
+        and handler.get("timeout") == (3000 if provider == "gemini" else 3)
     )
 
 
@@ -129,13 +136,18 @@ def config_is_current(
     config: dict[str, Any],
     hook_path: Path,
     python_command: str | None,
+    provider: str = "codex",
 ) -> bool:
     hooks = config.get("hooks")
     if not isinstance(hooks, dict):
         return False
-    command = hook_command(hook_path, python_command)
+    command = hook_command(hook_path, python_command, provider)
     expected = {
-        "SessionStart": SESSION_START_MATCHER,
+        "SessionStart": (
+            None
+            if provider == "gemini"
+            else SESSION_START_MATCHER + ("|fork" if provider == "claude" else "")
+        ),
         "UserPromptSubmit": None,
     }
     for event, matcher in expected.items():
@@ -150,7 +162,9 @@ def config_is_current(
                 continue
             if matcher is None and "matcher" in group:
                 continue
-            matches += sum(handler_is_current(handler, command) for handler in group["hooks"])
+            matches += sum(
+                handler_is_current(handler, command, provider) for handler in group["hooks"]
+            )
         if matches != 1:
             return False
     return True
@@ -194,7 +208,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Install or verify the Codex Farm session-identity hook."
     )
-    parser.add_argument("--hooks-file", type=Path, default=default_hooks_file())
+    parser.add_argument("--provider", choices=("codex", "claude", "gemini"), default="codex")
+    parser.add_argument("--hooks-file", type=Path)
     parser.add_argument(
         "--hook-command",
         type=Path,
@@ -214,6 +229,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    args.hooks_file = args.hooks_file or default_hooks_file(args.provider)
     try:
         config = load_config(args.hooks_file, missing_ok=not args.check)
         if args.check:
@@ -224,6 +240,7 @@ def main() -> int:
                     config,
                     args.hook_command,
                     args.python_command,
+                    args.provider,
                 )
                 else 1
             )
@@ -232,12 +249,13 @@ def main() -> int:
             config,
             args.hook_command,
             args.python_command,
+            args.provider,
         )
         write_config(args.hooks_file, serialized_config(updated))
     except (ConfigError, OSError) as exc:
         print(f"codex-session-hook-install: {exc}", file=sys.stderr)
         return 2
-    print(f"Installed Codex session hook in {args.hooks_file}")
+    print(f"Installed {args.provider} session hook in {args.hooks_file}")
     return 0
 
 
