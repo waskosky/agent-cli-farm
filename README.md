@@ -305,6 +305,15 @@ in that same process. To return to the original, use
 `/resume` in the owning TUI, or exit that Codex process before resuming the
 original elsewhere. The farm will not terminate another live Codex process.
 
+`codex-resume` also checks the selected farm (or board) for dead managed Codex
+panes whose exact resume failed with a SQLite initialization lock. It retries
+each matching pane once with the currently installed Codex executable and the
+same conversation, after checking writer ownership. Live panes, ordinary exits,
+unrelated errors, and custom launch commands are left alone. Repeated lock
+failures remain visible for diagnosis; recovery never deletes databases or
+changes `CODEX_HOME`/`sqlite_home`. A recovered conversation may ask whether to
+resume a paused goal; that choice remains yours.
+
 Check installed-helper freshness and manifest resume coverage without printing session IDs:
 
 ```bash

@@ -37,6 +37,7 @@ Usage: $(basename "$0") [session] [--board]
 
 Resumes an existing tmux session, preferring the selected farm if present.
 Order: selected farm -> selected board -> last/most-recent tmux session.
+Retries dead exact Codex resumes once when SQLite initialization was locked.
 
 Options:
   -b, --board          Prefer the selected board session first
@@ -98,6 +99,11 @@ fi
 
 attach_or_switch() {
   local target="$1"
+  local recovery
+  recovery="$(dirname "$0")/codex-recover-startup.py"
+  if [ -f "$recovery" ] && command -v python3 >/dev/null; then
+    python3 "$recovery" "$target" || true
+  fi
   if [ "$inside_tmux" -eq 1 ]; then
     tmux switch-client -t "$target"
   else
