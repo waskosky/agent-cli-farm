@@ -68,7 +68,11 @@ def recover(session: str) -> int:
             def field(fmt: str, pane: str = pane) -> str:
                 return tmux("display-message", "-p", "-t", pane, fmt)
 
-            if field("#{pane_dead}:#{pane_dead_status}") != "1:1":
+            # Some tmux versions leave the exit status unset after EOF. The
+            # exact fatal startup message is still required before retrying.
+            if field("#{pane_dead}:#{pane_dead_status}") not in {"1:1", "1:"}:
+                continue
+            if field("#{pane_dead_signal}"):
                 continue
             if field("#{@codexfarm_provider}") != "codex" or not field("#{@codexfarm_name}"):
                 continue
@@ -93,7 +97,8 @@ def recover(session: str) -> int:
             # No -k: tmux refuses to replace a pane that became live meanwhile.
             # Recheck identity too, in case another recovery already completed.
             if (
-                field("#{pane_dead}:#{pane_dead_status}") != "1:1"
+                field("#{pane_dead}:#{pane_dead_status}") not in {"1:1", "1:"}
+                or field("#{pane_dead_signal}")
                 or field("#{pane_start_command}") != command
             ):
                 continue

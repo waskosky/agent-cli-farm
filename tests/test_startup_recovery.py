@@ -29,6 +29,7 @@ class StartupRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.fields = {
             "#{pane_dead}:#{pane_dead_status}": "1:1",
+            "#{pane_dead_signal}": "",
             "#{@codexfarm_provider}": "codex",
             "#{@codexfarm_name}": "project",
             "#{@codexfarm_session_id}": SESSION_ID,
@@ -90,6 +91,21 @@ class StartupRecoveryTests(unittest.TestCase):
                 self.fields["#{pane_dead}:#{pane_dead_status}"] = state
                 self.run_recovery()
                 self.assertEqual(self.respawns(), [])
+
+    def test_missing_exit_status_still_requires_the_exact_fatal_error(self):
+        self.fields["#{pane_dead}:#{pane_dead_status}"] = "1:"
+        self.assertEqual(self.run_recovery(), 0)
+        self.assertEqual(len(self.respawns()), 1)
+        self.calls.clear()
+        self.output = "An unrelated failure"
+        self.run_recovery()
+        self.assertEqual(self.respawns(), [])
+
+    def test_signal_terminated_panes_are_not_restarted(self):
+        self.fields["#{pane_dead}:#{pane_dead_status}"] = "1:"
+        self.fields["#{pane_dead_signal}"] = "15"
+        self.run_recovery()
+        self.assertEqual(self.respawns(), [])
 
     def test_unmanaged_or_other_provider_panes_are_untouched(self):
         for key, value in (("#{@codexfarm_name}", ""), ("#{@codexfarm_provider}", "claude")):
