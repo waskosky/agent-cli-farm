@@ -228,7 +228,19 @@ class StartupRecoveryIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("ATTACHED", result.stdout)
-                self.assertIn("Retried Codex pane", result.stderr)
+                self.assertIn(
+                    "Retried Codex pane",
+                    result.stderr,
+                    run(
+                        "display-message",
+                        "-p",
+                        "-t",
+                        pane,
+                        "#{pane_dead}:#{pane_dead_status} #{pane_start_command}",
+                    )
+                    + "\n"
+                    + run("capture-pane", "-p", "-t", pane),
+                )
                 deadline = time.monotonic() + 5
                 while "RECOVERED:" not in run("capture-pane", "-p", "-t", pane):
                     self.assertLess(time.monotonic(), deadline)
