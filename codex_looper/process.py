@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .models import STREAM_READ_CHUNK_BYTES, ConfigError, ProcessResult
-from .retry import parse_output_line
+from .retry import parse_output_line, safety_policy_code
 
 TerminateProcessGroup = Callable[[asyncio.subprocess.Process], Awaitable[None]]
 CloseSubprocessTransport = Callable[[asyncio.subprocess.Process], Awaitable[None]]
@@ -166,7 +166,13 @@ async def run_command(
             )
             if parsed.session_id and not result.session_id:
                 result.session_id = parsed.session_id
-            if parsed.stop_reason and not result.stop_reason:
+            if parsed.stop_reason and (
+                not result.stop_reason
+                or (
+                    safety_policy_code(parsed.stop_reason)
+                    and not safety_policy_code(result.stop_reason)
+                )
+            ):
                 result.stop_reason = parsed.stop_reason
                 result.retry_after_seconds = parsed.retry_after_seconds
                 result.retry_kind = parsed.retry_kind
@@ -199,9 +205,12 @@ async def run_command(
                 await terminate_process_group(process)
 
     async def wait_for_stop() -> None:
-        await stop_event.wait()
-        if kill_on_stop_pattern:
-            await terminate_process_group(process)
+        while True:
+            await stop_event.wait()
+            stop_event.clear()
+            if kill_on_stop_pattern or safety_policy_code(result.stop_reason):
+                await terminate_process_group(process)
+                return
 
     stdout_task = asyncio.create_task(read_stream(process.stdout, "stdout"))
     stderr_task = asyncio.create_task(read_stream(process.stderr, "stderr"))

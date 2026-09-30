@@ -747,13 +747,17 @@ class ClaudeHybridTests(unittest.TestCase):
         self.assertTrue(tail.events[1].is_user_event)
         self.assertTrue(tail.events[2].is_assistant_event)
 
-    def test_codex_assessment_requires_ready_pane_and_session_advance(self) -> None:
+    def test_codex_assessment_requires_matching_successful_terminal_event(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             path = root / f"rollout-2026-07-07T00-00-00-{SESSION_ID}.jsonl"
             write_jsonl(
                 path,
                 [
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "task_started", "turn_id": SESSION_ID},
+                    },
                     {
                         "type": "event_msg",
                         "payload": {"type": "user_message", "message": "prompt"},
@@ -769,6 +773,36 @@ class ClaudeHybridTests(unittest.TestCase):
                 ],
             )
 
+            unfinished = assess_codex_hybrid_signals("READY", session_path=path)
+            self.assertFalse(unfinished.ready_to_send_next)
+            for turn_id, error in (("another-turn", None), (SESSION_ID, {"code": "unknown"})):
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "task_complete",
+                                    "turn_id": turn_id,
+                                    "error": error,
+                                },
+                            }
+                        )
+                        + "\n"
+                    )
+                self.assertFalse(
+                    assess_codex_hybrid_signals("READY", session_path=path).ready_to_send_next
+                )
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "event_msg",
+                            "payload": {"type": "task_complete", "turn_id": SESSION_ID},
+                        }
+                    )
+                    + "\n"
+                )
             ready = assess_codex_hybrid_signals("READY", session_path=path)
             running = assess_codex_hybrid_signals("RUN", session_path=path)
 
@@ -840,6 +874,15 @@ class ClaudeHybridTests(unittest.TestCase):
                             json.dumps(
                                 {
                                     "type": "event_msg",
+                                    "payload": {"type": "task_started", "turn_id": SESSION_ID},
+                                }
+                            )
+                            + "\n"
+                        )
+                        handle.write(
+                            json.dumps(
+                                {
+                                    "type": "event_msg",
                                     "payload": {
                                         "type": "user_message",
                                         "message": "redacted prompt",
@@ -862,6 +905,15 @@ class ClaudeHybridTests(unittest.TestCase):
                                             }
                                         ],
                                     },
+                                }
+                            )
+                            + "\n"
+                        )
+                        handle.write(
+                            json.dumps(
+                                {
+                                    "type": "event_msg",
+                                    "payload": {"type": "task_complete", "turn_id": SESSION_ID},
                                 }
                             )
                             + "\n"

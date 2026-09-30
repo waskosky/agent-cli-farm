@@ -43,6 +43,43 @@ INFORMATIONAL_SYSTEM_SUBTYPES = {
     "task_updated",
     "thinking_tokens",
 }
+SAFETY_POLICY_CODES = frozenset({"cyber_policy", "misalignment_policy_violation"})
+
+
+def safety_policy_code(reason: str | None) -> str | None:
+    if reason and reason.startswith("safety_policy:"):
+        code = reason.removeprefix("safety_policy:")
+        if code in SAFETY_POLICY_CODES:
+            return code
+    return None
+
+
+def _structured_safety_policy_code(data: dict[str, Any], agent_kind: str) -> str | None:
+    """Read exact codes only from provider error envelopes, never message or tool text."""
+    event_type = data.get("type")
+    if event_type in ("error", "turn.failed"):
+        sources = (data, data.get("error"))
+    elif agent_kind == "codex" and event_type == "event_msg":
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("type") == "task_complete":
+            sources = (payload.get("error"),)
+        elif payload.get("type") == "error":
+            sources = (payload, payload.get("error"))
+        else:
+            return None
+    else:
+        return None
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("code", "codex_error_info"):
+            value = source.get(key)
+            if isinstance(value, str) and value in SAFETY_POLICY_CODES:
+                return value
+    return None
 
 
 def _json_blob(value: Any) -> str:
@@ -198,6 +235,10 @@ def parse_output_line(
     if isinstance(data, dict):
         event_type = str(data.get("type", ""))
         subtype = str(data.get("subtype", ""))
+
+        if code := _structured_safety_policy_code(data, agent_kind):
+            parsed.stop_reason = f"safety_policy:{code}"
+            return parsed
 
         if agent_kind == "codex" and event_type == "thread.started":
             thread_id = data.get("thread_id")

@@ -15,7 +15,7 @@ from typing import Any, Literal, TextIO
 from .agents import agent_extra_args
 from .models import AgentConfig, ConfigError, ProcessResult
 from .pane_status import classify_claude_output, classify_codex_output, strip_ansi
-from .retry import parse_output_line
+from .retry import parse_output_line, safety_policy_code
 
 UUID_PATTERN = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -83,6 +83,7 @@ class CodexSessionEvent:
     role: str | None
     is_user_event: bool
     is_assistant_event: bool
+    terminal_success: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,7 @@ class CodexSessionTail:
     offset: int
     raw_text: str
     events: tuple[CodexSessionEvent, ...]
+    incomplete_line: bool = False
 
 
 @dataclass(frozen=True)
@@ -314,6 +316,13 @@ def parse_codex_session_line(line: str) -> CodexSessionEvent | None:
         role=normalized_role,
         is_user_event=is_user_event,
         is_assistant_event=is_assistant_event,
+        terminal_success=(
+            event_type == "event_msg"
+            and normalized_payload_type == "task_complete"
+            and isinstance(turn_id, str)
+            and bool(turn_id)
+            and payload.get("error") is None
+        ),
     )
 
 
@@ -326,13 +335,27 @@ def read_new_codex_session_events(path: Path, *, offset: int = 0) -> CodexSessio
     except OSError:
         return CodexSessionTail(offset=offset, raw_text="", events=())
 
+    incomplete_line = False
+    if data and not data.endswith(b"\n"):
+        last_line_start = data.rfind(b"\n") + 1
+        pending = data[last_line_start:]
+        try:
+            json.loads(pending)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # A rollout writer may still be appending the terminal error event.
+            next_offset -= len(pending)
+            data = data[:last_line_start]
+            incomplete_line = True
+
     raw_text = data.decode("utf-8", errors="replace")
     events = tuple(
         event
         for line in raw_text.splitlines()
         if (event := parse_codex_session_line(line)) is not None
     )
-    return CodexSessionTail(offset=next_offset, raw_text=raw_text, events=events)
+    return CodexSessionTail(
+        offset=next_offset, raw_text=raw_text, events=events, incomplete_line=incomplete_line
+    )
 
 
 def assess_claude_hybrid_signals(
@@ -463,12 +486,15 @@ def assess_codex_hybrid_signals(
     *,
     session_path: Path | None,
     previous_offset: int = 0,
+    snapshot: CodexSessionTail | None = None,
 ) -> CodexHybridAssessment:
-    tail = (
-        read_new_codex_session_events(session_path, offset=previous_offset)
-        if session_path is not None
-        else CodexSessionTail(offset=previous_offset, raw_text="", events=())
-    )
+    tail = snapshot
+    if tail is None:
+        tail = (
+            read_new_codex_session_events(session_path, offset=previous_offset)
+            if session_path is not None
+            else CodexSessionTail(offset=previous_offset, raw_text="", events=())
+        )
     session_id = extract_session_id_from_codex_session(session_path) if session_path else None
     for event in tail.events:
         if event.session_id:
@@ -481,6 +507,20 @@ def assess_codex_hybrid_signals(
     last_role = role_events[-1] if role_events else None
     assistant_event_seen = any(event.is_assistant_event for event in tail.events)
     user_event_seen = any(event.is_user_event for event in tail.events)
+    active_turn_id = None
+    turn_completed = False
+    for event in tail.events:
+        if event.event_type != "event_msg":
+            continue
+        if event.payload_type == "task_started":
+            active_turn_id = event.turn_id
+            turn_completed = False
+        elif (
+            event.payload_type == "task_complete"
+            and active_turn_id
+            and event.turn_id == active_turn_id
+        ):
+            turn_completed = event.terminal_success
 
     normalized_state = pane_state.upper()
     if normalized_state == "ERR":
@@ -514,9 +554,13 @@ def assess_codex_hybrid_signals(
             reason="pane state is RUN",
         )
 
-    if assistant_event_seen:
+    ready = normalized_state == "READY" and turn_completed and not tail.incomplete_line
+    if not ready:
+        confidence: HybridConfidence = "medium"
+        reason = "waiting for a matching successful Codex task_complete event"
+    elif assistant_event_seen:
         confidence: HybridConfidence = "high"
-        reason = "pane ready and assistant event seen in Codex session file"
+        reason = "pane ready and matching Codex turn completed successfully"
     elif tail.events:
         confidence = "medium"
         reason = "pane ready and Codex session file advanced"
@@ -537,7 +581,7 @@ def assess_codex_hybrid_signals(
         last_role=last_role,
         assistant_event_seen=assistant_event_seen,
         user_event_seen=user_event_seen,
-        ready_to_send_next=True,
+        ready_to_send_next=ready,
         confidence=confidence,
         reason=reason,
     )
@@ -870,11 +914,14 @@ class ClaudeHybridController:
                             patterns=stop_patterns,
                             scan_stdout=True,
                         )
-                        if parsed.stop_reason:
+                        if parsed.stop_reason and (
+                            not stop_reason or safety_policy_code(parsed.stop_reason)
+                        ):
                             stop_reason = parsed.stop_reason
                             retry_after_seconds = parsed.retry_after_seconds
                             retry_kind = parsed.retry_kind
-                            break
+                            if safety_policy_code(stop_reason):
+                                break
                 if completion_pattern and completion_pattern.search(pane_output):
                     completion_detected = True
                 if stop_reason:
@@ -1107,6 +1154,7 @@ class CodexHybridController:
         session_path = self.discover_session_path()
         prompt_offset = session_path.stat().st_size if session_path and session_path.exists() else 0
         logged_offset = prompt_offset
+        turn_events: list[CodexSessionEvent] = []
         output_bytes = 0
         completion_detected = False
         stop_reason = None
@@ -1126,6 +1174,7 @@ class CodexHybridController:
                     continue
 
                 new_tail = read_new_codex_session_events(session_path, offset=logged_offset)
+                turn_events.extend(new_tail.events)
                 if new_tail.raw_text:
                     output_bytes += len(new_tail.raw_text.encode("utf-8"))
                     _write_log_lines(log_file, new_tail.raw_text)
@@ -1140,13 +1189,21 @@ class CodexHybridController:
                             patterns=stop_patterns,
                             scan_stdout=True,
                         )
-                        if parsed.stop_reason:
+                        if parsed.stop_reason and (
+                            not stop_reason or safety_policy_code(parsed.stop_reason)
+                        ):
                             stop_reason = parsed.stop_reason
                             retry_after_seconds = parsed.retry_after_seconds
                             retry_kind = parsed.retry_kind
-                            break
+                            if safety_policy_code(stop_reason):
+                                break
                 if completion_pattern and completion_pattern.search(pane_output):
                     completion_detected = True
+                if safety_policy_code(stop_reason):
+                    break
+                if new_tail.incomplete_line:
+                    self.sleep_fn(1.0)
+                    continue
                 if stop_reason:
                     break
 
@@ -1154,6 +1211,12 @@ class CodexHybridController:
                     pane_state,
                     session_path=session_path,
                     previous_offset=prompt_offset,
+                    snapshot=CodexSessionTail(
+                        offset=new_tail.offset,
+                        raw_text="",
+                        events=tuple(turn_events),
+                        incomplete_line=new_tail.incomplete_line,
+                    ),
                 )
                 if (
                     assessment.ready_to_send_next
