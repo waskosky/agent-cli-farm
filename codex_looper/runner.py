@@ -58,6 +58,7 @@ from .retry import (
     retry_delay_seconds,
     retry_notification_message,
     retry_status_message,
+    safety_policy_code,
     should_notify_retry_wait,
     transient_retry_limit_message,
     transient_retry_limit_reached,
@@ -760,6 +761,24 @@ async def run_loop(
                     retry_kind=result.retry_kind,
                     retry_after_seconds=result.retry_after_seconds,
                 )
+
+                if code := safety_policy_code(result.stop_reason):
+                    reason = f"safety_policy:{code}"
+                    state.record(
+                        "safety_policy_stop",
+                        status="needs_review",
+                        safety_policy_code=code,
+                        needs_review=True,
+                        auto_retry_allowed=False,
+                        retry_kind=None,
+                        retry_after_seconds=None,
+                        retry_status=None,
+                    )
+                    print(f"\nSTOP: {reason}; needs review; automatic retry disabled")
+                    print(f"last log: {log_path}")
+                    set_tmux_window_option_fn(TMUX_STATE_OPTION, "ERR")
+                    set_tmux_window_option_fn(TMUX_STOP_REASON_OPTION, reason)
+                    return stop_run(reason=reason, exit_code=1, status="needs_review")
 
                 poll_control_commands()
                 if control_stop := next_control_prompt_stop():

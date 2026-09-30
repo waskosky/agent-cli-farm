@@ -199,7 +199,10 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, default_agent: str | N
         "--dry-run", action="store_true", help="print commands without running them"
     )
     parser.add_argument(
-        "--ignore-nonzero", action="store_true", default=None, help="do not stop on nonzero exit"
+        "--ignore-nonzero",
+        action="store_true",
+        default=None,
+        help="continue after nonzero exit; structured provider safety errors always stop for review",
     )
     parser.add_argument(
         "--stop-on-nonzero",

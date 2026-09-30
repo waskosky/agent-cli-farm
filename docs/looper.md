@@ -120,7 +120,7 @@ Numeric constraints are strict. Integer counters must be whole numbers and finit
 | `--reuse-session` | off | boolean flag | Reuse one agent session across all loops. |
 | `--cwd PATH` | current directory | process cwd path | Working directory for agent commands. |
 | `--dry-run` | off | boolean flag | Print commands without running agents or creating backup branches. |
-| `--ignore-nonzero` | off | boolean flag | Continue after nonzero agent exits. |
+| `--ignore-nonzero` | off | boolean flag | Continue after nonzero agent exits; structured provider safety errors always stop for review. |
 | `--stop-on-nonzero` | on | boolean flag | Stop after nonzero agent exits. |
 | `--hold-on-stop` | off | boolean flag | Wait for Enter before closing after a stop. |
 | `--tmux-layout auto\|single\|split` | `CODEX_LOOPER_LAYOUT` or `auto`; farm launch sets `split` | enum | Split creates a second tmux pane that tails the active prompt log while the main pane keeps supervisor status. |
@@ -301,8 +301,15 @@ The looper retries the current prompt when it sees provider rate-limit, backoff,
 
 Rate-limit retries are uncapped so long-running loops can wait for quota reset and keep going. Non-rate-limit transient retries are capped by `max_transient_retries`; set it to `0` to allow unlimited transient retries. While waiting, the looper keeps the tmux window state as `RUN` and writes the retry attempt, retry kind, next wait duration, and reason into `@codex_stop_reason` for status tooling. Retry waits at or above `retry_notify_after_seconds` also emit a tmux display message; set it to `0` to disable long-wait notifications.
 
+Provider safety codes `cyber_policy` and `misalignment_policy_violation` always terminate the entire run with exit code 1, tmux state `ERR`, and the fixed reason `safety_policy:<code>`. Detection reads exact string `code` or `codex_error_info` fields in structured `error` / `turn.failed` events and their error objects. Codex rollout `event_msg` records are also supported for `payload.type = error` and `payload.type = task_complete` with an error object, including `last_agent_message = null`. Message prose, quoted JSON, and tool-output records are not safety signals.
+
+Safety stops take precedence over retry hints, READY detection, completion markers, fresh-session cycling, and `--ignore-nonzero`, even with unlimited retries or empty `stop_patterns`. In JSON mode the child is terminated even when `kill_on_stop_pattern = false`. In hybrid mode the supervisor stops sending prompts and leaves the pane available for operator review. `state.json` and `events.jsonl` record `status = needs_review`, `needs_review = true`, `safety_policy_code`, and `auto_retry_allowed = false`; these new fields contain no provider error prose or prompt content. The existing prompt logs retain their usual output behavior. Review the stop before manually starting any new run; this guard does not activate in already-running supervisors or prevent a separate external launcher from creating a new run.
+
+Codex hybrid continuation requires a successful `task_complete` event matching the observed `task_started` turn ID. Readiness uses the same rollout snapshot already checked for safety errors. READY prompts and partial assistant messages alone cannot advance the loop; missing lifecycle evidence waits until the configured timeout.
+
 The looper stops when it sees:
 
+- either structured provider safety code above
 - local per-prompt timeout
 - common timeout, deadline, or request-abort wording
 - nonzero command exit, unless `--ignore-nonzero` is set
