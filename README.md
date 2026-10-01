@@ -67,6 +67,14 @@ invisible tmux pane option. Existing unrelated hooks and settings are preserved.
 Use `./setup.sh --without-session-hook` (or `CODEXFARM_INSTALL_SESSION_HOOK=0`)
 when you do not want setup to change user hook files.
 
+For local interactive Codex launches, the farm adds `--no-daemon` when the
+selected CLI advertises it. Each TUI then owns its conversation and hook
+environment, including when restoring an exact session. Older CLIs, remote
+connections, utility commands, explicit `--no-daemon` arguments, and custom
+shell invocations retain their supported command. Hooks originating from a
+Codex app server are ignored because its inherited tmux pane may belong to
+another TUI. Updating the helpers does not restart existing Codex processes.
+
 To explicitly inspect the ID recorded for the current pane, run this inside that
 pane (the command intentionally prints the otherwise hidden conversation ID):
 
@@ -314,6 +322,8 @@ unrelated errors, and custom launch commands are left alone. Repeated lock
 failures remain visible for diagnosis; recovery never deletes databases or
 changes `CODEX_HOME`/`sqlite_home`. A recovered conversation may ask whether to
 resume a paused goal; that choice remains yours.
+Retries preserve individual-server mode when the original launch used
+`--no-daemon`.
 
 Check installed-helper freshness and manifest resume coverage without printing session IDs:
 
@@ -717,6 +727,11 @@ agent-cli-farm/
   process file descriptors: Codex under `~/.codex/sessions`, Claude under
   `~/.claude/projects`, and Gemini under a `.gemini/.../chats` directory.
   Missing or ambiguous provider IDs stop save and preserve the previous snapshot.
+- Existing Codex TUIs attached to a shared app server cannot reliably map its
+  hooks or writer locks to an individual pane. Relaunch through `codex-add`
+  when the conversation is no longer in use to enable automatic identity
+  tracking. A manually verified pane binding cannot track a later in-TUI
+  `/new`, `/fork`, or `/resume` switch in that shared-server TUI.
 - A Codex conversation cannot be resumed by two processes at once. In-TUI
   `/fork` can retain the original thread's writer ownership until that process
   unloads it; use the same TUI's `/resume` picker or close the owning process.

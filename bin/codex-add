@@ -705,6 +705,77 @@ remain_on_exit_enabled() {
   esac
 }
 
+codex_individual_server_supported() {
+  [ "$PANE_PROVIDER" = codex ] || return 1
+  # Inspect trusted shell fragments as data only. Preserve remote connections,
+  # explicit choices, utility commands and custom shell invocations unchanged.
+  python3 - "$CMD" "$ARGS_ENV" "${tool_args[@]}" <<'PY'
+import os
+import shlex
+import signal
+import subprocess
+import sys
+
+try:
+    lexer = shlex.shlex(sys.argv[2], posix=True, punctuation_chars=";&|<>")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    shell_args = list(lexer)
+except ValueError:
+    raise SystemExit(1)
+if any(arg and set(arg) <= set(";&|<>") for arg in shell_args):
+    raise SystemExit(1)
+if any(character in sys.argv[2] for character in "`$\n\r"):
+    raise SystemExit(1)
+args = shell_args + sys.argv[3:]
+utilities = {
+    "agents", "exec", "e", "review", "login", "logout", "mcp", "plugin",
+    "app-server", "remote-control", "completion", "update", "doctor", "sandbox",
+    "debug", "apply", "a", "queue", "archive", "delete", "migrate-rollouts",
+    "unarchive", "cloud", "exec-server", "features", "help",
+}
+value_options = {
+    "-c", "--config", "--enable", "--disable", "-i", "--image", "-m", "--model",
+    "--local-provider", "-p", "--profile", "-s", "--sandbox", "-a",
+    "--ask-for-approval", "-C", "--cd", "--add-dir",
+}
+command_seen = False
+index = 0
+while index < len(args):
+    arg = args[index]
+    if arg == "--":
+        break
+    if arg in {"--no-daemon", "--help", "-h", "--version", "-V"} or arg.startswith("--remote"):
+        raise SystemExit(1)
+    if arg in value_options:
+        index += 2
+        continue
+    if not command_seen and not arg.startswith("-"):
+        if arg in utilities:
+            raise SystemExit(1)
+        command_seen = True
+    index += 1
+
+# Probe only eligible local TUIs. A wrapper that ignores --help must not stall
+# restore or leave its children running after a timeout.
+try:
+    with subprocess.Popen(
+        [sys.argv[1], "--help"], stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+    ) as probe:
+        try:
+            help_output, _ = probe.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            os.killpg(probe.pid, signal.SIGKILL)
+            probe.communicate()
+            raise SystemExit(1)
+        if probe.returncode or "--no-daemon" not in help_output:
+            raise SystemExit(1)
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+PY
+}
+
 # Set up the private compatibility-log destination before starting the pane.
 mkdir -p "$LOGDIR"
 chmod 700 "$STATE_DIR" "$LOGDIR" 2>/dev/null || true
@@ -734,6 +805,9 @@ start_status_annotator
 
 # Create new window and start Codex
 printf -v CMDLINE '%q' "$CMD"
+if codex_individual_server_supported; then
+  CMDLINE="$CMDLINE --no-daemon"
+fi
 if [ -n "$ARGS_ENV" ]; then
   CMDLINE="$CMDLINE $ARGS_ENV"
 fi

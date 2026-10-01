@@ -194,6 +194,160 @@ esac
         self.assertEqual(len(new_window), 1)
         self.assertIn("codex --some-flag", " ".join(new_window[0]))
 
+    def test_supported_codex_tui_uses_its_own_server(self):
+        make_executable(
+            self.tmpdir / "codex",
+            '#!/usr/bin/env bash\n[ "${1:-}" != --help ] || echo "  --no-daemon"\n',
+        )
+        target = self.tmpdir / "project"
+        target.mkdir()
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-add", "-d", str(target)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch = next(cmd for cmd in self.read_tmux_commands() if cmd[0] == "new-window")
+        self.assertIn("codex --no-daemon", " ".join(launch))
+
+    def test_supported_codex_exact_resume_keeps_config_and_session_id(self):
+        make_executable(
+            self.tmpdir / "codex",
+            '#!/usr/bin/env bash\n[ "${1:-}" != --help ] || echo "  --no-daemon"\n',
+        )
+        target = self.tmpdir / "project"
+        target.mkdir()
+        session_id = "123e4567-e89b-42d3-a456-426614174001"
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-add", "-d", str(target)],
+            env={
+                **self.env,
+                "CODEX_ARGS": f"-c check_for_update_on_startup=false resume {session_id}",
+            },
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch = " ".join(next(cmd for cmd in self.read_tmux_commands() if cmd[0] == "new-window"))
+        self.assertIn("codex --no-daemon -c check_for_update_on_startup=false resume", launch)
+        self.assertIn(session_id, launch)
+        self.assertEqual(launch.count("--no-daemon"), 1)
+
+    def test_codex_daemon_flag_is_not_added_to_remote_or_noninteractive_commands(self):
+        make_executable(
+            self.tmpdir / "codex",
+            '#!/usr/bin/env bash\n[ "${1:-}" != --help ] || echo "  --no-daemon"\n',
+        )
+        target = self.tmpdir / "project"
+        target.mkdir()
+        cases = [
+            (["--remote", "unix:///tmp/server"], ""),
+            (["resume", "--remote=unix:///tmp/server"], ""),
+            (["exec", "inspect the workspace"], ""),
+            ([], "-c model=example exec 'inspect the workspace'"),
+            ([], "app-server --listen stdio://"),
+            ([], "--remote unix:///tmp/server resume --last"),
+        ]
+        for arguments, trusted_args in cases:
+            with self.subTest(arguments=arguments, trusted_args=trusted_args):
+                self.tmux_log.unlink(missing_ok=True)
+                result = subprocess.run(
+                    [REPO_ROOT / "bin/codex-add", "-d", str(target), "--", *arguments],
+                    env={**self.env, "CODEX_ARGS": trusted_args},
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                launch = " ".join(
+                    next(cmd for cmd in self.read_tmux_commands() if cmd[0] == "new-window")
+                )
+                self.assertNotIn("--no-daemon", launch)
+
+    def test_local_codex_option_values_and_literal_prompts_keep_individual_server_mode(self):
+        make_executable(
+            self.tmpdir / "codex",
+            '#!/usr/bin/env bash\n[ "${1:-}" != --help ] || echo "  --no-daemon"\n',
+        )
+        target = self.tmpdir / "project"
+        target.mkdir()
+        session_id = "123e4567-e89b-42d3-a456-426614174001"
+        for arguments, trusted_args in (
+            (["--profile", "review"], ""),
+            (["resume", session_id, "review"], ""),
+            (["compare X & Y"], ""),
+            ([], "--profile review resume " + session_id + " 'compare X & Y'"),
+        ):
+            with self.subTest(arguments=arguments, trusted_args=trusted_args):
+                self.tmux_log.unlink(missing_ok=True)
+                result = subprocess.run(
+                    [REPO_ROOT / "bin/codex-add", "-d", str(target), "--", *arguments],
+                    env={**self.env, "CODEX_ARGS": trusted_args},
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                launch = " ".join(
+                    next(cmd for cmd in self.read_tmux_commands() if cmd[0] == "new-window")
+                )
+                self.assertIn("codex --no-daemon", launch)
+
+    def test_explicit_codex_daemon_flag_is_not_duplicated(self):
+        make_executable(
+            self.tmpdir / "codex",
+            '#!/usr/bin/env bash\n[ "${1:-}" != --help ] || echo "  --no-daemon"\n',
+        )
+        target = self.tmpdir / "project"
+        target.mkdir()
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-add", "-d", str(target), "--", "--no-daemon"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch = " ".join(next(cmd for cmd in self.read_tmux_commands() if cmd[0] == "new-window"))
+        self.assertEqual(launch.count("--no-daemon"), 1)
+
+    def test_older_codex_and_failed_help_probe_preserve_supported_invocation(self):
+        target = self.tmpdir / "project"
+        target.mkdir()
+        for help_status in (0, 1):
+            with self.subTest(help_status=help_status):
+                self.tmux_log.unlink(missing_ok=True)
+                make_executable(
+                    self.tmpdir / "codex",
+                    f'#!/usr/bin/env bash\n[ "${{1:-}}" != --help ] || exit {help_status}\n',
+                )
+                result = subprocess.run(
+                    [REPO_ROOT / "bin/codex-add", "-d", str(target)],
+                    env=self.env,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                launch = " ".join(
+                    next(cmd for cmd in self.read_tmux_commands() if cmd[0] == "new-window")
+                )
+                self.assertNotIn("--no-daemon", launch)
+
+    def test_codex_help_probe_cannot_stall_window_creation(self):
+        make_executable(self.tmpdir / "codex", "#!/usr/bin/env bash\nexec sleep 5\n")
+        target = self.tmpdir / "project"
+        target.mkdir()
+        started = time.monotonic()
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-add", "-d", str(target)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=7,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(time.monotonic() - started, 4.5)
+        launch = " ".join(next(cmd for cmd in self.read_tmux_commands() if cmd[0] == "new-window"))
+        self.assertNotIn("--no-daemon", launch)
+
     def test_codex_add_allows_native_title_updates_by_default(self):
         target_dir = self.tmpdir / "proj-native-title"
         target_dir.mkdir(parents=True, exist_ok=True)

@@ -92,6 +92,33 @@ class StartupRecoveryTests(unittest.TestCase):
                 self.run_recovery()
                 self.assertEqual(self.respawns(), [])
 
+    def test_exact_retry_preserves_individual_server_mode(self):
+        for arguments in (
+            f"--no-daemon -c check_for_update_on_startup=false resume {SESSION_ID}",
+            f"-c check_for_update_on_startup=false --no-daemon resume {SESSION_ID}",
+            f"resume --no-daemon {SESSION_ID}",
+        ):
+            with self.subTest(arguments=arguments):
+                self.calls.clear()
+                self.fields["#{pane_start_command}"] = recovery.PREFIX + "codex " + arguments
+                self.assertEqual(self.run_recovery(), 0)
+                self.assertEqual(len(self.respawns()), 1)
+                launch = shlex.split(self.respawns()[0][-1][len(recovery.PREFIX) :])
+                self.assertEqual(launch.count("--no-daemon"), 1)
+                self.assertEqual(launch[-2:], ["resume", SESSION_ID])
+
+    def test_daemon_flag_does_not_allow_extra_commands_or_resume_prompts(self):
+        for command in (
+            f"codex --no-daemon --no-daemon resume {SESSION_ID}",
+            f"codex --no-daemon resume {SESSION_ID} 'perform work'",
+            f"codex --no-daemon app-server resume {SESSION_ID}",
+            f"codex --no-daemon --remote unix:///tmp/server resume {SESSION_ID}",
+            f"codex --no-daemon resume {SESSION_ID}; touch /tmp/unwanted",
+        ):
+            with self.subTest(command=command):
+                self.fields["#{pane_start_command}"] = command
+                self.assertFalse(recovery.exact_resume(command, SESSION_ID))
+
     def test_missing_exit_status_still_requires_the_exact_fatal_error(self):
         self.fields["#{pane_dead}:#{pane_dead_status}"] = "1:"
         self.assertEqual(self.run_recovery(), 0)

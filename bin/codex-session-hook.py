@@ -78,6 +78,10 @@ def provider_ancestor_pid(provider: str) -> int | None:
         if info is None:
             return None
         parent_pid, tokens = info
+        # App servers can share their launching pane's environment across TUIs.
+        # Stop here even if a TUI parent exists; it cannot establish ownership.
+        if provider == "codex" and "app-server" in tokens:
+            return None
         if any(Path(token).name.lower() in expected for token in tokens):
             return pid
         pid = parent_pid
