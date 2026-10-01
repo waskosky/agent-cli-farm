@@ -23,6 +23,27 @@ PROVIDER_EXECUTABLES = {
     "gemini": {"gemini", "gemini.exe", "gemini.js"},
 }
 HOOK_EVENTS = {"SessionStart", "UserPromptSubmit"}
+CODEX_VALUE_OPTIONS = {
+    "-c",
+    "--config",
+    "--enable",
+    "--disable",
+    "-i",
+    "--image",
+    "-m",
+    "--model",
+    "--local-provider",
+    "--remote",
+    "-p",
+    "--profile",
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+    "-C",
+    "--cd",
+    "--add-dir",
+}
 
 
 def process_info(pid: int) -> tuple[int, list[str]] | None:
@@ -66,6 +87,39 @@ def process_info(pid: int) -> tuple[int, list[str]] | None:
         return None
 
 
+def codex_arguments(tokens: list[str]) -> list[str] | None:
+    # process_info prepends comm to argv. Only argv's executable (or an
+    # interpreter's script) identifies Codex; later arguments may be prompts.
+    argv = tokens[1:]
+    if not argv:
+        return None
+    executable = Path(argv[0]).name.lower()
+    if executable in PROVIDER_EXECUTABLES["codex"]:
+        return argv[1:]
+    if (
+        executable in {"bash", "sh", "dash", "zsh", "node", "nodejs"}
+        and len(argv) > 1
+        and Path(argv[1]).name.lower() in PROVIDER_EXECUTABLES["codex"]
+    ):
+        return argv[2:]
+    return None
+
+
+def is_codex_app_server(arguments: list[str]) -> bool:
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            return False
+        if argument in CODEX_VALUE_OPTIONS:
+            index += 2
+            continue
+        if not argument.startswith("-"):
+            return argument == "app-server"
+        index += 1
+    return False
+
+
 def provider_ancestor_pid(provider: str) -> int | None:
     expected = PROVIDER_EXECUTABLES[provider]
     pid = os.getppid()
@@ -78,11 +132,13 @@ def provider_ancestor_pid(provider: str) -> int | None:
         if info is None:
             return None
         parent_pid, tokens = info
-        # App servers can share their launching pane's environment across TUIs.
-        # Stop here even if a TUI parent exists; it cannot establish ownership.
-        if provider == "codex" and "app-server" in tokens:
-            return None
-        if any(Path(token).name.lower() in expected for token in tokens):
+        if provider == "codex":
+            arguments = codex_arguments(tokens)
+            if arguments is not None:
+                # App servers share the launching pane's environment across
+                # TUIs. A TUI parent cannot establish hook ownership either.
+                return None if is_codex_app_server(arguments) else pid
+        elif any(Path(token).name.lower() in expected for token in tokens):
             return pid
         pid = parent_pid
     return None

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import io
 import json
 import os
 import shlex
@@ -9,16 +11,138 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "bin" / "codex-session-hook.py"
 INSTALLER = REPO_ROOT / "bin" / "codex-session-hook-install.py"
 SESSION_ID = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"
+HOOK_SPEC = importlib.util.spec_from_file_location("codex_session_hook", HOOK)
+assert HOOK_SPEC is not None and HOOK_SPEC.loader is not None
+hook = importlib.util.module_from_spec(HOOK_SPEC)
+HOOK_SPEC.loader.exec_module(hook)
 
 
 def make_executable(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+class SessionHookAncestorTests(unittest.TestCase):
+    def record_with_processes(self, processes: dict[int, tuple[int, list[str]]]) -> list[list[str]]:
+        payload = json.dumps({"hook_event_name": "SessionStart", "session_id": SESSION_ID})
+        stdin = io.TextIOWrapper(io.BytesIO(payload.encode()))
+        env = {"CODEXFARM_MANAGED": "1", "CODEXFARM_PROVIDER": "codex", "TMUX_PANE": "%17"}
+        with (
+            mock.patch.dict(os.environ, env),
+            mock.patch.object(hook.os, "getppid", return_value=100),
+            mock.patch.object(hook, "process_info", side_effect=processes.get),
+            mock.patch.object(hook.sys, "stdin", stdin),
+            mock.patch.object(hook.subprocess, "run") as run,
+        ):
+            run.return_value.returncode = 0
+            hook.record_session()
+        stdin.close()
+        return [call.args[0] for call in run.call_args_list]
+
+    def test_records_direct_tui_with_app_server_option_values_or_prompt(self) -> None:
+        argument_cases = [
+            ["--no-daemon", "--profile", "app-server"],
+            ["--profile=app-server"],
+            ["-papp-server"],
+            ["resume", SESSION_ID, "app-server"],
+            ["--", "app-server"],
+        ]
+        for option in (
+            "-c",
+            "--config",
+            "--enable",
+            "--disable",
+            "-i",
+            "--image",
+            "-m",
+            "--model",
+            "--local-provider",
+            "--remote",
+            "-p",
+            "--profile",
+            "-s",
+            "--sandbox",
+            "-a",
+            "--ask-for-approval",
+            "-C",
+            "--cd",
+            "--add-dir",
+        ):
+            argument_cases.append([option, "app-server"])
+        for arguments in argument_cases:
+            with self.subTest(arguments=arguments):
+                commands = self.record_with_processes(
+                    {100: (1, ["codex", "/opt/codex", *arguments])}
+                )
+                self.assertEqual(len(commands), 6)
+                self.assertEqual(commands[-2][-1], "100")
+                self.assertEqual(commands[-1][-1], SESSION_ID)
+
+    def test_app_server_command_stops_before_tmux_mutation_or_parent_tui(self) -> None:
+        for arguments in (
+            ["app-server"],
+            ["app-server", "--managed-daemon"],
+            ["--profile", "app-server", "app-server", "--managed-daemon"],
+            ["-c", "name=app-server", "app-server"],
+            ["--remote", "unix:///tmp/server", "app-server"],
+        ):
+            for prefix in (
+                ["codex", "/opt/codex"],
+                ["bash", "/bin/bash", "/opt/codex"],
+                ["node", "/usr/bin/node", "/opt/codex.js"],
+            ):
+                with self.subTest(prefix=prefix, arguments=arguments):
+                    commands = self.record_with_processes(
+                        {
+                            100: (200, [*prefix, *arguments]),
+                            200: (1, ["codex", "/opt/codex", "--no-daemon"]),
+                        }
+                    )
+                    self.assertEqual(commands, [])
+
+    def test_unrelated_process_arguments_do_not_block_parent_tui(self) -> None:
+        for tokens in (
+            ["python3", "/usr/bin/python3", "/opt/hook.py", "app-server"],
+            ["helper", "/opt/helper", "codex", "app-server"],
+            ["bash", "/bin/bash", "-c", "codex", "app-server"],
+        ):
+            with self.subTest(tokens=tokens):
+                commands = self.record_with_processes(
+                    {
+                        100: (200, tokens),
+                        200: (1, ["codex", "/opt/codex", "--no-daemon"]),
+                    }
+                )
+                self.assertEqual(len(commands), 6)
+                self.assertEqual(commands[-2][-1], "200")
+
+    def test_provider_name_in_unrelated_argv_is_not_a_provider(self) -> None:
+        commands = self.record_with_processes(
+            {100: (1, ["helper", "/opt/helper", "codex", "resume", SESSION_ID])}
+        )
+        self.assertEqual(commands, [])
+
+    def test_ps_fallback_keeps_comm_separate_from_codex_argv(self) -> None:
+        for arguments, expected_pid in (
+            ("--no-daemon --profile app-server", 100),
+            ("resume " + SESSION_ID + " app-server", 100),
+            ("--profile app-server app-server --managed-daemon", None),
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                mock.patch.object(hook.os, "getppid", return_value=100),
+                mock.patch.object(Path, "read_text", side_effect=OSError),
+                mock.patch.object(hook.subprocess, "run") as run,
+            ):
+                run.return_value.returncode = 0
+                run.return_value.stdout = "1 codex /opt/codex " + arguments
+                self.assertEqual(hook.provider_ancestor_pid("codex"), expected_pid)
 
 
 class SessionHookRuntimeTests(unittest.TestCase):

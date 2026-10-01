@@ -9,6 +9,7 @@ Usage: $(basename "$0") [--session NAME] [--source DIR] [manifest-path]
 
 Check the installed Agent CLI Farm helpers and a saved restore manifest.
 Exact provider session IDs are counted but never printed.
+Audit every live pane for verified conversation coverage in that manifest.
 Also check backup freshness, the memory monitor heartbeat and host RAM pressure.
 EOF
 }
@@ -239,6 +240,7 @@ EOF
 
 check_runtime() {
   local window_count
+  local audit_bin="$SCRIPT_DIR/codex-audit-panes.py"
 
   if ! command -v tmux >/dev/null 2>&1; then
     problem "tmux is not installed"
@@ -250,6 +252,11 @@ check_runtime() {
       ok "tmux session $SESSION is running with $window_count managed window(s)"
     else
       warning "unable to list windows in tmux session $SESSION"
+    fi
+    if [ ! -x "$audit_bin" ]; then
+      problem "live pane audit helper unavailable; reinstall codex-audit-panes.py"
+    elif ! "$audit_bin" --session "$SESSION" "$manifest_path"; then
+      problem "live pane recovery coverage needs attention (details above)"
     fi
   else
     info "tmux session $SESSION is not currently running"

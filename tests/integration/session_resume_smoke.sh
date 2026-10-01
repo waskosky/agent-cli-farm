@@ -222,6 +222,23 @@ for label in codex-a codex-b claude-a claude-b gemini-a gemini-b; do
 done
 echo "[OK] managed panes retained stable logical names"
 
+# Move one Codex into home and one Claude into a secondary pane. Recovery must
+# still retain all six conversations and flatten them back into separate windows.
+tmux kill-window -t "$session:home"
+tmux rename-window -t "$session:codex-a" home
+tmux set-option -p -u -t "$session:home" @codexfarm_name
+tmux join-pane -d -s "$session:claude-b" -t "$session:claude-a"
+CODEX_SESSION="$session" "$repo_root/bin/codex-save" "$manifest" >/dev/null
+require_manifest_row home-codex codex "resume $codex_a"
+require_manifest_row claude-b claude "--resume $claude_b"
+"$repo_root/bin/codex-audit-panes.py" --session "$session" "$manifest"
+echo "[OK] home and secondary provider panes are covered"
+
+: > "$invocation_log"
+CODEX_SESSION="$session" "$repo_root/bin/codex-restore" "$manifest" >/dev/null
+[ ! -s "$invocation_log" ]
+echo "[OK] restore recognized existing home and secondary conversations"
+
 tmux kill-session -t "$session"
 : > "$invocation_log"
 find "$ready_dir" -type f -delete
@@ -242,7 +259,7 @@ do
   esac
 done
 
-for label in codex-a codex-b claude-a claude-b gemini-a gemini-b; do
+for label in home-codex codex-b claude-a claude-b gemini-a gemini-b; do
   tmux list-windows -t "$session" -F '#{window_name}' | grep -Fqx "$label"
 done
 echo "[OK] restore launched all six exact provider conversations"

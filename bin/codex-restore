@@ -179,15 +179,23 @@ session_already_present() {
   return 1
 }
 
+window_will_be_removed() {
+  local wanted="$1" target
+  for target in "${force_targets[@]}"; do
+    [ "$target" != "$wanted" ] || return 0
+  done
+  return 1
+}
+
 conversation_active_in_other_farm() {
-  local wanted="$1"$'\t'"$2" other_sessions other_session windows window target dead identity
+  local wanted="$1"$'\t'"$2" other_sessions other_session windows window target dead identity panes pane
   local own_windows own_window linked_here
   own_windows=$(tmux list-windows -t "=$SESSION" -F $'#{window_id}\t#{window_name}') || return 2
   other_sessions=$(tmux list-sessions -F '#{session_name}') || return 2
   while IFS= read -r other_session; do
     [ -n "$other_session" ] || continue
     [ "$other_session" != "$SESSION" ] || continue
-    windows=$(tmux list-windows -t "=$other_session" -F $'#{window_id}\t#{window_name}') || continue
+    windows=$(tmux list-windows -t "=$other_session" -F $'#{window_id}\t#{window_name}') || return 2
     while IFS= read -r window; do
       [ -n "$window" ] || continue
       target="${window%%$'\t'*}"
@@ -201,10 +209,15 @@ conversation_active_in_other_farm() {
         fi
       done <<< "$own_windows"
       [ "$linked_here" -eq 0 ] || continue
-      dead=$(tmux display-message -p -t "$target.0" '#{pane_dead}') || continue
-      [ "$dead" != 1 ] || continue
-      identity=$("$PANE_IDENTITY_BIN" --inspect-pane "$target.0" 2>/dev/null || true)
-      [ "$identity" != "$wanted" ] || return 0
+      panes=$(tmux list-panes -t "$target" -F '#{pane_id}') || return 2
+      [ -n "$panes" ] || return 2
+      while IFS= read -r pane; do
+        [ -n "$pane" ] || continue
+        dead=$(tmux display-message -p -t "$pane" '#{pane_dead}') || return 2
+        [ "$dead" != 1 ] || continue
+        identity=$("$PANE_IDENTITY_BIN" --inspect-pane "$pane" 2>/dev/null || true)
+        [ "$identity" != "$wanted" ] || return 0
+      done <<< "$panes"
     done <<< "$windows"
   done <<< "$other_sessions"
   return 1
@@ -379,20 +392,45 @@ check_memory || exit 3
 tmux has-session -t "=$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n home
 
 existing_identities=()
-if [ "$force" -eq 0 ]; then
+existing_identity_windows=()
+{
   existing_windows=$(tmux list-windows -t "=$SESSION" -F $'#{window_id}\t#{window_name}')
   while IFS= read -r window; do
     [ -n "$window" ] || continue
     target="${window%%$'\t'*}"
-    dead=$(tmux display-message -p -t "$target.0" '#{pane_dead}')
-    [ "$dead" != 1 ] || continue
-    identity=$("$PANE_IDENTITY_BIN" --inspect-pane "$target.0" 2>/dev/null || true)
-    [ -z "$identity" ] || existing_identities+=("$identity")
+    if ! panes=$(tmux list-panes -t "$target" -F '#{pane_id}') || [ -z "$panes" ]; then
+      echo "Unable to inspect current farm panes; restore stopped before launching conversations." >&2
+      exit 1
+    fi
+    while IFS= read -r pane; do
+      [ -n "$pane" ] || continue
+      dead=$(tmux display-message -p -t "$pane" '#{pane_dead}')
+      [ "$dead" != 1 ] || continue
+      identity=$("$PANE_IDENTITY_BIN" --inspect-pane "$pane" 2>/dev/null || true)
+      if [ -n "$identity" ]; then
+        existing_identities+=("$identity")
+        existing_identity_windows+=("$target")
+      fi
+    done <<< "$panes"
   done <<< "$existing_windows"
-fi
+}
 
 force_names=()
+force_targets=()
 if [ "$force" -eq 1 ]; then
+  # Plan every deletion before checking identities: a conversation in a
+  # differently named window must not be duplicated if that window will survive.
+  {
+    IFS= read -r _header || true
+    while IFS= read -r row; do
+      parse_manifest_row "$row"
+      if name_was_seen "$name"; then continue; fi
+      force_names+=("$name")
+      while IFS= read -r target; do
+        [ -z "$target" ] || force_targets+=("$target")
+      done < <(existing_window_targets "$SESSION" "$name")
+    done
+  } < "$validated_manifest"
   # Force must not remove a local window when the replacement conversation is
   # already live elsewhere (or other farms cannot be inspected).
   {
@@ -401,6 +439,13 @@ if [ "$force" -eq 1 ]; then
       parse_manifest_row "$row"
       preflight_id="$(exact_session_id_from_restore "$cmd" "$args" || true)"
       [ -n "$preflight_id" ] || continue
+      for identity_index in "${!existing_identities[@]}"; do
+        if [ "${existing_identities[$identity_index]}" = "$cmd"$'\t'"$preflight_id" ] \
+          && ! window_will_be_removed "${existing_identity_windows[$identity_index]}"; then
+          echo "Cannot force restore '$name': its conversation is active in a surviving local window." >&2
+          exit 1
+        fi
+      done
       preflight_status=0
       conversation_active_in_other_farm "$cmd" "$preflight_id" || preflight_status=$?
       if [ "$preflight_status" -eq 0 ]; then
@@ -412,24 +457,13 @@ if [ "$force" -eq 1 ]; then
       fi
     done
   } < "$validated_manifest"
-  {
-    IFS= read -r _header || true
-    while IFS= read -r row; do
-      parse_manifest_row "$row"
-      if name_was_seen "$name"; then
-        continue
-      fi
-      force_names+=("$name")
-      while IFS= read -r existing_target; do
-        [ -n "$existing_target" ] || continue
-        check_memory || exit 3
-        if ! tmux kill-window -t "$existing_target"; then
-          echo "Unable to remove existing window '$name' during force restore." >&2
-          exit 1
-        fi
-      done < <(existing_window_targets "$SESSION" "$name")
-    done
-  } < "$validated_manifest"
+  for existing_target in "${force_targets[@]}"; do
+    check_memory || exit 3
+    if ! tmux kill-window -t "$existing_target"; then
+      echo "Unable to remove existing window '$existing_target' during force restore." >&2
+      exit 1
+    fi
+  done
 fi
 
 # Read manifest; skip header

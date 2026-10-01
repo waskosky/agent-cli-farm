@@ -261,7 +261,7 @@ exact provider-session discovery is best-effort.
 Use `-f` to force re-creation of existing-named windows.
 Managed panes keep a stable logical name in tmux metadata even while a CLI
 changes its visible native title. Duplicate logical names are valid. Restore
-checks exact conversation identity across existing windows, including renamed
+checks exact conversation identity across every pane, including split and renamed
 windows. If a same-named window contains a different or unverified conversation,
 restore reports a conflict; use a separate farm or `--force` to deliberately
 replace it. An exact conversation already live in another tmux farm is skipped
@@ -279,6 +279,10 @@ an older farm version are repaired as they are launched. If any recognized
 provider ID is unresolved, `codex-save` exits nonzero and leaves the previous
 manifest intact. Without authoritative hook or writer metadata, multiple
 unrelated session files are treated as ambiguous.
+A static manual/recovery binding is insufficient for a live Codex TUI: its
+process can survive an in-TUI conversation switch while the recorded ID stays
+unchanged. Save requires fresh direct hook metadata or current process ownership;
+an unverified shared-server binding stops capture and is flagged by the doctor.
 Latest-session resumes (`codex resume --last`, `claude --continue`, and
 `gemini --resume latest`) and the old `--allow-fallback` option are no longer
 supported. Restore rejects legacy manifests without exact provider IDs before
@@ -289,7 +293,27 @@ Restored Codex sessions skip the startup update prompt using the per-launch
 override, so recovery proceeds directly to the saved conversation. This does
 not change your Codex configuration or saved session IDs; update Codex separately
 when convenient.
-Only pane 0 is saved. Split layouts and scrollback are not reconstructed. Missing saved directories fall back to `$HOME` with a warning.
+Every provider pane is saved, including conversations in `home` and secondary
+panes. A home conversation restores as `home-codex`, `home-claude`, or
+`home-gemini`; additional panes get a `-pane-INDEX` suffix unless they have a
+distinct managed name. Each conversation restores into its own window. Plain
+home shells and secondary non-provider panes are omitted; other first-pane
+shell/custom commands retain their existing behavior. Repeated views of the same
+conversation are saved once. Split layouts and scrollback are not reconstructed.
+Missing saved directories fall back to `$HOME` with a warning.
+
+For a dedicated history picker, launch local Codex with `--no-daemon` and mark
+its pane explicitly, for example from another terminal:
+
+```bash
+tmux set-option -p -t '%PANE_ID' @codexfarm_utility history-picker
+```
+
+Only a confirmed local `--no-daemon resume --all` picker with no conversation
+identity or recorded session metadata is excluded. A marked shared-server or
+remote pane with an unknown identity still blocks save. Once a selected
+conversation has a verified ID, it is included in saves and coverage checks.
+Unmarked Codex panes always require an exact identity, regardless of window name.
 Manifests are written owner-only, flushed to disk, and atomically replaced.
 Save and restore operations on the same manifest are serialized. Manifests
 remain trusted executable input because restore launches the recorded commands.
@@ -341,6 +365,25 @@ It also flags manifests older than 24 hours, enabled but inactive timers, and
 failed autosave services. Codex session discovery checks held writer locks as
 well as open rollouts, so paginated sessions remain discoverable even when
 their rollout descriptor is closed.
+For a running farm, the doctor inspects every pane and compares verified
+conversation IDs with the manifest. Missing entries, unknown identities and
+static shared-server bindings fail the check without printing conversation IDs.
+History archives continue independently when exact manifest capture fails.
+
+To migrate an older shared-server TUI safely, wait until its conversation is idle,
+record the exact ID currently shown by Codex's `/status`, and exit that TUI
+normally. From another terminal, relaunch the same conversation through the farm:
+
+```bash
+codex-add --session codexfarm /path/to/project -- resume CURRENT_SESSION_ID
+codex-save
+codex-doctor
+```
+
+Use the actual project directory and currently displayed ID. Do this one
+conversation at a time. If its writer is still held, wait for the server to
+release it and retry; do not stop a shared server that serves other conversations.
+The farm does not interrupt running chats to migrate them.
 
 Bulk restore waits two seconds between launches and checks host memory before
 creating windows, before force deletion, and before each launch. Critical
