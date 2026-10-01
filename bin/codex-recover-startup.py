@@ -19,10 +19,10 @@ def tmux(*args: str) -> str:
     return subprocess.check_output(["tmux", *args], text=True, stderr=subprocess.DEVNULL).strip()
 
 
-def exact_resume(command: str, session_id: str) -> bool:
+def exact_resume_options(command: str, session_id: str) -> list[str] | None:
     """Accept only our known launch grammar; never execute captured shell text."""
     if not UUID.fullmatch(session_id):
-        return False
+        return None
     # tmux quotes pane_start_command when it contains spaces.
     if command.startswith('"') and command.endswith('"'):
         command = command[1:-1]
@@ -33,12 +33,20 @@ def exact_resume(command: str, session_id: str) -> bool:
     try:
         args = shlex.split(command)
     except ValueError:
-        return False
+        return None
     if not args or Path(args.pop(0)).name != "codex":
-        return False
+        return None
+    if args.count("--no-daemon") > 1:
+        return None
+    options = ["--no-daemon"] if "--no-daemon" in args else []
+    args = [arg for arg in args if arg != "--no-daemon"]
     if args[:2] == ["-c", "check_for_update_on_startup=false"]:
         args = args[2:]
-    return args == ["resume", session_id]
+    return options if args == ["resume", session_id] else None
+
+
+def exact_resume(command: str, session_id: str) -> bool:
+    return exact_resume_options(command, session_id) is not None
 
 
 def sqlite_startup_failure(output: str) -> bool:
@@ -78,7 +86,8 @@ def recover(session: str) -> int:
                 continue
             session_id = field("#{@codexfarm_session_id}")
             command = field("#{pane_start_command}")
-            if not exact_resume(command, session_id):
+            options = exact_resume_options(command, session_id)
+            if options is None:
                 continue
             if not sqlite_startup_failure(tmux("capture-pane", "-p", "-t", pane, "-S", "-100")):
                 continue
@@ -105,6 +114,7 @@ def recover(session: str) -> int:
             launch = PREFIX + shlex.join(
                 [
                     executable,
+                    *options,
                     "-c",
                     "check_for_update_on_startup=false",
                     "resume",

@@ -38,12 +38,25 @@ class SessionHookRuntimeTests(unittest.TestCase):
 } >> "$TMUX_LOG"
 """,
         )
-        make_executable(
-            self.fake_bin / "codex",
-            """#!/usr/bin/env bash
+        for provider in ("codex", "claude", "gemini"):
+            make_executable(
+                self.fake_bin / provider,
+                """#!/usr/bin/env bash
+if [[ "${1:-}" == "--with-server" ]]; then
+  shift
+  "$0" app-server "$@"
+  exit "$?"
+fi
+if [[ "${1:-}" == "app-server" ]]; then
+  shift
+  if [[ "${1:-}" == "--managed-daemon" ]]; then
+    shift
+  fi
+fi
 "$@"
+exit "$?"
 """,
-        )
+            )
 
         self.env = os.environ.copy()
         self.env["PATH"] = f"{self.fake_bin}:{self.env.get('PATH', '')}"
@@ -61,14 +74,20 @@ class SessionHookRuntimeTests(unittest.TestCase):
         *,
         env: dict[str, str] | None = None,
         through_provider: bool = True,
+        provider_arguments: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
+        hook_env = env or self.env
         command = [HOOK]
         if through_provider:
-            command = [self.fake_bin / "codex", HOOK]
+            command = [
+                self.fake_bin / hook_env["CODEXFARM_PROVIDER"],
+                *provider_arguments,
+                HOOK,
+            ]
         return subprocess.run(
             command,
             input=payload,
-            env=env or self.env,
+            env=hook_env,
             text=True,
             capture_output=True,
             check=False,
@@ -113,6 +132,47 @@ class SessionHookRuntimeTests(unittest.TestCase):
         self.assertGreater(int(commands[3][5]), 0)
         self.assertGreater(int(commands[4][5]), 0)
         self.assertEqual(commands[5][5], SESSION_ID)
+
+    def test_ignores_codex_app_server_hooks(self) -> None:
+        for arguments in (("app-server",), ("app-server", "--managed-daemon")):
+            for event in ("SessionStart", "UserPromptSubmit"):
+                with self.subTest(arguments=arguments, event=event):
+                    result = self.run_hook(
+                        json.dumps({"hook_event_name": event, "session_id": SESSION_ID}),
+                        provider_arguments=arguments,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr, "")
+                    self.assertEqual(self.tmux_commands(), [])
+
+    def test_app_server_hook_does_not_fall_back_to_parent_codex_tui(self) -> None:
+        result = self.run_hook(
+            json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": SESSION_ID}),
+            provider_arguments=("--with-server",),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.tmux_commands(), [])
+
+    def test_records_claude_and_gemini_sessions(self) -> None:
+        for provider in ("claude", "gemini"):
+            with self.subTest(provider=provider):
+                result = self.run_hook(
+                    json.dumps({"hook_event_name": "SessionStart", "session_id": SESSION_ID}),
+                    env={**self.env, "CODEXFARM_PROVIDER": provider},
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "{}\n" if provider == "gemini" else "")
+                self.assertEqual(result.stderr, "")
+                commands = self.tmux_commands()
+                self.assertEqual(commands[-5][5], provider)
+                self.assertGreater(int(commands[-2][5]), 0)
+                self.assertEqual(commands[-1][5], SESSION_ID)
 
     def test_ignores_unmanaged_panes(self) -> None:
         env = self.env.copy()
