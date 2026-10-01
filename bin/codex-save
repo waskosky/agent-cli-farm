@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Snapshot the current Codex tmux windows to a manifest file
+# Snapshot every provider pane to a manifest file
 # Usage: codex-save [--autosave] [manifest-path]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,12 +13,13 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [--all-registered] [--autosave] [manifest-path]
 
-Snapshot tmux farm windows to a trusted restore manifest.
+Snapshot tmux farm panes to a trusted restore manifest.
 
 Recognized provider panes require an exact session ID. Latest-session fallbacks
 are disabled. All distinct snapshots are retained in <manifest-path>.history/.
 --autosave preserves the restore point when saved conversations would be lost.
 --all-registered always uses this conservative autosave policy.
+Additional provider panes restore as separate windows; split layouts are not saved.
 EOF
 }
 
@@ -157,9 +158,74 @@ session_id_from_path() {
   extract_session_id_from_metadata "$path"
 }
 
+codex_process_command() {
+  local pid="$1" wanted="$2" proc_root="${CODEX_PROC_ROOT:-/proc}" executable argument index=1
+  local no_daemon=0 remote=0 all=0
+  local argv=()
+  if [ -r "$proc_root/$pid/cmdline" ]; then
+    mapfile -d '' -t argv < "$proc_root/$pid/cmdline"
+  else
+    read -r -a argv <<< "$(ps -p "$pid" -o args= 2>/dev/null || true)"
+  fi
+  [ "${#argv[@]}" -gt 0 ] || return 1
+  executable="${argv[0]##*/}"
+  case "${executable,,}" in
+    codex|codex.exe|codex.js) ;;
+    bash|sh|dash|zsh|node|nodejs)
+      executable="${argv[1]:-}"
+      executable="${executable##*/}"
+      case "${executable,,}" in codex|codex.exe|codex.js) index=2 ;; *) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+  # Match the actual subcommand, skipping global option values as the hook does.
+  while [ "$index" -lt "${#argv[@]}" ]; do
+    argument="${argv[$index]}"
+    case "$argument" in
+      --) return 1 ;;
+      --no-daemon) no_daemon=1; index=$((index + 1)) ;;
+      --remote=*) remote=1; index=$((index + 1)) ;;
+      --remote) remote=1; index=$((index + 2)) ;;
+      --ephemeral)
+        [ "$wanted" = app-server ] || return 1
+        index=$((index + 1)) ;;
+      -c|--config|--enable|--disable|-i|--image|-m|--model|--local-provider|-p|--profile|-s|--sandbox|-a|--ask-for-approval|-C|--cd|--add-dir)
+        index=$((index + 2)) ;;
+      -*) index=$((index + 1)) ;;
+      *)
+        if [ "$wanted" = app-server ]; then [ "$argument" = app-server ]; return $?; fi
+        [ "$argument" = resume ] && [ "$no_daemon" -eq 1 ] && [ "$remote" -eq 0 ] || return 1
+        index=$((index + 1))
+        while [ "$index" -lt "${#argv[@]}" ]; do
+          case "${argv[$index]}" in --all) all=1 ;; --no-alt-screen) ;; *) return 1 ;; esac
+          index=$((index + 1))
+        done
+        [ "$all" -eq 1 ]; return $?
+        ;;
+    esac
+  done
+  return 1
+}
+
+codex_app_server_pid() {
+  codex_process_command "$1" app-server
+}
+
+idle_history_picker() {
+  local tool="$1" pane="$2" provider_pid="$3" recorded
+  [ "$tool" = codex ] && [ -n "$provider_pid" ] || return 1
+  [ "$(pane_option "$pane" @codexfarm_utility)" = history-picker ] || return 1
+  recorded="$(pane_option "$pane" @codexfarm_session_id)"
+  [ -z "$recorded" ] || return 1
+  # Unknown identity on a shared/remote TUI is never evidence of an idle picker.
+  codex_process_command "$provider_pid" local-history-picker
+}
+
 descendant_pids() {
   local root="$1"
+  local provider="${2:-}"
   local pid child
+  if [ "$provider" = codex ] && codex_app_server_pid "$root"; then return 0; fi
   printf '%s\n' "$root" 2>/dev/null || return 0
 
   command -v pgrep >/dev/null 2>&1 || return 0
@@ -171,6 +237,8 @@ descendant_pids() {
     index=$((index + 1))
     while IFS= read -r child; do
       [ -z "$child" ] && continue
+      # Shared server writers and all their children can belong to other TUIs.
+      if [ "$provider" = codex ] && codex_app_server_pid "$child"; then continue; fi
       # Consumers stop at the first provider. A closed pipe is normal, and
       # discovery must not eagerly walk every test/build descendant first.
       printf '%s\n' "$child" 2>/dev/null || return 0
@@ -221,6 +289,8 @@ session_id_from_process_files() {
   local pid line path session_id resolution_status
   local pids=()
   [ -n "$pane_pid" ] || return 1
+  if [ "$tool" = codex ] && [ -n "$provider_pid" ] \
+    && codex_app_server_pid "$provider_pid"; then return 1; fi
 
   # A uniquely held writer belongs to the pane's provider. Its helper processes
   # may read other transcripts without changing the active conversation.
@@ -238,7 +308,7 @@ session_id_from_process_files() {
 
   while IFS= read -r pid; do
     [ -n "$pid" ] && pids+=("$pid")
-  done < <(descendant_pids "${provider_pid:-$pane_pid}")
+  done < <(descendant_pids "${provider_pid:-$pane_pid}" "$tool")
 
   local candidates=""
   for pid in "${pids[@]}"; do
@@ -277,7 +347,10 @@ session_id_from_process_files() {
     printf '%s' "$candidates"
     return 0
   fi
-  [ -z "$candidates" ] || echo "Ambiguous $tool session files in pane process tree; refusing to guess." >&2
+  if [ -n "$candidates" ]; then
+    echo "Ambiguous $tool session files in pane process tree; refusing to guess." >&2
+    return 3
+  fi
   return 1
 }
 
@@ -376,23 +449,33 @@ session_id_for_pane() {
   local pane_pid="$3"
   local provider_pid="${4:-}"
   local pane_dead="${5:-0}"
-  local session_id metadata_pid
+  local session_id metadata_pid metadata_source resolved resolution_status=0
 
   session_id="$(pane_option "$pane_target" @codexfarm_session_id)"
   metadata_pid="$(pane_option "$pane_target" @codexfarm_session_pid)"
+  metadata_source="$(pane_option "$pane_target" @codexfarm_session_source)"
   if valid_session_id "$session_id" \
     && { [ "$pane_dead" = "1" ] \
-      || { [ -n "$provider_pid" ] && [ "$metadata_pid" = "$provider_pid" ]; }; }
+      || { [ -n "$provider_pid" ] && [ "$metadata_pid" = "$provider_pid" ] \
+        && { [ "$tool" != codex ] \
+          || [[ "$metadata_source" = hook:SessionStart || "$metadata_source" = hook:UserPromptSubmit ]]; }; }; }
   then
     resumable_session_id "$tool" "$session_id"
     return 0
   fi
 
-  session_id="$(session_id_from_process_files "$tool" "$pane_pid" "$provider_pid" || true)"
-  if valid_session_id "$session_id"; then
-    printf '%s' "$session_id"
+  resolved="$(session_id_from_process_files "$tool" "$pane_pid" "$provider_pid")" || resolution_status=$?
+  if valid_session_id "$resolved"; then
+    printf '%s' "$resolved"
     return 0
   fi
+  # A historical/manual ID bound to the same TUI PID does not follow /new,
+  # /fork or /resume when the shared app server owns the conversation writer.
+  if [ "$tool" = codex ] && valid_session_id "$session_id" \
+    && [[ "$metadata_source" != hook:SessionStart && "$metadata_source" != hook:UserPromptSubmit ]]; then
+    return 4
+  fi
+  [ "$resolution_status" -ne 3 ] || return 3
   return 1
 }
 
@@ -419,8 +502,24 @@ inspect_pane() {
   tool="$(provider_for_pane "$pane" "$pid" "$start_command" "$current_command")"
   [ -n "$tool" ] || return 1
   provider_pid="$(provider_pid_from_process_tree "$tool" "$pid" || true)"
-  session_id="$(session_id_for_pane "$tool" "$pane" "$pid" "$provider_pid" "$dead")" || return 1
+  local identity_status=0
+  session_id="$(session_id_for_pane "$tool" "$pane" "$pid" "$provider_pid" "$dead")" || identity_status=$?
+  if [ "$identity_status" -ne 0 ]; then
+    if [ "$identity_status" -eq 1 ] && [ "$dead" != 1 ] \
+      && idle_history_picker "$tool" "$pane" "$provider_pid"; then return 5; fi
+    return "$identity_status"
+  fi
   printf '%s\t%s\n' "$tool" "$session_id"
+}
+
+inspect_provider() {
+  local pane="$1" start_command current_command pid tool
+  start_command=$(tmux display-message -p -t "$pane" '#{pane_start_command}') || return 1
+  current_command=$(tmux display-message -p -t "$pane" '#{pane_current_command}') || return 1
+  pid=$(tmux display-message -p -t "$pane" '#{pane_pid}') || return 1
+  tool="$(provider_for_pane "$pane" "$pid" "$start_command" "$current_command")"
+  [ -n "$tool" ] || return 1
+  printf '%s\n' "$tool"
 }
 
 exact_resume_args() {
@@ -480,6 +579,11 @@ save_all_registered() {
 if [ "${1:-}" = "--inspect-pane" ]; then
   [ "$#" -eq 2 ] || exit 2
   inspect_pane "$2"
+  exit $?
+fi
+if [ "${1:-}" = "--inspect-provider" ]; then
+  [ "$#" -eq 2 ] || exit 2
+  inspect_provider "$2"
   exit $?
 fi
 
@@ -569,58 +673,95 @@ if ! window_indexes="$(tmux list-windows -t "=$SESSION" -F '#{window_index}')"; 
   echo "Unable to list farm windows; previous snapshot preserved." >&2
   exit 1
 fi
+if ! initial_panes="$(tmux list-panes -s -t "=$SESSION" -F $'#{pane_id}\t#{pane_pid}')" \
+  || [ -z "$initial_panes" ]; then
+  echo "Unable to list farm panes; previous snapshot preserved." >&2
+  exit 1
+fi
+saved_identities=()
 
-# Collect windows, skipping the initial 'home' window if present
+# The manifest has one row per conversation, regardless of its window or pane.
 while IFS=$'\n' read -r idx; do
   [ -n "$idx" ] || continue
-  pane_target="=$SESSION:$idx.0"
-  name=$(tmux display-message -p -t "=$SESSION:$idx" '#{window_name}')
-  name=$(strip_status_prefix "$name")
-  stable_name="$(pane_option "$pane_target" @codexfarm_name)"
-  if [ -n "$stable_name" ]; then
-    name="$stable_name"
+  window_name=$(tmux display-message -p -t "=$SESSION:$idx" '#{window_name}')
+  window_name=$(strip_status_prefix "$window_name")
+  if ! panes="$(tmux list-panes -t "=$SESSION:$idx" -F '#{pane_id}')" || [ -z "$panes" ]; then
+    echo "Unable to list window panes; previous snapshot preserved." >&2
+    exit 1
   fi
-  [ "$name" = "home" ] && continue
-  # Prefer the first pane's path
-  dir=$(tmux display-message -p -t "$pane_target" '#{pane_current_path}')
-  # Best-effort: starting command (often sh/bash for a long-lived pane)
-  cmd=$(tmux display-message -p -t "$pane_target" '#{pane_start_command}')
-  current_cmd=$(tmux display-message -p -t "$pane_target" '#{pane_current_command}')
-  pane_pid=$(tmux display-message -p -t "$pane_target" '#{pane_pid}')
-  pane_dead=$(tmux display-message -p -t "$pane_target" '#{pane_dead}' 2>/dev/null || true)
-  args=
-  tool="$(provider_for_pane "$pane_target" "$pane_pid" "$cmd" "$current_cmd")"
-  provider_pid=""
-  if [ -n "$tool" ]; then
-    provider_pid="$(provider_pid_from_process_tree "$tool" "$pane_pid" || true)"
-    session_id="$(
-      session_id_for_pane \
-        "$tool" "$pane_target" "$pane_pid" "$provider_pid" "$pane_dead" || true
-    )"
-  fi
-  case "$tool" in
-    codex|claude|gemini)
-      cmd="$tool"
-      if [ -n "$session_id" ]; then
-        args="$(exact_resume_args "$tool" "$session_id")"
-      else
-        unresolved_sessions=$((unresolved_sessions + 1))
-        echo "Unable to resolve exact $tool session for window '$name'." >&2
-      fi
-      ;;
-    *)
-      cmd=$(trim_command_field "$cmd")
-      cmd="${cmd:-$current_cmd}"
-      ;;
-  esac
-  for field in "$name" "$dir" "$cmd" "$args"; do
-    if [[ "$field" == *$'\t'* || "$field" == *$'\n'* || "$field" == *$'\r'* ]]; then
-      echo "Window contains an unsupported TSV delimiter; previous snapshot preserved." >&2
-      exit 1
+  first_pane=1
+  first_name="$window_name"
+  while IFS= read -r pane_target; do
+    [ -n "$pane_target" ] || continue
+    stable_name="$(pane_option "$pane_target" @codexfarm_name)"
+    name="${stable_name:-$window_name}"
+    if [ "$first_pane" -eq 1 ]; then first_name="$name"; fi
+    dir=$(tmux display-message -p -t "$pane_target" '#{pane_current_path}')
+    # Best-effort: starting command (often sh/bash for a long-lived pane)
+    cmd=$(tmux display-message -p -t "$pane_target" '#{pane_start_command}')
+    current_cmd=$(tmux display-message -p -t "$pane_target" '#{pane_current_command}')
+    pane_pid=$(tmux display-message -p -t "$pane_target" '#{pane_pid}')
+    pane_dead=$(tmux display-message -p -t "$pane_target" '#{pane_dead}' 2>/dev/null || true)
+    args=
+    tool="$(provider_for_pane "$pane_target" "$pane_pid" "$cmd" "$current_cmd")"
+    provider_pid=""
+    identity_status=0
+    if [ -n "$tool" ]; then
+      provider_pid="$(provider_pid_from_process_tree "$tool" "$pane_pid" || true)"
+      session_id="$(
+        session_id_for_pane \
+          "$tool" "$pane_target" "$pane_pid" "$provider_pid" "$pane_dead"
+      )" || identity_status=$?
     fi
-  done
-  printf '%s\t%s\t%s\t%s\n' "$name" "$dir" "$cmd" "$args" >> "$tmpfile"
-  saved_windows=$((saved_windows + 1))
+    case "$tool" in
+      codex|claude|gemini)
+        [ "$name" != home ] || name="home-$tool"
+        if [ "$first_pane" -eq 0 ] && { [ -z "$stable_name" ] || [ "$stable_name" = "$first_name" ]; }; then
+          pane_index=$(tmux display-message -p -t "$pane_target" '#{pane_index}')
+          name="$name-pane-$pane_index"
+        fi
+        cmd="$tool"
+        if [ -n "$session_id" ]; then
+          args="$(exact_resume_args "$tool" "$session_id")"
+          identity="$tool"$'\t'"$session_id"
+          duplicate=0
+          for saved_identity in "${saved_identities[@]}"; do
+            [ "$saved_identity" != "$identity" ] || duplicate=1
+          done
+          if [ "$duplicate" -eq 1 ]; then first_pane=0; continue; fi
+          saved_identities+=("$identity")
+        else
+          # An explicitly marked, idle picker has no conversation to restore.
+          # Once it holds an exact conversation it takes the normal capture path.
+          if [ "$identity_status" -eq 1 ] \
+          && [ "$pane_dead" != 1 ] \
+          && idle_history_picker "$tool" "$pane_target" "$provider_pid"; then
+            first_pane=0
+            continue
+          fi
+          unresolved_sessions=$((unresolved_sessions + 1))
+          echo "Unable to resolve exact $tool session for window '$name'." >&2
+          if [ "$identity_status" -eq 4 ]; then
+            echo "Static shared-server binding is unverified; check codex-doctor for migration instructions." >&2
+          fi
+        fi
+        ;;
+      *)
+        if [ "$first_pane" -eq 0 ] || [ "$name" = home ]; then first_pane=0; continue; fi
+        cmd=$(trim_command_field "$cmd")
+        cmd="${cmd:-$current_cmd}"
+        ;;
+    esac
+    for field in "$name" "$dir" "$cmd" "$args"; do
+      if [[ "$field" == *$'\t'* || "$field" == *$'\n'* || "$field" == *$'\r'* ]]; then
+        echo "Window contains an unsupported TSV delimiter; previous snapshot preserved." >&2
+        exit 1
+      fi
+    done
+    printf '%s\t%s\t%s\t%s\n' "$name" "$dir" "$cmd" "$args" >> "$tmpfile"
+    saved_windows=$((saved_windows + 1))
+    first_pane=0
+  done <<< "$panes"
 done <<< "$window_indexes"
 
 if [ "$unresolved_sessions" -ne 0 ]; then
@@ -637,6 +778,11 @@ fi
 if ! final_indexes="$(tmux list-windows -t "=$SESSION" -F '#{window_index}')" \
   || [ "$final_indexes" != "$window_indexes" ]; then
   echo "Farm windows changed during capture; previous snapshot preserved. Retry save." >&2
+  exit 1
+fi
+if ! final_panes="$(tmux list-panes -s -t "=$SESSION" -F $'#{pane_id}\t#{pane_pid}')" \
+  || [ "$final_panes" != "$initial_panes" ]; then
+  echo "Farm panes changed during capture; previous snapshot preserved. Retry save." >&2
   exit 1
 fi
 publish_args=()

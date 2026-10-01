@@ -1192,6 +1192,32 @@ case "$1" in
     fi
     exit 0
     ;;
+  list-panes)
+    [ "${FAIL_LIST_PANES:-0}" != "1" ] || exit 1
+    target=""
+    format=""
+    all=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) target="$2"; shift 2 ;;
+        -F) format="$2"; shift 2 ;;
+        -s) all=1; shift ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$all" = 1 ]; then
+      printf '%%0\\t10\\n%%1\\t100\\n%%2\\t200\\n%%3\\t300\\n'
+      if [ -n "${PANE_CHANGE_STATE:-}" ]; then
+        if [ -f "$PANE_CHANGE_STATE" ]; then printf '%%new\\t999\\n'; fi
+        touch "$PANE_CHANGE_STATE"
+      fi
+    else
+      printf '%s.0\\n' "$target"
+      if [ "${SECONDARY_CODEX:-0}" = "1" ] && [[ "$target" == *:1 ]]; then
+        printf '%s.1\\n' "$target"
+      fi
+    fi
+    ;;
   show-options)
     target=""
     option=""
@@ -1215,6 +1241,8 @@ case "$1" in
       *:1.0'|@codexfarm_session_pid')
         [ -n "${HOOK_SESSION_PID:-}" ] && printf '%s\\n' "$HOOK_SESSION_PID"
         ;;
+      *:1.0'|@codexfarm_session_source') printf '%s\\n' "${HOOK_SESSION_SOURCE:-hook:SessionStart}" ;;
+      *:1.0'|@codexfarm_utility') [ "${HISTORY_PICKER:-0}" = 1 ] && printf 'history-picker\\n' ;;
       *) exit 1 ;;
     esac
     exit 0
@@ -1231,6 +1259,15 @@ case "$1" in
     done
     case "$target|$format" in
       *:0'|#{window_name}') printf '*READY* home\\n' ;;
+      *:0.0'|#{pane_current_path}') printf '/tmp/home-project\\n' ;;
+      *:0.0'|#{pane_start_command}'|*:0.0'|#{pane_current_command}')
+        if [ "${HOME_CODEX:-0}" = 1 ]; then printf 'codex\\n'; else printf 'bash\\n'; fi ;;
+      *:0.0'|#{pane_pid}')
+        if [ "${HOME_CODEX:-0}" = 1 ]; then printf '400\\n'; else printf '10\\n'; fi ;;
+      *:1.1'|#{pane_current_path}') printf '/tmp/secondary-project\\n' ;;
+      *:1.1'|#{pane_start_command}') printf 'codex\\n' ;;
+      *:1.1'|#{pane_current_command}') printf 'node\\n' ;;
+      *:1.1'|#{pane_pid}') printf '400\\n' ;;
       *:1'|#{window_name}')
         if [ -n "${STACKED_WINDOW_NAME:-}" ]; then
           printf '%s\\n' "$STACKED_WINDOW_NAME"
@@ -1277,7 +1314,9 @@ case "$1" in
       *:6.0'|#{pane_start_command}') printf 'gemini\\n' ;;
       *:6.0'|#{pane_current_command}') printf 'node\\n' ;;
       *:6.0'|#{pane_pid}') printf '600\\n' ;;
-      *'.0|#{pane_dead}') printf '0\\n' ;;
+      *'.0|#{pane_dead}'|*'.1|#{pane_dead}') printf '0\\n' ;;
+      *'.0|#{pane_index}') printf '0\\n' ;;
+      *'.1|#{pane_index}') printf '1\\n' ;;
       *) exit 1 ;;
     esac
     exit 0
@@ -1358,7 +1397,12 @@ case "$pid|$format" in
   100'|comm=') printf 'bash\\n' ;;
   100'|args=') printf 'bash\\n' ;;
   101'|comm=') printf 'node\\n' ;;
-  101'|args=') printf '/usr/bin/node /usr/local/bin/codex\\n' ;;
+  101'|args=')
+    case "${HISTORY_PICKER_MODE:-}" in
+      local) printf '/usr/bin/node /usr/local/bin/codex --no-daemon resume --all\\n' ;;
+      shared) printf '/usr/bin/node /usr/local/bin/codex --remote unix:///tmp/server resume --all\\n' ;;
+      *) printf '/usr/bin/node /usr/local/bin/codex\\n' ;;
+    esac ;;
   200'|comm=') printf 'bash\\n' ;;
   200'|args=') printf 'bash\\n' ;;
   201'|comm=') printf 'node\\n' ;;
@@ -1411,6 +1455,159 @@ esac
             rows,
         )
         self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o600)
+
+    def test_save_includes_provider_running_in_home(self):
+        result = self.run_save(HOME_CODEX="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            f"home-codex\t/tmp/home-project\tcodex\tresume {self.second_codex_session_id}",
+            self.manifest.read_text().splitlines(),
+        )
+
+    def test_save_includes_secondary_provider_pane(self):
+        result = self.run_save(SECONDARY_CODEX="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            f"proj-pane-1\t/tmp/secondary-project\tcodex\tresume {self.second_codex_session_id}",
+            self.manifest.read_text().splitlines(),
+        )
+
+    def test_save_preserves_manifest_when_panes_cannot_be_listed_or_change(self):
+        original = b"previous snapshot\n"
+        for options in (
+            {"FAIL_LIST_PANES": "1"},
+            {"PANE_CHANGE_STATE": str(self.tmpdir / "pane-change")},
+        ):
+            with self.subTest(options=options):
+                self.manifest.write_bytes(original)
+                result = self.run_save(**options)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(self.manifest.read_bytes(), original)
+                self.assertIn("previous snapshot preserved", result.stderr)
+
+    def test_static_codex_binding_requires_current_process_evidence(self):
+        original = b"previous snapshot\n"
+        self.manifest.write_bytes(original)
+        result = self.run_save(
+            HOOK_SESSION_ID=self.hook_session_id,
+            HOOK_SESSION_PID="101",
+            HOOK_SESSION_SOURCE="recovery:verified-restored-pane",
+            NO_CODEX_SESSION="1",
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.manifest.read_bytes(), original)
+        self.assertIn("shared-server", result.stderr)
+        env = {
+            **self.env,
+            "HOOK_SESSION_ID": self.hook_session_id,
+            "HOOK_SESSION_PID": "101",
+            "HOOK_SESSION_SOURCE": "recovery:verified-restored-pane",
+            "NO_CODEX_SESSION": "1",
+        }
+        inspected = subprocess.run(
+            [REPO_ROOT / "bin/codex-save", "--inspect-pane", "=codexfarm:1.0"],
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(inspected.returncode, 4, inspected.stderr)
+        self.assertEqual(inspected.stdout, "")
+
+    def test_current_process_evidence_replaces_static_binding_after_session_switch(self):
+        result = self.run_save(
+            HOOK_SESSION_ID=self.hook_session_id,
+            HOOK_SESSION_PID="101",
+            HOOK_SESSION_SOURCE="recovery:verified-restored-pane",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+            self.manifest.read_text().splitlines(),
+        )
+
+    def test_shared_app_server_child_writer_is_not_owned_by_parent_tui(self):
+        codex_home = self.tmpdir / "codex-home"
+        locks = codex_home / "thread-writer-locks"
+        locks.mkdir(parents=True)
+        lock = locks / f"{self.second_codex_session_id}.lock"
+        lock.touch()
+        proc = self.tmpdir / "proc" / "102"
+        (proc / "fd").mkdir(parents=True)
+        (proc / "fdinfo").mkdir()
+        (proc / "cmdline").write_bytes(b"/usr/bin/codex\0--profile\0default\0app-server\0")
+        (proc / "fd/42").symlink_to(lock)
+        (proc / "fdinfo/42").write_text("lock:\t1: FLOCK ADVISORY WRITE 102\n")
+        with (self.tmpdir / "pgrep").open("a") as handle:
+            handle.write('if [ "$2" = "101" ]; then printf "102\\n"; fi\n')
+        original = b"previous snapshot\n"
+        self.manifest.write_bytes(original)
+        options = dict(
+            CODEX_HOME=str(codex_home),
+            CODEX_PROC_ROOT=str(proc.parent),
+            HOOK_SESSION_ID=self.hook_session_id,
+            HOOK_SESSION_PID="101",
+            HOOK_SESSION_SOURCE="recovery:verified-restored-pane",
+            NO_CODEX_SESSION="1",
+        )
+        result = self.run_save(**options)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.manifest.read_bytes(), original)
+        inspected = subprocess.run(
+            [REPO_ROOT / "bin/codex-save", "--inspect-pane", "=codexfarm:1.0"],
+            env={**self.env, **options},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(inspected.returncode, 4, inspected.stderr)
+        self.assertEqual(inspected.stdout, "")
+
+    def test_provider_query_detects_conversation_with_unknown_id(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-save", "--inspect-provider", "=codexfarm:1.0"],
+            env={**self.env, "NO_CODEX_SESSION": "1"},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "codex\n")
+
+    def test_explicit_idle_history_picker_does_not_block_save(self):
+        result = self.run_save(
+            HISTORY_PICKER="1", HISTORY_PICKER_MODE="local", NO_CODEX_SESSION="1"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any("\tcodex\t" in row for row in self.manifest.read_text().splitlines()))
+
+    def test_history_picker_becomes_saved_conversation_when_identity_is_known(self):
+        result = self.run_save(HISTORY_PICKER="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            any("\tcodex\tresume " in row for row in self.manifest.read_text().splitlines())
+        )
+
+    def test_marked_shared_server_picker_with_unknown_identity_blocks_save(self):
+        original = b"previous snapshot\n"
+        self.manifest.write_bytes(original)
+        result = self.run_save(
+            HISTORY_PICKER="1", HISTORY_PICKER_MODE="shared", NO_CODEX_SESSION="1"
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.manifest.read_bytes(), original)
+
+    def test_local_idle_picker_has_distinct_inspection_status(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-save", "--inspect-pane", "=codexfarm:1.0"],
+            env={
+                **self.env,
+                "HISTORY_PICKER": "1",
+                "HISTORY_PICKER_MODE": "local",
+                "NO_CODEX_SESSION": "1",
+            },
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 5, result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_codex_save_finds_paginated_session_with_only_writer_lock(self):
         env = self.env.copy()
@@ -1938,6 +2135,19 @@ case "$1" in
     fi
     exit 0
     ;;
+  list-panes)
+    target=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) target="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ "${FAIL_RESTORE_LIST_PANES:-}" != "$target" ] || exit 1
+    printf '%s.0\\n' "$target"
+    if [ "${RESTORE_SECONDARY:-0}" = 1 ] && [ "$target" = @9 ]; then printf '@9.1\\n'; fi
+    exit 0
+    ;;
   list-windows)
     format=""
     target=""
@@ -2033,6 +2243,7 @@ case "$2" in
   @1.0) if [ "${BOARD_LINK_IDENTITY:-0}" = "1" ]; then printf 'claude\\t019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4\\n'; else exit 1; fi ;;
   @9.0) printf '%s\\t%s\\n' "${EXISTING_PROVIDER:-codex}" "${EXISTING_SESSION_ID:-019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4}" ;;
   @10.0) printf 'codex\\t123e4567-e89b-42d3-a456-426614174001\\n' ;;
+  @9.1) printf 'codex\\t123e4567-e89b-42d3-a456-426614174001\\n' ;;
   *) exit 1 ;;
 esac
 """,
@@ -2702,6 +2913,102 @@ set -euo pipefail
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.codex_add_log.exists())
+
+    def test_restore_finds_conversation_in_secondary_pane_of_same_or_other_farm(self):
+        session_id = "123e4567-e89b-42d3-a456-426614174001"
+        self.manifest.write_text(
+            f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tcodex\tresume {session_id}\n"
+        )
+        for other in (False, True):
+            with self.subTest(other_farm=other):
+                self.codex_add_log.unlink(missing_ok=True)
+                Path(self.env["TMUX_STATE_FILE"]).unlink(missing_ok=True)
+                options = {"RESTORE_SECONDARY": "1"}
+                if other:
+                    options.update(
+                        TMUX_OTHER_SESSION="other", TMUX_OTHER_WINDOWS_OUTPUT="@9\tforeign"
+                    )
+                else:
+                    options["TMUX_WINDOWS_OUTPUT"] = "@9\tchanged-name"
+                result = subprocess.run(
+                    [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+                    env={**self.env, **options},
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(self.codex_add_log.exists())
+                self.assertIn("Skipping existing conversation", result.stdout)
+
+    def test_force_restore_does_not_kill_when_secondary_conversation_is_live_elsewhere(self):
+        session_id = "123e4567-e89b-42d3-a456-426614174001"
+        self.manifest.write_text(
+            f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\tcodex\tresume {session_id}\n"
+        )
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--force", str(self.manifest)],
+            env={
+                **self.env,
+                "TMUX_WINDOWS_OUTPUT": "@1\tproj",
+                "TMUX_OTHER_SESSION": "other",
+                "TMUX_OTHER_WINDOWS_OUTPUT": "@9\tforeign",
+                "RESTORE_SECONDARY": "1",
+            },
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertFalse(any(cmd[0] == "kill-window" for cmd in self.read_tmux_commands()))
+
+    def test_force_restore_preserves_windows_when_other_panes_cannot_be_listed(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--force", str(self.manifest)],
+            env={
+                **self.env,
+                "TMUX_WINDOWS_OUTPUT": "@1\tproj",
+                "TMUX_OTHER_SESSION": "other",
+                "TMUX_OTHER_WINDOWS_OUTPUT": "@9\tforeign",
+                "FAIL_RESTORE_LIST_PANES": "@9",
+                "EXISTING_SESSION_ID": "123e4567-e89b-42d3-a456-426614174001",
+            },
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertFalse(any(cmd[0] == "kill-window" for cmd in self.read_tmux_commands()))
+        self.assertIn("Cannot inspect other tmux farms", result.stderr)
+
+    def test_force_restore_preserves_surviving_local_secondary_conversation(self):
+        session_id = "123e4567-e89b-42d3-a456-426614174001"
+        for provider in ("codex", "claude", "gemini"):
+            with self.subTest(provider=provider):
+                self.tmux_log.unlink(missing_ok=True)
+                self.codex_add_log.unlink(missing_ok=True)
+                Path(self.env["TMUX_STATE_FILE"]).unlink(missing_ok=True)
+                flag = "resume" if provider == "codex" else "--resume"
+                self.manifest.write_text(
+                    f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\t{provider}\t{flag} {session_id}\n"
+                )
+                identity_stub = Path(self.env["CODEX_PANE_IDENTITY_BIN"])
+                make_executable(
+                    identity_stub,
+                    f'#!/usr/bin/env bash\n[ "$2" = @9.1 ] || exit 1\nprintf "{provider}\\t{session_id}\\n"\n',
+                )
+                result = subprocess.run(
+                    [REPO_ROOT / "bin/codex-restore", "--force", str(self.manifest)],
+                    env={
+                        **self.env,
+                        "TMUX_WINDOWS_OUTPUT": "@1\tproj\n@9\trenamed",
+                        "RESTORE_SECONDARY": "1",
+                    },
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.codex_add_log.exists())
+                self.assertFalse(any(cmd[0] == "kill-window" for cmd in self.read_tmux_commands()))
 
     def test_restore_continues_other_windows_after_one_launch_fails(self):
         self.write_duplicate_manifest()

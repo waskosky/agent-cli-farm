@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -11,6 +12,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCTOR_BIN = REPO_ROOT / "bin" / "codex-doctor"
 SESSION_ID = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"
+SECOND_ID = "123e4567-e89b-42d3-a456-426614174001"
 
 
 def make_executable(path: Path, content: str) -> None:
@@ -28,6 +30,8 @@ class DoctorTests(unittest.TestCase):
         self.install_bin = self.home / "bin"
         self.fake_bin = self.root / "fake-bin"
         self.manifest = self.root / "manifest.tsv"
+        self.panes_file = self.root / "panes.json"
+        self.panes = [{"pane": "%1", "pid": "101", "provider": "codex", "id": SESSION_ID}]
         for directory in (self.home, self.source_bin, self.install_bin, self.fake_bin):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -38,11 +42,41 @@ class DoctorTests(unittest.TestCase):
 
         make_executable(
             self.fake_bin / "tmux",
-            """#!/usr/bin/env bash
-case "${1:-}" in
-  has-session) exit 0 ;;
-  list-windows) printf 'home\\nproject\\n' ;;
-esac
+            """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+if args[0] == 'has-session':
+    sys.exit(0)
+if args[0] == 'list-windows':
+    print('home\\nproject')
+    sys.exit(0)
+if args[0] == 'list-panes':
+    for pane in json.loads(Path(os.environ['DOCTOR_TEST_PANES']).read_text()):
+        print(pane['pane'] + '\\t' + pane['pid'] + '\\t' + pane.get('utility', ''))
+    sys.exit(0)
+sys.exit(73)
+""",
+        )
+        self.save_helper = self.fake_bin / "codex-save"
+        make_executable(
+            self.save_helper,
+            """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+panes = json.loads(Path(os.environ['DOCTOR_TEST_PANES']).read_text())
+pane = next((pane for pane in panes if pane['pane'] == args[-1]), {})
+if args[0] == '--inspect-provider':
+    if pane.get('provider'):
+        print(pane['provider'])
+        sys.exit(0)
+    sys.exit(1)
+if args[0] == '--inspect-pane':
+    if pane.get('id'):
+        print(pane['provider'] + '\\t' + pane['id'])
+    sys.exit(pane.get('identity_status', 0 if pane.get('id') else 1))
+sys.exit(73)
 """,
         )
         make_executable(self.fake_bin / "systemctl", "#!/usr/bin/env bash\nexit 1\n")
@@ -60,11 +94,15 @@ esac
         self.env["CODEXFARM_SOURCE_DIR"] = str(self.source)
         self.env["CODEXFARM_INSTALL_DIR"] = str(self.install_bin)
         self.env["PATH"] = f"{self.fake_bin}:{self.env.get('PATH', '')}"
+        self.env["CODEX_SAVE_BIN"] = str(self.save_helper)
+        self.env["DOCTOR_TEST_PANES"] = str(self.panes_file)
+        self.panes_file.write_text(json.dumps(self.panes), encoding="utf-8")
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
     def run_doctor(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        self.panes_file.write_text(json.dumps(self.panes), encoding="utf-8")
         return subprocess.run(
             [DOCTOR_BIN, "--session", "test", *arguments],
             env=self.env,
@@ -116,6 +154,8 @@ esac
     def test_installed_copy_uses_setup_source_marker(self) -> None:
         installed_doctor = self.install_bin / "codex-doctor"
         shutil.copy2(DOCTOR_BIN, installed_doctor)
+        for name in ("codex-audit-panes.py", "codex-manifest.py"):
+            shutil.copy2(REPO_ROOT / "bin" / name, self.install_bin / name)
         source_marker = Path(self.env["XDG_STATE_HOME"]) / "codexfarm" / "install-source"
         source_marker.parent.mkdir(parents=True)
         source_marker.write_text(f"{self.source}\n", encoding="utf-8")
@@ -132,6 +172,7 @@ esac
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("all 3 installed helpers match", result.stdout)
+        self.assertIn("live pane recovery coverage is complete", result.stdout)
 
     def test_blank_and_fallback_manifest_entries_fail_without_printing_ids(self) -> None:
         self.manifest.write_text(
@@ -212,6 +253,81 @@ esac
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("Session specified multiple times", result.stderr)
+
+    def test_omitted_home_and_secondary_providers_prevent_healthy_result(self) -> None:
+        for pane in ("%0", "%2"):
+            with self.subTest(pane=pane):
+                self.panes = [
+                    {"pane": "%1", "pid": "101", "provider": "codex", "id": SESSION_ID},
+                    {"pane": pane, "pid": "102", "provider": "claude", "id": SECOND_ID},
+                ]
+
+                result = self.run_doctor(self.manifest)
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("missing from manifest", result.stdout)
+                self.assertNotIn("Doctor result: healthy", result.stdout)
+                self.assertNotIn(SECOND_ID, result.stdout + result.stderr)
+
+    def test_unknown_live_conversation_prevents_healthy_result(self) -> None:
+        self.panes[0].pop("id")
+
+        result = self.run_doctor(self.manifest)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unknown conversation ID", result.stdout)
+
+    def test_unverified_legacy_binding_prevents_healthy_result(self) -> None:
+        self.panes[0]["identity_status"] = 4
+
+        result = self.run_doctor(self.manifest)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unverified legacy binding", result.stdout)
+        self.assertIn("exit normally", result.stdout)
+        self.assertNotIn(SESSION_ID, result.stdout + result.stderr)
+
+    def test_empty_mock_pane_enumeration_cannot_prove_healthy_coverage(self) -> None:
+        self.panes = []
+
+        result = self.run_doctor(self.manifest)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("pane enumeration", result.stdout)
+
+    def test_missing_identity_helper_prevents_healthy_result(self) -> None:
+        self.env["CODEX_SAVE_BIN"] = str(self.root / "missing-save")
+
+        result = self.run_doctor(self.manifest)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("pane inspection helper unavailable", result.stdout)
+
+    def test_unknown_shared_server_picker_prevents_healthy_result(self) -> None:
+        self.panes[0].pop("id")
+        self.panes[0].update(utility="history-picker", identity_status=1)
+
+        result = self.run_doctor(self.manifest)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unknown conversation ID", result.stdout)
+        self.assertNotIn("Doctor result: healthy", result.stdout)
+
+    def test_positively_verified_idle_picker_can_be_healthy(self) -> None:
+        self.panes.append(
+            {
+                "pane": "%2",
+                "pid": "102",
+                "provider": "codex",
+                "utility": "history-picker",
+                "identity_status": 5,
+            }
+        )
+
+        result = self.run_doctor(self.manifest)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1 idle history picker(s) excluded", result.stdout)
 
 
 if __name__ == "__main__":
