@@ -13,6 +13,7 @@ from codex_looper.health import (
     Limits,
     Memory,
     backup_issues,
+    backups_expected,
     main,
     read_memory,
     refresh_memory_title,
@@ -92,6 +93,43 @@ class HealthTests(unittest.TestCase):
         self.assertIn(
             "conversation backup archive is missing", backup_issues(self.root, 10000, expected=True)
         )
+
+    def test_disabled_backup_checks_ignore_stale_manual_archives(self):
+        self.prepare_backup()
+        self.assertEqual(backup_issues(self.root, 18000, expected=False), [])
+
+    def test_registered_farm_does_not_require_full_archives(self):
+        config = self.root / "config/codexfarm"
+        config.mkdir(parents=True)
+        (config / "farms.tsv").write_text("session\tmanifest\nwork\twork.tsv\n")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "XDG_CONFIG_HOME": str(config.parent),
+                    "XDG_STATE_HOME": str(self.root / "state"),
+                    "CODEXFARM_BACKUP_HEALTH_ENABLED": "0",
+                },
+            ),
+            patch("sys.argv", ["codex-health"]),
+            patch("codex_looper.health.read_memory", return_value=Memory(8000, 4000, 0)),
+        ):
+            self.assertEqual(main(), 0)
+
+    def test_archive_health_requires_explicit_monitoring_or_archive_watcher(self):
+        marker = self.root / "backup-watch.json"
+        with patch.dict(os.environ, {"CODEXFARM_BACKUP_HEALTH_ENABLED": "0"}):
+            self.assertFalse(backups_expected(self.root))
+            marker.write_text(json.dumps({"pid": 123, "archive_enabled": False}))
+            self.assertFalse(backups_expected(self.root))
+            marker.write_text(json.dumps({"pid": 123}))
+            self.assertFalse(backups_expected(self.root))
+            marker.write_text(json.dumps({"pid": 123, "archive_enabled": True}))
+            self.assertTrue(backups_expected(self.root))
+        marker.unlink()
+        with patch.dict(os.environ, {"CODEXFARM_BACKUP_HEALTH_ENABLED": "1"}):
+            self.assertTrue(backups_expected(self.root))
+        self.assertIn("--archive", backup_issues(self.root, 10000, expected=True)[0])
 
     def test_failed_save_is_visible_even_when_history_backup_succeeds(self):
         self.prepare_backup()

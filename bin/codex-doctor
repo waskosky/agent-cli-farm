@@ -10,7 +10,7 @@ Usage: $(basename "$0") [--session NAME] [--source DIR] [manifest-path]
 Check the installed Agent CLI Farm helpers and a saved restore manifest.
 Exact provider session IDs are counted but never printed.
 Audit every live pane for verified conversation coverage in that manifest.
-Also check backup freshness, the memory monitor heartbeat and host RAM pressure.
+Also check opted-in archive freshness, the memory monitor heartbeat and host RAM pressure.
 EOF
 }
 

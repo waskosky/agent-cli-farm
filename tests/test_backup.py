@@ -34,6 +34,7 @@ class BackupTests(unittest.TestCase):
             "CODEX_HOME": str(self.codex),
             "XDG_CONFIG_HOME": str(self.root / "config"),
             "XDG_STATE_HOME": str(self.root / "state"),
+            "CODEXFARM_BACKUP_KEEP": "1",
         }
         self.save = self.root / "save"
         self.save.write_text("#!/usr/bin/env bash\nexit 0\n")
@@ -43,19 +44,148 @@ class BackupTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def run_backup(self, *args):
+    def run_backup(self, *args, archive=True):
         return subprocess.run(
             [
                 sys.executable,
                 ROOT / "bin/codex-backup",
                 "--destination",
                 self.destination,
+                *(["--archive"] if archive else []),
                 *args,
             ],
             env=self.env,
             capture_output=True,
             text=True,
         )
+
+    def test_legacy_backup_invocation_only_saves_manifests_by_default(self):
+        save_log = self.root / "save.log"
+        self.save.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" > "{save_log}"\n')
+        (self.codex / "state_5.sqlite").write_text("must not open this database")
+        result = self.run_backup("--min-age", "3600", archive=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(save_log.read_text().strip(), "--all-registered")
+        self.assertFalse(self.destination.exists())
+        self.assertFalse((self.root / "state/codexfarm/backup-status.json").exists())
+
+    def test_disabled_archives_preserve_existing_files_and_report_save_failure(self):
+        self.destination.mkdir()
+        prior = self.destination / "snapshot-old.tar.gz"
+        prior.write_bytes(b"prior backup")
+        latest = self.destination / "latest.json"
+        latest.write_text('{"archive":"snapshot-old.tar.gz"}')
+        self.save.write_text("#!/bin/sh\nexit 1\n")
+        result = self.run_backup(archive=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(prior.read_bytes(), b"prior backup")
+        self.assertEqual(latest.read_text(), '{"archive":"snapshot-old.tar.gz"}')
+        self.assertEqual(
+            set(path.name for path in self.destination.iterdir()), {prior.name, latest.name}
+        )
+
+    def test_disabled_archives_and_skip_save_do_no_work(self):
+        result = self.run_backup("--skip-save", archive=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def load_backup_module(self):
+        loader = importlib.machinery.SourceFileLoader(
+            "backup_limits_test", str(ROOT / "bin/codex-backup")
+        )
+        module = importlib.util.module_from_spec(
+            importlib.util.spec_from_loader(loader.name, loader)
+        )
+        loader.exec_module(module)
+        return module
+
+    def test_manifest_only_watcher_never_scans_or_copies_provider_history(self):
+        module = self.load_backup_module()
+        state = self.root / "state/codexfarm"
+
+        def save():
+            marker = json.loads((state / "backup-watch.json").read_text())
+            self.assertFalse(marker["archive_enabled"])
+            return True
+
+        with (
+            patch.dict(os.environ, self.env),
+            patch("sys.argv", ["codex-backup", "--watch"]),
+            patch.object(module, "timer_active", side_effect=[False, True]),
+            patch.object(module.time, "sleep"),
+            patch.object(module, "save_manifests", side_effect=save) as manifests,
+            patch.object(module, "history_files") as histories,
+            patch.object(module.sqlite3, "connect") as database,
+        ):
+            self.assertEqual(module.main(), 0)
+            manifests.assert_called_once_with()
+            histories.assert_not_called()
+            database.assert_not_called()
+        self.assertFalse((state / "backups").exists())
+        self.assertFalse((state / "backup-status.json").exists())
+        self.assertFalse((state / "backup-watch.json").exists())
+
+    def test_archive_writer_enforces_size_limit_before_writing(self):
+        module = self.load_backup_module()
+        output = self.root / "partial.tar.gz"
+        with module.SpaceCheckedWriter(str(output), self.root, max_bytes=16) as writer:
+            writer.write(b"x" * 8)
+            with self.assertRaises(module.BackupSizeError):
+                writer.write(b"x" * 9)
+        self.assertEqual(output.read_bytes(), b"x" * 8)
+
+    def test_wal_counts_toward_size_limit_before_database_copy(self):
+        module = self.load_backup_module()
+        connection = sqlite3.connect(self.codex / "state_5.sqlite")
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE messages(padding BLOB)")
+        connection.execute("INSERT INTO messages VALUES (zeroblob(2097152))")
+        connection.commit()
+        self.destination.mkdir()
+        with (
+            patch.dict(os.environ, self.env),
+            patch.object(module.sqlite3, "connect") as connect,
+        ):
+            with self.assertRaises(module.BackupSizeError):
+                module.snapshot(
+                    self.codex,
+                    self.root / "config",
+                    self.destination,
+                    1,
+                    True,
+                    max_bytes=1024 * 1024,
+                )
+            connect.assert_not_called()
+        self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_archive_size_limit_preserves_previous_snapshot_before_copying(self):
+        self.assertEqual(self.run_backup().returncode, 0)
+        prior = list(self.destination.glob("*.tar.gz"))
+        latest = (self.destination / "latest.json").read_bytes()
+        oversized = self.sessions / "large.jsonl"
+        with oversized.open("wb") as handle:
+            handle.truncate(2 * 1024 * 1024)
+        result = self.run_backup("--max-mib", "1")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("size limit", result.stderr)
+        self.assertEqual(list(self.destination.glob("*.tar.gz")), prior)
+        self.assertEqual((self.destination / "latest.json").read_bytes(), latest)
+        self.assertFalse(list(self.destination.glob(".snapshot-*")))
+
+    def test_output_size_limit_cleans_partial_archive_and_preserves_previous(self):
+        self.assertEqual(self.run_backup().returncode, 0)
+        previous = list(self.destination.glob("*.tar.gz"))
+        latest = (self.destination / "latest.json").read_bytes()
+        # Incompressible input within the source budget exceeds that budget
+        # after tar headers and gzip framing are added.
+        (self.sessions / "rollout-chat.jsonl").write_bytes(os.urandom(1024 * 1024))
+        result = self.run_backup("--max-mib", "1")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("size limit", result.stderr)
+        self.assertEqual(list(self.destination.glob("*.tar.gz")), previous)
+        self.assertEqual((self.destination / "latest.json").read_bytes(), latest)
+        self.assertFalse(list(self.destination.glob(".snapshot-*")))
 
     def test_snapshot_preserves_uncheckpointed_wal_and_excludes_credentials(self):
         connection = sqlite3.connect(self.codex / "state_5.sqlite")
@@ -155,20 +285,47 @@ class BackupTests(unittest.TestCase):
             self.assertNotIn("codex/sessions/2026/09/18/escape.jsonl", bundle.getnames())
 
     def test_invalid_arguments_fail_cleanly(self):
-        result = self.run_backup("--keep", "0")
-        self.assertEqual(result.returncode, 2)
-        self.assertNotIn("Traceback", result.stderr)
+        for args in (("--keep", "0"), ("--max-mib", "0"), ("--max-mib", "bad")):
+            with self.subTest(args=args):
+                result = self.run_backup(*args)
+                self.assertEqual(result.returncode, 2)
+                self.assertNotIn("Traceback", result.stderr)
 
     def test_fallback_watcher_exits_when_systemd_timer_is_active(self):
         systemctl = self.root / "systemctl"
         systemctl.write_text("#!/bin/sh\nexit 0\n")
         systemctl.chmod(0o700)
         self.env["PATH"] = str(self.root) + os.pathsep + self.env["PATH"]
-        result = self.run_backup("--watch")
+        result = self.run_backup("--watch", archive=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("fallback watcher exiting", result.stdout)
         self.assertFalse((self.root / "state/codexfarm/backup-watch.json").exists())
         self.assertFalse(list(self.destination.glob("*.tar.gz")))
+
+    def test_explicit_archive_watcher_continues_alongside_manifest_autosave(self):
+        module = self.load_backup_module()
+        with (
+            patch.dict(os.environ, self.env),
+            patch(
+                "sys.argv",
+                [
+                    "codex-backup",
+                    "--archive",
+                    "--skip-save",
+                    "--watch",
+                    "--destination",
+                    str(self.destination),
+                ],
+            ),
+            patch.object(module, "timer_active", return_value=True),
+            patch.object(module.time, "sleep", side_effect=KeyboardInterrupt),
+            patch.object(module.os, "nice"),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                module.main()
+        self.assertEqual(len(list(self.destination.glob("*.tar.gz"))), 1)
+        self.assertTrue((self.destination / "latest.json").exists())
+        self.assertFalse((self.root / "state/codexfarm/backup-watch.json").exists())
 
     def test_lost_disk_headroom_preserves_prior_archive_and_cleans_partial_file(self):
         self.assertEqual(self.run_backup().returncode, 0)
@@ -249,7 +406,10 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(self.run_backup().returncode, 0)
         latest = self.destination / "latest.json"
         value = json.loads(latest.read_text())
+        previous = self.destination / value["archive"]
         value["created_at"] = "nan"
         latest.write_text(json.dumps(value))
         self.assertEqual(self.run_backup("--min-age", "3600").returncode, 0)
-        self.assertEqual(len(list(self.destination.glob("*.tar.gz"))), 2)
+        self.assertEqual(len(list(self.destination.glob("*.tar.gz"))), 1)
+        self.assertFalse(previous.exists())
+        self.assertTrue((self.destination / json.loads(latest.read_text())["archive"]).exists())

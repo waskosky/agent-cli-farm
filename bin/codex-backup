@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Save farm identities and preserve private provider chats independently of tmux."""
+"""Save farm identities; full conversation archives require --archive."""
 
 from __future__ import annotations
 
@@ -21,11 +21,16 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-RESERVE_BYTES = 128 * 1024 * 1024
+RESERVE_BYTES = 1024 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 
 
 class BackupSpaceError(OSError):
     """Insufficient disk headroom; preserve completed snapshots."""
+
+
+class BackupSizeError(ValueError):
+    """The requested archive exceeds its explicit resource budget."""
 
 
 def require_space(destination: Path, extra: int = 0) -> None:
@@ -34,17 +39,23 @@ def require_space(destination: Path, extra: int = 0) -> None:
 
 
 class SpaceCheckedWriter(io.BufferedWriter):
-    def __init__(self, path: str, destination: Path):
+    def __init__(self, path: str, destination: Path, max_bytes: int = MAX_ARCHIVE_BYTES):
         super().__init__(io.FileIO(path, "wb"))
         self.destination = destination
         self.since_check = 8 * 1024 * 1024
+        self.max_bytes = max_bytes
+        self.bytes_written = 0
 
     def write(self, data):
+        if self.bytes_written + len(data) > self.max_bytes:
+            raise BackupSizeError("archive size limit exceeded")
         self.since_check += len(data)
         if self.since_check >= 8 * 1024 * 1024:
             require_space(self.destination)
             self.since_check = 0
-        return super().write(data)
+        written = super().write(data)
+        self.bytes_written += written
+        return written
 
 
 def private_directory(path: Path) -> None:
@@ -118,7 +129,15 @@ def history_files(codex: Path, config: Path) -> list[tuple[Path, str]]:
     return files
 
 
-def snapshot(codex: Path, config: Path, destination: Path, keep: int, save_ok: bool) -> Path:
+def snapshot(
+    codex: Path,
+    config: Path,
+    destination: Path,
+    keep: int,
+    save_ok: bool,
+    *,
+    max_bytes: int = MAX_ARCHIVE_BYTES,
+) -> Path:
     files = history_files(codex, config)
     databases = [
         path
@@ -131,16 +150,24 @@ def snapshot(codex: Path, config: Path, destination: Path, keep: int, save_ok: b
         raise ValueError("no provider history or farm manifests found")
     # A live WAL database needs an on-disk coherent copy. Never copy a bare DB
     # while omitting its WAL, and never load the history database into RAM.
-    largest_db = max((p.stat().st_size for p in databases), default=0)
-    require_space(destination, largest_db)
+    database_sizes = [
+        path.stat().st_size
+        + (Path(str(path) + "-wal").stat().st_size if Path(str(path) + "-wal").is_file() else 0)
+        for path in databases
+    ]
+    source_bytes = sum(path.stat().st_size for path, _ in files) + sum(database_sizes)
+    if source_bytes > max_bytes:
+        raise BackupSizeError("source history exceeds archive size limit")
+    require_space(destination, source_bytes + max(database_sizes, default=0))
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     archive = destination / f"snapshot-{stamp}-{time.time_ns()}.tar.gz"
     descriptor, temporary = tempfile.mkstemp(prefix=".snapshot-", dir=destination)
     os.close(descriptor)
     inventory = []
+    input_bytes = 0
     try:
         with (
-            SpaceCheckedWriter(temporary, destination) as output,
+            SpaceCheckedWriter(temporary, destination, max_bytes) as output,
             tarfile.open(fileobj=output, mode="w:gz", compresslevel=1) as bundle,
         ):
             # Stage databases before transcripts so a large coherent DB copy
@@ -160,9 +187,12 @@ def snapshot(codex: Path, config: Path, destination: Path, keep: int, save_ok: b
                         deadline: float = deadline,
                         page_size: int = page_size,
                         copy: Path = copy,
+                        input_bytes: int = input_bytes,
                     ) -> None:
                         if time.monotonic() > deadline:
                             raise TimeoutError("database snapshot exceeded 120 seconds")
+                        if input_bytes + total * page_size > max_bytes:
+                            raise BackupSizeError("database exceeds archive size limit")
                         # A restarted copy can overwrite already allocated
                         # pages. Do not charge those disk blocks a second time.
                         allocated = copy.stat().st_blocks * 512
@@ -180,6 +210,9 @@ def snapshot(codex: Path, config: Path, destination: Path, keep: int, save_ok: b
                         target.close()
                         source.close()
                     info = bundle.gettarinfo(str(copy), arcname="codex/" + path.name)
+                    input_bytes += info.size
+                    if input_bytes > max_bytes:
+                        raise BackupSizeError("history exceeds archive size limit")
                     info.mode = 0o600
                     with copy.open("rb") as handle:
                         bundle.addfile(info, handle)
@@ -187,6 +220,9 @@ def snapshot(codex: Path, config: Path, destination: Path, keep: int, save_ok: b
             for path, name in files:
                 # tarfile reads exactly the recorded size if a rollout grows.
                 info = bundle.gettarinfo(str(path), arcname=name)
+                input_bytes += info.size
+                if input_bytes > max_bytes:
+                    raise BackupSizeError("history exceeds archive size limit")
                 info.mode = 0o600
                 with path.open("rb") as handle:
                     bundle.addfile(info, handle)
@@ -235,7 +271,25 @@ def snapshot(codex: Path, config: Path, destination: Path, keep: int, save_ok: b
         Path(temporary).unlink(missing_ok=True)
 
 
+def save_manifests() -> bool:
+    save = Path(os.environ.get("CODEX_SAVE_BIN", str(Path(__file__).with_name("codex-save"))))
+    try:
+        result = subprocess.run(
+            [str(save), "--all-registered"],
+            timeout=180,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def run_once(args: argparse.Namespace, codex: Path, config: Path, state: Path) -> int:
+    if not args.archive:
+        print("Full conversation archives are disabled; saving session manifests only.", flush=True)
+        if args.skip_save:
+            return 0
+        return 0 if save_manifests() else 1
     private_directory(args.destination)
     status = {
         "checked_at": time.time(),
@@ -251,20 +305,7 @@ def run_once(args: argparse.Namespace, codex: Path, config: Path, state: Path) -
             return 1
         try:
             if not args.skip_save:
-                save = Path(
-                    os.environ.get("CODEX_SAVE_BIN", str(Path(__file__).with_name("codex-save")))
-                )
-                try:
-                    result = subprocess.run(
-                        [str(save), "--all-registered"],
-                        timeout=180,
-                        check=False,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    status["manifest_save_ok"] = result.returncode == 0
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
+                status["manifest_save_ok"] = save_manifests()
                 if not status["manifest_save_ok"]:
                     print(
                         "Farm manifest save failed; preserving conversation history anyway.",
@@ -298,6 +339,7 @@ def run_once(args: argparse.Namespace, codex: Path, config: Path, state: Path) -
                     args.destination,
                     args.keep,
                     status["manifest_save_ok"],
+                    max_bytes=args.max_mib * 1024 * 1024,
                 )
                 status["backup_ok"] = True
                 status["archive"] = archive.name
@@ -311,10 +353,13 @@ def run_once(args: argparse.Namespace, codex: Path, config: Path, state: Path) -
         ) as error:
             status["error_type"] = type(error).__name__
             # Never print database rows, transcripts, or provider command output.
-            print(
-                f"Codex backup failed ({type(error).__name__}); prior snapshots preserved.",
-                file=sys.stderr,
-            )
+            if isinstance(error, BackupSizeError):
+                message = f"Conversation archive exceeds the {args.max_mib} MiB size limit"
+            elif isinstance(error, BackupSpaceError):
+                message = "Insufficient free space for an archive with 1 GiB reserved"
+            else:
+                message = f"Codex backup failed ({type(error).__name__})"
+            print(f"{message}; prior snapshots preserved.", file=sys.stderr)
         status["checked_at"] = time.time()
         atomic_json(state / "backup-status.json", status)
     return 0 if status["backup_ok"] and (args.skip_save or status["manifest_save_ok"]) else 1
@@ -339,18 +384,24 @@ def timer_active() -> bool:
 def main() -> int:
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--archive", action="store_true", help="opt in to a full conversation-history archive"
+    )
     parser.add_argument("--destination", type=Path, help="private backup directory")
-    parser.add_argument("--keep", type=int, default=os.environ.get("CODEXFARM_BACKUP_KEEP", "2"))
+    parser.add_argument("--keep", type=int, default=os.environ.get("CODEXFARM_BACKUP_KEEP", "1"))
+    parser.add_argument(
+        "--max-mib", type=int, default=512, help="maximum source/output size in MiB (default: 512)"
+    )
     parser.add_argument("--min-age", type=int, default=0, help="minimum snapshot age in seconds")
     parser.add_argument(
         "--skip-save",
         action="store_true",
-        help="snapshot without saving live tmux identities",
+        help="skip saving live tmux identities; without --archive this does no work",
     )
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="fallback scheduler; exits when the systemd timer is active",
+        help="foreground manifest-save scheduler; archives only with --archive",
     )
     parser.add_argument(
         "--interval",
@@ -359,12 +410,20 @@ def main() -> int:
         help="watch interval in seconds (minimum 10)",
     )
     args = parser.parse_args()
-    if not 1 <= args.keep <= 100 or args.min_age < 0 or args.interval < 10:
-        parser.error("keep must be 1..100, min-age nonnegative, and interval at least 10")
+    if not 1 <= args.keep <= 100 or args.max_mib < 1 or args.min_age < 0 or args.interval < 10:
+        parser.error(
+            "keep must be 1..100, max-mib positive, min-age nonnegative, and interval at least 10"
+        )
     state = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "codexfarm"
     config = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "codexfarm"
     codex = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
-    private_directory(state)
+    if args.archive:
+        try:
+            os.nice(10)
+        except (AttributeError, OSError):
+            pass
+    if args.archive or args.watch:
+        private_directory(state)
     args.destination = args.destination or state / "backups"
     if not args.watch:
         return run_once(args, codex, config, state)
@@ -374,9 +433,14 @@ def main() -> int:
         except BlockingIOError:
             print("Codex backup watcher is already running.", file=sys.stderr)
             return 1
-        atomic_json(state / "backup-watch.json", {"pid": os.getpid(), "started_at": time.time()})
+        atomic_json(
+            state / "backup-watch.json",
+            {"pid": os.getpid(), "started_at": time.time(), "archive_enabled": args.archive},
+        )
         try:
-            while not timer_active():
+            # The systemd timer saves manifests only. An explicitly opted-in
+            # archive watcher must remain active alongside that timer.
+            while args.archive or not timer_active():
                 run_once(args, codex, config, state)
                 time.sleep(args.interval)
             print("Systemd autosave timer is active; fallback watcher exiting.", flush=True)

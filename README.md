@@ -323,7 +323,7 @@ An unchanged save leaves the restore point and timestamp alone. A manual save
 deliberately replaces the restore point and retains its predecessor. Autosave
 only promotes a snapshot that retains every previously saved conversation and
 generic window. If the farm shrinks, or replaces conversations even at the same
-window count, autosave archives the current snapshot and preserves the prior
+window count, autosave retains the small current manifest and preserves the prior
 restore point. This protects a substantial earlier farm from an idle single
 session, a partial restore, or windows being closed. Use `codex-save` manually
 when that reduction is intentional. Empty farms never replace a snapshot;
@@ -368,7 +368,8 @@ their rollout descriptor is closed.
 For a running farm, the doctor inspects every pane and compares verified
 conversation IDs with the manifest. Missing entries, unknown identities and
 static shared-server bindings fail the check without printing conversation IDs.
-History archives continue independently when exact manifest capture fails.
+Explicitly enabled history archives continue independently when exact manifest
+capture fails.
 
 To migrate an older shared-server TUI safely, wait until its conversation is idle,
 record the exact ID currently shown by Codex's `/status`, and exit that TUI
@@ -406,8 +407,8 @@ Flags:
 
 ### 6. (Optional) Enable Autosave/Autorestore
 
-`codex-add` can install systemd user services to save identities every five
-minutes, back up conversations hourly, and restore on login.
+`codex-add` can install systemd user services to save lightweight session
+manifests every five minutes and restore on login.
 You can trigger it directly:
 
 ```bash
@@ -423,24 +424,33 @@ codex-add --session personal --install-autoservice
 
 Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session. Autosave uses the conservative policy above and runs after autorestore when both services start together. Re-run `codex-add --install-autoservice` to refresh existing service definitions. Older units that already invoke `codex-save --all-registered` also receive the conservative policy automatically.
 
-Autosave runs `codex-backup`, which attempts the strict manifest save and then
-preserves provider conversation history even if session discovery fails. Failure remains a
-nonzero service result. Installation reports failure if the user service
-manager or timer cannot be activated. Units preserve the installation PATH so
-Node/NVM commands remain available outside an interactive shell.
+Autosave runs `codex-save --all-registered` every five minutes at low CPU and idle
+I/O priority. It saves small manifests of exact session identities. It does not
+create conversation archives or copy provider databases. Older units that call
+`codex-backup --min-age 3600` also become manifest-only after updating the helper;
+refreshing the units switches them to the direct save command. Restart any
+already-running backup watcher after updating. Save failures remain a nonzero
+service result. Installation reports failure if the user service manager or
+timer cannot be activated. Units preserve the installation PATH so Node/NVM
+commands remain available outside an interactive shell.
 
 Set `CODEX_AUTOSERVICE_CHOICE=yes` to auto-accept the prompt, or `no` to suppress it.
 
 ### Conversation backups and recovery
 
 ```bash
-codex-backup                         # save identities and snapshot chats now
-codex-backup --skip-save             # snapshot history even with no tmux server
-codex-backup --keep 1                # limit retained snapshots on small disks
-codex-backup --watch --min-age 3600   # foreground fallback when systemd is unavailable
+codex-backup                         # save small manifests; full archives stay off
+codex-backup --watch                 # foreground manifest autosave fallback
+codex-backup --archive               # explicitly create a full chat archive
+codex-backup --archive --skip-save   # archive history even with no tmux server
+codex-backup --archive --max-mib 1024 # explicitly raise the archive size budget
 ```
 
-Backups are private local `snapshot-*.tar.gz` archives under
+Full conversation archives are disabled by default. Neither autosave nor the
+default fallback watcher creates them. Existing archives are preserved when
+archiving is disabled; updating the helpers does not delete old backups.
+
+With `--archive`, backups are private local `snapshot-*.tar.gz` archives under
 `~/.local/state/codexfarm/backups` (or `--destination`). They contain Codex
 rollouts, archived rollouts, history/index files, Claude project chat JSONL,
 Gemini chat JSON/JSONL, individually consistent SQLite copies of Codex
@@ -450,29 +460,37 @@ record save coverage and an archive SHA-256. Authentication files,
 configuration, provider logs, and unrelated home files are excluded. Chats can
 still contain sensitive information: keep these archives private and out of Git.
 
-Archives are published atomically, with owner-only files/directories. Two are
+Archives are published atomically, with owner-only files/directories. One is
 retained by default (`CODEXFARM_BACKUP_KEEP` or `--keep`); pruning occurs only
 after a successful replacement. Incident-recovery archives with other names are
-left alone. Databases are staged and compressed before transcripts to reduce
-peak temporary disk use. Backups check for 128 MiB of remaining headroom during
-compression and database copying, aborting safely if space runs low. Allow space
-for the new archive and a coherent database copy; simultaneous writes by other
-programs can still exhaust the disk. Backups are on the same host unless you choose another
-destination. They do not protect against loss of that disk.
+left alone. The default size budget is 512 MiB for both total source history
+(including SQLite WAL files) and compressed output. `--max-mib` changes that
+budget. Oversized sources are rejected before copying, and growth during a copy
+is checked too. Optional archives use low CPU priority and fast compression.
+Databases are staged one at a time before transcripts to reduce temporary disk
+use. Backups reserve 1 GiB of free disk space, with additional space checked for
+the new archive and database staging. Low-space or size-limit failures preserve
+the previous archive and remove partial files. Simultaneous writes by other
+programs can still exhaust the disk. Backups are on the same host unless you
+choose another destination. They do not protect against loss of that disk.
 
-`backup-status.json` records each save/backup attempt. A failed manifest save
+`backup-status.json` records explicit archive attempts. A failed manifest save
 does not prevent a history snapshot, but the combined command still exits
 nonzero. `--min-age` limits snapshot frequency while still checking the manifest
-on each invocation. The watcher uses an exclusive lock and checks every five
-minutes and exits once the systemd autosave timer becomes active; it is a
-temporary foreground scheduler, not a boot service. The hourly
-backup remains independent of any particular tmux pane surviving.
+on each invocation. The watcher uses an exclusive lock and saves every five
+minutes. The default manifest watcher exits once the systemd autosave timer
+becomes active. It is a temporary foreground scheduler, not a boot service.
+Scheduled full archives require an explicit
+`codex-backup --archive --watch --min-age 3600` invocation; that archive watcher
+continues alongside the manifest autosave timer.
 
-The status annotator displays a persistent `BACKUP WARNING` when the last save
-or backup failed, the scheduler has not checked in for 15 minutes, the archive
-is missing, or the newest snapshot is older than two hours. `codex-doctor` and
-`codex-health` report the specific fault and detect a stale memory-monitor
-heartbeat. A live timer alone is not proof of a successful backup.
+Archive health checks are also off by default. They apply only to an explicitly
+enabled archive watcher or when `CODEXFARM_BACKUP_HEALTH_ENABLED=1` is set before
+starting the annotator. In that mode, `BACKUP WARNING` indicates a failed save
+or archive, a scheduler heartbeat older than 15 minutes, a missing archive, or
+a snapshot older than two hours. A manual archive alone does not require future
+archives. `codex-doctor` and `codex-health` still check memory pressure and the
+memory-monitor heartbeat without requiring full conversation backups.
 
 After a crash, preserve the existing archive first. Inspect `snapshot.json` and
 extract to a separate private directory; do not replace a live Codex database.
@@ -505,7 +523,8 @@ Defaults and environment overrides (set before starting the annotator):
 | `CODEXFARM_MEMORY_WARN_PERCENT` | `20` | Warn at or below this percentage of RAM available |
 | `CODEXFARM_MEMORY_CRITICAL_PERCENT` | `10` | Critical pressure; bulk restore stops opening windows |
 | `CODEXFARM_MEMORY_SESSION_MIB` | `1024` | Warn when a window's process tree exceeds this RSS |
-| `CODEXFARM_HEALTH_ENABLED` | `1` | Set to `0` to disable periodic memory/backup checks |
+| `CODEXFARM_HEALTH_ENABLED` | `1` | Set to `0` to disable periodic memory and optional archive checks |
+| `CODEXFARM_BACKUP_HEALTH_ENABLED` | `0` | Set to `1` to require periodic full archives; archive watchers also opt in |
 | `CODEXFARM_HEALTH_STATUS` | `1` | Set to `0` to leave `status-right` formatting alone |
 
 Linux memory pressure stalls (`some avg10`) also trigger warning at 10% and
@@ -557,8 +576,8 @@ Tuning and controls:
 - **`codex-add [session] [directory]`** - Add a new Codex instance, optionally selecting a named farm
 - **`codex-annotator`** - Track RUN/READY/ERR state and notify when windows become READY
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
-- **`codex-health`** - Check RAM pressure, conversation backups and the monitor heartbeat
-- **`codex-backup`** - Save exact farm identities and private, consistent Codex history snapshots
+- **`codex-health`** - Check RAM pressure, the monitor heartbeat and opted-in archive health
+- **`codex-backup [--archive]`** - Save exact farm identities; full conversation archives require `--archive`
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
 - **`codex-looper [init|doctor|run]`** - Run a single prompt or prompt sequence repeatedly with logs and stop detection; see [looper reference](docs/looper.md)
 - **`codex-status [--session SESSION] [sessions|windows|activity|logs|loopers]`** - Show status information; `loopers --repair-stale-loopers` marks active state files stopped when their supervisor process is gone
@@ -761,7 +780,7 @@ agent-cli-farm/
 - `tmux` cannot mirror the same live pane in two windows (use linked windows or logs)
 - `tmux` survives client disconnects, but not host reboot or tmux-server exit unless autosave/autorestore recreates windows later.
 - Automatic login restoration uses systemd user services. `codex-backup --watch`
-  provides a foreground backup scheduler when that manager is unavailable; it
+  provides foreground manifest autosave when that manager is unavailable; it
   must be restarted after a reboot. Same-disk snapshots need a separate off-host
   copy to protect against disk loss.
 - tmux provides one `pipe-pane` consumer per pane; the deep-history backend owns it and mirrors the stream rather than attaching a competing logger.

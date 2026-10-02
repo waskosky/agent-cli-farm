@@ -157,10 +157,19 @@ def age(value: object, now: float) -> float:
     return math.inf
 
 
+def backups_expected(state: Path) -> bool:
+    return (
+        os.environ.get("CODEXFARM_BACKUP_HEALTH_ENABLED", "0") == "1"
+        or read_json(state / "backup-watch.json").get("archive_enabled") is True
+    )
+
+
 def backup_issues(state: Path, now: float, *, expected: bool) -> list[str]:
+    if not expected:
+        return []
     status = read_json(state / "backup-status.json")
     if not status:
-        return ["no successful backup recorded; run codex-backup"] if expected else []
+        return ["no successful backup recorded; run codex-backup --archive"]
     issues = []
     if age(status.get("checked_at"), now) > 900:
         issues.append("backup scheduler heartbeat older than 15 minutes")
@@ -254,9 +263,7 @@ class HealthMonitor:
         if level == "critical":
             active.add("host")
         self.previous = observed
-        issues = backup_issues(
-            self.state, now, expected=(config_directory() / "farms.tsv").exists()
-        )
+        issues = backup_issues(self.state, now, expected=backups_expected(self.state))
         if issues:
             active.add("backup")
         labels = []
@@ -333,7 +340,7 @@ def main() -> int:
         f"Memory {level}: {memory.description() if memory else 'Linux memory counters unavailable'}"
     )
     state, now = state_directory(), time.time()
-    issues = backup_issues(state, now, expected=(config_directory() / "farms.tsv").exists())
+    issues = backup_issues(state, now, expected=backups_expected(state))
     health = read_json(state / "health-status.json")
     if (state / "managed_sessions").exists() or health:
         if age(health.get("checked_at"), now) > 60:
