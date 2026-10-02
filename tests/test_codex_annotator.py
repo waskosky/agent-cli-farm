@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 def load_annotator_module():
@@ -276,6 +277,24 @@ class AnnotatorWindowTests(unittest.TestCase):
         )
 
         self.assertNotIn("@gone", state_cache)
+
+    def test_default_poll_is_five_seconds_and_environment_can_override(self):
+        for value, expected in (("", 5.0), ("bad", 5.0), ("0.75", 0.75)):
+            with self.subTest(value=value), patch.dict(os.environ, clear=False):
+                os.environ.pop("CODEX_ANNOTATOR_INTERVAL", None)
+                if value:
+                    os.environ["CODEX_ANNOTATOR_INTERVAL"] = value
+                annotator = load_annotator_module()
+                self.assertEqual(annotator.DEFAULT_INTERVAL, expected)
+                self.assertEqual(annotator.default_interval_from_env("nan"), 5.0)
+
+    def test_cli_interval_overrides_environment(self):
+        with patch.dict(os.environ, {"CODEX_ANNOTATOR_INTERVAL": "7.5"}):
+            annotator = load_annotator_module()
+        with patch("sys.argv", ["codex-annotator", "--interval", "0.25"]):
+            self.assertEqual(annotator.parse_args().interval, 0.25)
+        with patch("sys.argv", ["codex-annotator"]):
+            self.assertEqual(annotator.parse_args().interval, 7.5)
 
     def test_interval_validation_rejects_non_finite_values(self):
         annotator = load_annotator_module()

@@ -387,13 +387,18 @@ release it and retry; do not stop a shared server that serves other conversation
 The farm does not interrupt running chats to migrate them.
 
 Bulk restore waits two seconds between launches and checks host memory before
-creating windows, before force deletion, and before each launch. Critical
-pressure stops the restore with exit code 3; the saved manifest stays intact.
-Rerun when memory is available. `--delay SECONDS` (0..300) or
-`CODEXFARM_RESTORE_DELAY_SECONDS` changes the pacing. The explicit
-`--ignore-memory-pressure` flag bypasses the guard. These options also apply
-with `--all-registered`. On hosts without Linux memory counters, restore reports
-that the guard is unavailable and continues with pacing.
+creating windows, before force deletion, and before each launch. Memory pressure
+is advisory by default: warnings, critical readings, and unavailable or broken
+health helpers do not block restoration. `--enforce-memory-pressure` explicitly
+stops at critical pressure or a failed health check before mutation or further
+launches; the saved manifest stays intact. A single-farm refusal exits 3;
+`--all-registered` preserves its aggregate exit 1 when any child farm refuses. Unknown memory
+counters remain advisory. `--ignore-memory-pressure` skips the health helper.
+`CODEXFARM_RESTORE_MEMORY_POLICY=warn|enforce|ignore` selects the default policy;
+CLI flags override it. An invalid final policy exits 2 before touching tmux.
+`--delay SECONDS` (0..300) or `CODEXFARM_RESTORE_DELAY_SECONDS` changes pacing.
+These options also apply with `--all-registered` and provider restore wrappers.
+Checks never interrupt running chats.
 
 If tmux sessions are already running (no manifest needed):
 ```bash
@@ -424,15 +429,35 @@ codex-add --session personal --install-autoservice
 
 Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session. Autosave uses the conservative policy above and runs after autorestore when both services start together. Re-run `codex-add --install-autoservice` to refresh existing service definitions. Older units that already invoke `codex-save --all-registered` also receive the conservative policy automatically.
 
-Autosave runs `codex-save --all-registered` every five minutes at low CPU and idle
-I/O priority. It saves small manifests of exact session identities. It does not
-create conversation archives or copy provider databases. Older units that call
-`codex-backup --min-age 3600` also become manifest-only after updating the helper;
-refreshing the units switches them to the direct save command. Restart any
-already-running backup watcher after updating. Save failures remain a nonzero
-service result. Installation reports failure if the user service manager or
-timer cannot be activated. Units preserve the installation PATH so Node/NVM
-commands remain available outside an interactive shell.
+Autosave defaults to `codex-save --all-registered` every five minutes at low CPU
+and idle I/O priority, with a three-minute helper timeout. It saves small
+manifests of exact session identities. To explicitly schedule conversation
+archives, use `codex-add --install-autoservice --with-conversation-backups`;
+that selects `codex-backup --archive --min-age 3600` and preserves the archive
+budgets described below. Use `--without-conversation-backups` with an explicit
+install to return to manifests. Both backup flags require `--install-autoservice`
+and cannot be combined.
+
+The service choice is stored in `autoservice_choice` and archive consent in
+`conversation_backup_choice` under `${XDG_STATE_HOME:-~/.local/state}/codexfarm`.
+A legacy `autoservice_choice=yes` alone does not authorize archives. Explicit
+service refreshes preserve the separate archive choice unless a backup flag
+changes it. Normal window launches with a stored service choice of yes only
+register their farm; they do not rewrite units, reload the manager, enable, or
+start services. A first interactive or `CODEX_AUTOSERVICE_CHOICE=yes` selection
+installs once. A stored no respects the operator's disabled choice.
+
+Explicit installs and refreshes check all three units for local, runtime, and
+global masks before writing any units or choices, including filesystem masks
+when the user service manager is unavailable. A masked unit causes a refusal
+that names it and preserves all units, masks, registry, and choices; the helper
+never unmasks services. Installation also reports failure if the user service
+manager or timer cannot be activated. Units preserve the installation PATH so
+Node/NVM commands remain available outside an interactive shell. Older units
+that call `codex-backup --min-age 3600` become manifest-only after updating the
+helper; refresh the units explicitly to select the current save command.
+Restart any already-running backup watcher after updating. Save failures remain
+a nonzero service result.
 
 Set `CODEX_AUTOSERVICE_CHOICE=yes` to auto-accept the prompt, or `no` to suppress it.
 
@@ -446,9 +471,9 @@ codex-backup --archive --skip-save   # archive history even with no tmux server
 codex-backup --archive --max-mib 1024 # explicitly raise the archive size budget
 ```
 
-Full conversation archives are disabled by default. Neither autosave nor the
-default fallback watcher creates them. Existing archives are preserved when
-archiving is disabled; updating the helpers does not delete old backups.
+Full conversation archives are disabled by default. Autosave creates them only
+with separately persisted archive consent; the default fallback watcher saves
+manifests. Existing archives are preserved when archiving is disabled; updating the helpers does not delete old backups.
 
 With `--archive`, backups are private local `snapshot-*.tar.gz` archives under
 `~/.local/state/codexfarm/backups` (or `--destination`). They contain Codex
@@ -480,14 +505,17 @@ nonzero. `--min-age` limits snapshot frequency while still checking the manifest
 on each invocation. The watcher uses an exclusive lock and saves every five
 minutes. The default manifest watcher exits once the systemd autosave timer
 becomes active. It is a temporary foreground scheduler, not a boot service.
-Scheduled full archives require an explicit
+Scheduled full archives require explicit autoservice archive consent or a
 `codex-backup --archive --watch --min-age 3600` invocation; that archive watcher
 continues alongside the manifest autosave timer.
 
 Archive health checks are also off by default. They apply only to an explicitly
-enabled archive watcher or when `CODEXFARM_BACKUP_HEALTH_ENABLED=1` is set before
-starting the annotator. In that mode, `BACKUP WARNING` indicates a failed save
-or archive, a scheduler heartbeat older than 15 minutes, a missing archive, or
+enabled archive watcher, separately persisted archive and autoservice choices
+of yes, or `CODEXFARM_BACKUP_HEALTH_ENABLED=1` set before starting the annotator.
+An explicit no in either persisted choice suppresses archive warnings from stale
+watcher/status files, preserving those files. The environment override of 1
+continues to require archive checks even with disabled choices. In that mode,
+`BACKUP WARNING` indicates a failed save or archive, a scheduler heartbeat older than 15 minutes, a missing archive, or
 a snapshot older than two hours. A manual archive alone does not require future
 archives. `codex-doctor` and `codex-health` still check memory pressure and the
 memory-monitor heartbeat without requiring full conversation backups.
@@ -501,7 +529,7 @@ transcript itself. Restoring windows does not submit a continuation prompt.
 
 ## Status Updates (RUN/READY/ERR)
 
-`codex-add` auto-starts `codex-annotator`, which tracks RUN, READY, or ERR state in tmux window options. For Codex/Claude panes it inspects recent output for prompts/approval selections; other panes fall back to the command-based heuristic.
+`codex-add` auto-starts `codex-annotator`, which polls every five seconds and tracks RUN, READY, or ERR state in tmux window options. `CODEX_ANNOTATOR_INTERVAL` or `--interval` overrides polling with a positive finite number of seconds. For Codex/Claude panes it inspects recent output for prompts/approval selections; other panes fall back to the command-based heuristic.
 
 By default, the annotator does not rewrite tmux window titles. That lets Codex's native title animation remain visible while still making `codex-status windows` show state. When a window transitions from RUN to READY, the annotator emits a tmux `display-message` notification.
 
@@ -521,10 +549,10 @@ Defaults and environment overrides (set before starting the annotator):
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `CODEXFARM_MEMORY_WARN_PERCENT` | `20` | Warn at or below this percentage of RAM available |
-| `CODEXFARM_MEMORY_CRITICAL_PERCENT` | `10` | Critical pressure; bulk restore stops opening windows |
+| `CODEXFARM_MEMORY_CRITICAL_PERCENT` | `10` | Critical pressure; restore stops only with explicit enforcement |
 | `CODEXFARM_MEMORY_SESSION_MIB` | `1024` | Warn when a window's process tree exceeds this RSS |
 | `CODEXFARM_HEALTH_ENABLED` | `1` | Set to `0` to disable periodic memory and optional archive checks |
-| `CODEXFARM_BACKUP_HEALTH_ENABLED` | `0` | Set to `1` to require periodic full archives; archive watchers also opt in |
+| `CODEXFARM_BACKUP_HEALTH_ENABLED` | `0` | Set to `1` to require periodic full archives; archive watchers and explicit service archive consent also opt in |
 | `CODEXFARM_HEALTH_STATUS` | `1` | Set to `0` to leave `status-right` formatting alone |
 
 Linux memory pressure stalls (`some avg10`) also trigger warning at 10% and

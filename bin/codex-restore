@@ -18,7 +18,7 @@ SESSION_META_BIN="${CODEX_SESSION_META_BIN:-$SCRIPT_DIR/codex-session-meta.py}"
 WRITER_WAIT_SECONDS="${CODEXFARM_RESTORE_WRITER_WAIT_SECONDS:-10}"
 RESTORE_DELAY="${CODEXFARM_RESTORE_DELAY_SECONDS:-2}"
 HEALTH_BIN="${CODEX_HEALTH_BIN:-$SCRIPT_DIR/codex-health}"
-ignore_memory=0
+memory_policy="${CODEXFARM_RESTORE_MEMORY_POLICY-warn}"
 MANIFEST_BIN="$SCRIPT_DIR/codex-manifest.py"
 PANE_IDENTITY_BIN="${CODEX_PANE_IDENTITY_BIN:-$SCRIPT_DIR/codex-save}"
 original_args=("$@")
@@ -26,27 +26,34 @@ original_args=("$@")
 usage() {
   cat <<EOF
 Usage: $script_name [-a|--attach] [-f|--force] [--all-registered] [--list-snapshots]
-       [--delay SECONDS] [--ignore-memory-pressure] [manifest-path]
+       [--delay SECONDS] [--enforce-memory-pressure|--ignore-memory-pressure] [manifest-path]
 
 Restore tmux farm windows from a trusted executable manifest.
 Provider conversations require exact IDs; latest/continue resumes are disabled.
 Use --list-snapshots to find retained snapshots, then pass the chosen path here.
 Launches are spaced by 2 seconds (0..300, also CODEXFARM_RESTORE_DELAY_SECONDS).
-Critical host memory pressure stops restoration before opening more windows.
---ignore-memory-pressure explicitly bypasses that check; it never stops running chats.
+Memory pressure is advisory by default: warnings do not block restoration.
+--enforce-memory-pressure stops at critical pressure; --ignore-memory-pressure skips checks.
+An enforced refusal exits 3 for one farm; --all-registered aggregates child failures as exit 1.
+CODEXFARM_RESTORE_MEMORY_POLICY=warn|enforce|ignore sets the default; CLI flags override it.
+Checks never stop running chats. Missing counters remain advisory even with enforcement.
 EOF
 }
 
 check_memory() {
-  [ "$ignore_memory" -eq 1 ] && return 0
-  if [ ! -x "$HEALTH_BIN" ]; then
-    echo "Memory guard missing; reinstall helpers or use --ignore-memory-pressure." >&2
-    return 1
+  [ "$memory_policy" = ignore ] && return 0
+  local health_args=(--restore-check)
+  if [ "$memory_policy" = enforce ]; then
+    health_args+=(--enforce-memory-pressure)
   fi
-  if "$HEALTH_BIN" --restore-check; then
+  if [ -x "$HEALTH_BIN" ] && "$HEALTH_BIN" "${health_args[@]}"; then
     return 0
   fi
-  echo "Restore stopped by memory guard. Saved manifest is unchanged; rerun when memory is available." >&2
+  if [ "$memory_policy" = warn ]; then
+    echo "warning: memory check unavailable or failed; continuing restore with pacing." >&2
+    return 0
+  fi
+  echo "Restore stopped by memory guard. Saved manifest is unchanged; reinstall helpers or rerun when memory is available." >&2
   return 1
 }
 
@@ -271,9 +278,6 @@ restore_all_registered() {
     fi
 
     restore_args=("--delay" "$RESTORE_DELAY")
-    if [ "$ignore_memory" -eq 1 ]; then
-      restore_args+=("--ignore-memory-pressure")
-    fi
     if [ "$force_requested" -eq 1 ]; then
       restore_args+=("--force")
     fi
@@ -281,7 +285,7 @@ restore_all_registered() {
     if [ "$count" -gt 0 ]; then
       sleep "$RESTORE_DELAY"
     fi
-    if CODEX_SESSION="$session" "$0" "${restore_args[@]}"; then
+    if CODEX_SESSION="$session" CODEXFARM_RESTORE_MEMORY_POLICY="$memory_policy" "$0" "${restore_args[@]}"; then
       count=$((count + 1))
       [ -n "$first_session" ] || first_session="$session"
     else
@@ -307,7 +311,8 @@ while (( "$#" )); do
     -f|--force) force=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --all-registered) all_registered=1; shift ;;
-    --ignore-memory-pressure) ignore_memory=1; shift ;;
+    --ignore-memory-pressure) memory_policy=ignore; shift ;;
+    --enforce-memory-pressure) memory_policy=enforce; shift ;;
     --delay)
       if [ "$#" -lt 2 ]; then echo "Missing value for --delay" >&2; exit 2; fi
       RESTORE_DELAY="$2"; shift 2 ;;
@@ -317,6 +322,11 @@ while (( "$#" )); do
     *) args_pos+=("$1"); shift ;;
   esac
 done
+
+case "$memory_policy" in
+  warn|enforce|ignore) ;;
+  *) echo "Invalid CODEXFARM_RESTORE_MEMORY_POLICY: expected warn, enforce, or ignore" >&2; exit 2 ;;
+esac
 
 if [ "${#args_pos[@]}" -gt 1 ]; then
   echo "Unexpected argument: ${args_pos[1]}" >&2

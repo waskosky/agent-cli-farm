@@ -82,10 +82,10 @@ def default_interval_from_env(value: str) -> float:
     try:
         return parse_positive_interval(value)
     except argparse.ArgumentTypeError:
-        return 1.0
+        return 5.0
 
 
-DEFAULT_INTERVAL = default_interval_from_env(os.environ.get("CODEX_ANNOTATOR_INTERVAL", "1.0"))
+DEFAULT_INTERVAL = default_interval_from_env(os.environ.get("CODEX_ANNOTATOR_INTERVAL", "5.0"))
 
 
 def parse_capture_lines(value: str) -> int:

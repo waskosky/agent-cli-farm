@@ -158,9 +158,18 @@ def age(value: object, now: float) -> float:
 
 
 def backups_expected(state: Path) -> bool:
-    return (
-        os.environ.get("CODEXFARM_BACKUP_HEALTH_ENABLED", "0") == "1"
-        or read_json(state / "backup-watch.json").get("archive_enabled") is True
+    if os.environ.get("CODEXFARM_BACKUP_HEALTH_ENABLED", "0") == "1":
+        return True
+    choices = []
+    for name in ("autoservice_choice", "conversation_backup_choice"):
+        try:
+            choices.append((state / name).read_text().strip().lower())
+        except OSError:
+            choices.append("")
+    if "no" in choices:
+        return False
+    return choices == ["yes", "yes"] or (
+        read_json(state / "backup-watch.json").get("archive_enabled") is True
     )
 
 
@@ -321,9 +330,16 @@ class HealthMonitor:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Report farm memory, backup and monitor health.")
     parser.add_argument(
-        "--restore-check", action="store_true", help="warn on low RAM; exit 3 at critical pressure"
+        "--restore-check", action="store_true", help="report RAM pressure without blocking restore"
+    )
+    parser.add_argument(
+        "--enforce-memory-pressure",
+        action="store_true",
+        help="with --restore-check, exit 3 at critical RAM pressure",
     )
     args = parser.parse_args()
+    if args.enforce_memory_pressure and not args.restore_check:
+        parser.error("--enforce-memory-pressure requires --restore-check")
     try:
         limits = Limits.from_env()
     except ValueError as error:
@@ -335,7 +351,7 @@ def main() -> int:
             print(f"Memory {level}: {memory.description()}")
         elif memory is None:
             print("Memory check unavailable on this host; restore cannot enforce a RAM guard.")
-        return 3 if level == "critical" else 0
+        return 3 if args.enforce_memory_pressure and level == "critical" else 0
     print(
         f"Memory {level}: {memory.description() if memory else 'Linux memory counters unavailable'}"
     )
