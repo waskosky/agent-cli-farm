@@ -45,3 +45,30 @@ not expose a structured status channel through tmux.
 - Stale window state must be pruned during annotation passes.
 - Invalid user-supplied patterns, templates, or intervals must fail cleanly and
   must not crash a long-running annotator daemon.
+
+## Resource and background-service policy
+
+- Normal setup and operation must not install privileged host guards, replace
+  ordinary tools, or impose global CPU, RAM, swap, task, or time ceilings.
+- Any explicitly requested resource enforcement must apply only to the requested
+  job, with the proposed settings shown to the user before activation.
+- Restore memory checks are advisory by default, with two-second launch spacing.
+  `--enforce-memory-pressure` opts into refusal at critical pressure or a failed
+  health helper; unknown counters remain advisory. `--ignore-memory-pressure`
+  skips checks. `CODEXFARM_RESTORE_MEMORY_POLICY=warn|enforce|ignore` sets the
+  default; CLI flags override it and invalid final policy fails before tmux changes.
+- Autoservice defaults to lightweight manifests. Only explicit
+  `--install-autoservice --with-conversation-backups` opts into scheduled full
+  archives; `--without-conversation-backups` switches back. Persist archive
+  consent separately in `conversation_backup_choice`; a legacy service yes is
+  not archive consent. Explicit refreshes preserve the separate choice.
+- Ordinary launches with stored autoservice yes register the farm without unit
+  writes or manager activation. First-time interactive/environment yes installs
+  once; explicit installs refresh units. Respect stored no and all operator masks.
+  Precheck all three units for local/runtime/global masks before writing any
+  units or choices; never unmask them.
+- Disabled autoservice or archive choice suppresses stale archive warnings,
+  except the explicit `CODEXFARM_BACKUP_HEALTH_ENABLED=1` override. Preserve
+  backup files and retain opted-in archive budgets and priority safeguards.
+- Annotator polling defaults to five seconds, preserving environment and CLI
+  overrides and native provider titles.

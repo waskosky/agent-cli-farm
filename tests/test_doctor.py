@@ -98,6 +98,17 @@ sys.exit(73)
         self.env["DOCTOR_TEST_PANES"] = str(self.panes_file)
         self.panes_file.write_text(json.dumps(self.panes), encoding="utf-8")
 
+    def test_deliberately_disabled_autoservice_is_informational(self):
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        state.mkdir(parents=True)
+        (state / "autoservice_choice").write_text("no\n")
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        units.mkdir(parents=True)
+        (units / "codex-autosave.timer").symlink_to("/dev/null")
+        result = self.run_doctor(str(self.manifest))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("deliberately disabled", result.stdout)
+
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 

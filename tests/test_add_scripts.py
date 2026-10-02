@@ -968,6 +968,409 @@ exit 0
             f"Expected timer-related systemctl calls, got: {systemctl_calls}",
         )
 
+    def run_install(self, *flags):
+        return subprocess.run(
+            [REPO_ROOT / "bin/codex-add", "--install-autoservice", *flags],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_explicit_archive_service_consent_is_separate_and_preserved(self):
+        make_executable(self.tmpdir / "systemctl", "#!/bin/sh\nexit 0\n")
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        state.mkdir(parents=True)
+        (state / "autoservice_choice").write_text("yes\n")
+        unit = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user/codex-autosave.service"
+        for flags, choice in (
+            ((), "no"),
+            (("--with-conversation-backups",), "yes"),
+            ((), "yes"),
+            (("--without-conversation-backups",), "no"),
+            ((), "no"),
+        ):
+            with self.subTest(flags=flags, choice=choice):
+                result = self.run_install(*flags)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((state / "conversation_backup_choice").read_text().strip(), choice)
+                content = unit.read_text()
+                if choice == "yes":
+                    self.assertIn("codex-backup --archive --min-age 3600", content)
+                else:
+                    self.assertIn("codex-save --all-registered", content)
+                    self.assertNotIn("codex-backup", content)
+                self.assertIn("TimeoutStartSec=3min", content)
+                self.assertIn("Nice=10", content)
+                self.assertIn("IOSchedulingClass=idle", content)
+
+    def test_backup_service_flags_require_install_and_reject_conflicts_early(self):
+        for flags in (
+            ("--with-conversation-backups",),
+            ("--without-conversation-backups",),
+            (
+                "--install-autoservice",
+                "--with-conversation-backups",
+                "--without-conversation-backups",
+            ),
+        ):
+            result = subprocess.run(
+                [REPO_ROOT / "bin/codex-add", *flags], env=self.env, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertFalse(self.tmux_log.exists())
+            self.assertFalse((Path(self.env["XDG_STATE_HOME"]) / "codexfarm").exists())
+
+    def test_normal_stored_yes_registers_farm_without_service_changes(self):
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        state.mkdir(parents=True)
+        (state / "autoservice_choice").write_text("yes\n")
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        units.mkdir(parents=True)
+        sentinel = units / "codex-autosave.service"
+        sentinel.write_text("operator unit\n")
+        manager_log = self.tmpdir / "manager-log"
+        make_executable(
+            self.tmpdir / "systemctl",
+            '#!/bin/sh\nprintf "%s\n" "$*" >> "' + str(manager_log) + '"\n',
+        )
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-add", "--session", "work", "-d", str(self.tmpdir)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(manager_log.exists())
+        self.assertEqual(sentinel.read_text(), "operator unit\n")
+        self.assertEqual(len(list(units.iterdir())), 1)
+        self.assertIn(
+            "work\t", (Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/farms.tsv").read_text()
+        )
+
+    def test_masks_preflight_preserves_every_unit_and_choice(self):
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        units.mkdir(parents=True)
+        state.mkdir(parents=True)
+        names = ("codex-autosave.service", "codex-autosave.timer", "codex-autorestore.service")
+        for name in names:
+            (units / name).write_text("operator " + name)
+        (state / "autoservice_choice").write_text("no\n")
+        (state / "conversation_backup_choice").write_text("no\n")
+        make_executable(self.tmpdir / "systemctl", "#!/bin/sh\nexit 0\n")
+        for mask_kind in ("local", "masked-runtime", "masked"):
+            for name in names:
+                with self.subTest(mask_kind=mask_kind, name=name):
+                    path = units / name
+                    if mask_kind == "local":
+                        path.unlink()
+                        path.symlink_to("/dev/null")
+                    else:
+                        make_executable(
+                            self.tmpdir / "systemctl",
+                            '#!/bin/sh\ncase "$*" in *"'
+                            + name
+                            + '"*) printf "'
+                            + mask_kind
+                            + '\n" ;; esac\nexit 0\n',
+                        )
+                    result = self.run_install("--with-conversation-backups")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(name, result.stderr)
+                    self.assertIn("masked", result.stderr.lower())
+                    for other in names:
+                        if mask_kind == "local" and other == name:
+                            self.assertEqual(os.readlink(units / other), "/dev/null")
+                        else:
+                            self.assertEqual((units / other).read_text(), "operator " + other)
+                    self.assertEqual((state / "autoservice_choice").read_text(), "no\n")
+                    self.assertEqual((state / "conversation_backup_choice").read_text(), "no\n")
+                    self.assertFalse(
+                        (Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/farms.tsv").exists()
+                    )
+                    if mask_kind == "local":
+                        path.unlink()
+                        path.write_text("operator " + name)
+
+    def test_offline_manager_cannot_override_runtime_or_global_masks(self):
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        units.mkdir(parents=True)
+        state.mkdir(parents=True)
+        runtime = self.tmpdir / "runtime"
+        global_config = self.tmpdir / "global-config"
+        self.env["XDG_RUNTIME_DIR"] = str(runtime)
+        self.env["XDG_CONFIG_DIRS"] = str(global_config)
+        make_executable(self.tmpdir / "systemctl", "#!/bin/sh\nexit 1\n")
+        names = ("codex-autosave.service", "codex-autosave.timer", "codex-autorestore.service")
+        for root in (runtime, global_config):
+            mask_dir = root / "systemd/user"
+            mask_dir.mkdir(parents=True)
+            for name in names:
+                with self.subTest(root=root, name=name):
+                    for other in names:
+                        (units / other).write_text("operator " + other)
+                    (state / "autoservice_choice").write_text("no\n")
+                    (state / "conversation_backup_choice").write_text("no\n")
+                    mask = mask_dir / name
+                    mask.symlink_to("/dev/null")
+                    try:
+                        result = self.run_install("--with-conversation-backups")
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(name, result.stderr)
+                        self.assertIn("masked", result.stderr.lower())
+                        self.assertEqual(os.readlink(mask), "/dev/null")
+                        for other in names:
+                            self.assertEqual((units / other).read_text(), "operator " + other)
+                        self.assertEqual((state / "autoservice_choice").read_text(), "no\n")
+                        self.assertEqual((state / "conversation_backup_choice").read_text(), "no\n")
+                    finally:
+                        mask.unlink()
+
+    def test_offline_empty_and_resolved_null_masks_preserve_all_service_state(self):
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/farms.tsv"
+        units.mkdir(parents=True)
+        state.mkdir(parents=True)
+        registry.parent.mkdir(parents=True)
+        runtime = self.tmpdir / "runtime"
+        global_config = self.tmpdir / "global-config"
+        self.env["XDG_RUNTIME_DIR"] = str(runtime)
+        self.env["XDG_CONFIG_DIRS"] = str(global_config)
+        make_executable(self.tmpdir / "systemctl", "#!/bin/sh\nexit 1\n")
+        names = ("codex-autosave.service", "codex-autosave.timer", "codex-autorestore.service")
+        registry_bytes = b"session\tmanifest\nsaved-farm\t/private/saved.tsv\n"
+        for mask_dir in (units, runtime / "systemd/user", global_config / "systemd/user"):
+            mask_dir.mkdir(parents=True, exist_ok=True)
+            for mask_kind in ("empty", "nonliteral", "chained"):
+                for name in names:
+                    for registry_exists in (False, True):
+                        with self.subTest(
+                            directory=mask_dir,
+                            mask_kind=mask_kind,
+                            name=name,
+                            registry_exists=registry_exists,
+                        ):
+                            for other in names:
+                                local = units / other
+                                local.unlink(missing_ok=True)
+                                local.write_text("operator " + other)
+                            for choice in ("autoservice_choice", "conversation_backup_choice"):
+                                (state / choice).write_text("no\n")
+                            if registry_exists:
+                                registry.write_bytes(registry_bytes)
+                            else:
+                                registry.unlink(missing_ok=True)
+                            mask = mask_dir / name
+                            mask.unlink(missing_ok=True)
+                            alias = mask_dir / "null-alias"
+                            if mask_kind == "empty":
+                                mask.write_bytes(b"")
+                            elif mask_kind == "nonliteral":
+                                mask.symlink_to("/dev/../dev/null")
+                            else:
+                                alias.symlink_to("/dev/null")
+                                mask.symlink_to("null-alias")
+                            try:
+                                result = self.run_install("--with-conversation-backups")
+                                self.assertNotEqual(result.returncode, 0)
+                                if mask_kind == "empty":
+                                    self.assertFalse(mask.is_symlink())
+                                    self.assertEqual(mask.stat().st_size, 0)
+                                else:
+                                    expected = (
+                                        "/dev/../dev/null"
+                                        if mask_kind == "nonliteral"
+                                        else "null-alias"
+                                    )
+                                    self.assertEqual(os.readlink(mask), expected)
+                                    self.assertTrue(os.path.samefile(mask, "/dev/null"))
+                                    if mask_kind == "chained":
+                                        self.assertEqual(os.readlink(alias), "/dev/null")
+                                for other in names:
+                                    if mask_dir == units and other == name:
+                                        continue
+                                    self.assertEqual(
+                                        (units / other).read_text(), "operator " + other
+                                    )
+                                if registry_exists:
+                                    self.assertEqual(registry.read_bytes(), registry_bytes)
+                                else:
+                                    self.assertFalse(registry.exists())
+                                for choice in ("autoservice_choice", "conversation_backup_choice"):
+                                    self.assertEqual((state / choice).read_text(), "no\n")
+                                self.assertIn(name, result.stderr)
+                                self.assertIn("masked", result.stderr.lower())
+                            finally:
+                                mask.unlink(missing_ok=True)
+                                alias.unlink(missing_ok=True)
+
+    def test_offline_masks_cover_analyzer_and_portable_user_unit_paths(self):
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/farms.tsv"
+        units.mkdir(parents=True)
+        state.mkdir(parents=True)
+        registry.parent.mkdir(parents=True)
+        runtime = self.tmpdir / "runtime"
+        data_home = self.tmpdir / "data-home"
+        data_dirs = [self.tmpdir / "data-one", self.tmpdir / "data-two"]
+        vendor = self.tmpdir / "compiled-vendor-unit-path"
+        self.env["XDG_RUNTIME_DIR"] = str(runtime)
+        self.env["XDG_DATA_HOME"] = str(data_home)
+        self.env["XDG_DATA_DIRS"] = ":".join(map(str, data_dirs))
+        manager_log = self.tmpdir / "manager.log"
+        make_executable(
+            self.tmpdir / "systemctl",
+            '#!/bin/sh\nprintf "%s\n" "$*" >> "' + str(manager_log) + '"\nexit 1\n',
+        )
+        sparse = self.tmpdir / "no-analyzer-bin"
+        sparse.mkdir()
+        for command in (
+            "bash",
+            "basename",
+            "tr",
+            "dirname",
+            "mkdir",
+            "cat",
+            "id",
+            "mktemp",
+            "chmod",
+            "awk",
+            "mv",
+            "rm",
+        ):
+            (sparse / command).symlink_to(shutil.which(command))
+        (sparse / "systemctl").symlink_to(self.tmpdir / "systemctl")
+        names = ("codex-autosave.service", "codex-autosave.timer", "codex-autorestore.service")
+        paths = [
+            data_home / "systemd/user",
+            *(root / "systemd/user" for root in data_dirs),
+            Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user.control",
+            *(
+                runtime / "systemd" / part
+                for part in (
+                    "user.control",
+                    "transient",
+                    "generator.early",
+                    "generator",
+                    "generator.late",
+                )
+            ),
+        ]
+        original_path = self.env["PATH"]
+        for analyzer in (True, False):
+            self.env["PATH"] = original_path if analyzer else str(sparse)
+            for mask_dir in paths + ([vendor] if analyzer else []):
+                mask_dir.mkdir(parents=True, exist_ok=True)
+                self.env["SYSTEMD_TEST_UNIT_PATHS"] = str(mask_dir)
+                make_executable(
+                    self.tmpdir / "systemd-analyze",
+                    '#!/bin/sh\nprintf "%s\n" "$SYSTEMD_TEST_UNIT_PATHS"\n',
+                )
+                for name in names:
+                    with self.subTest(analyzer=analyzer, mask_dir=mask_dir, name=name):
+                        for other in names:
+                            (units / other).write_text("operator " + other)
+                        for choice in ("autoservice_choice", "conversation_backup_choice"):
+                            (state / choice).write_text("no\n")
+                        registry.write_text("session\tmanifest\nold\t/private/old.tsv\n")
+                        baseline_registry = registry.read_bytes()
+                        mask = mask_dir / name
+                        mask.symlink_to("/dev/null")
+                        try:
+                            result = self.run_install("--with-conversation-backups")
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertEqual(os.readlink(mask), "/dev/null")
+                            for other in names:
+                                self.assertEqual((units / other).read_text(), "operator " + other)
+                            self.assertEqual(registry.read_bytes(), baseline_registry)
+                            for choice in ("autoservice_choice", "conversation_backup_choice"):
+                                self.assertEqual((state / choice).read_text(), "no\n")
+                            self.assertIn(name, result.stderr)
+                            self.assertIn("masked", result.stderr.lower())
+                        finally:
+                            mask.unlink()
+        self.assertFalse(
+            any(
+                part in manager_log.read_text() for part in ("daemon-reload", " enable ", " start ")
+            )
+        )
+
+    def test_offline_masks_honor_systemd_unit_path_without_analyzer(self):
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        units.mkdir(parents=True)
+        override = self.tmpdir / "override"
+        override.mkdir()
+        self.env["SYSTEMD_UNIT_PATH"] = str(override)
+        make_executable(self.tmpdir / "systemd-analyze", "#!/bin/sh\nexit 127\n")
+        make_executable(self.tmpdir / "systemctl", "#!/bin/sh\nexit 1\n")
+        for name in ("codex-autosave.service", "codex-autosave.timer", "codex-autorestore.service"):
+            mask = override / name
+            mask.symlink_to("/dev/null")
+            try:
+                result = self.run_install()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(name, result.stderr)
+                self.assertIn("masked", result.stderr.lower())
+                self.assertFalse((units / "codex-autosave.service").exists())
+            finally:
+                mask.unlink()
+
+    def test_autoservice_write_failures_refuse_before_activation(self):
+        config = Path(self.env["XDG_CONFIG_HOME"])
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        targets = [
+            config / "codexfarm/farms.tsv",
+            config / "systemd/user",
+            *(
+                config / "systemd/user" / name
+                for name in (
+                    "codex-autosave.service",
+                    "codex-autosave.timer",
+                    "codex-autorestore.service",
+                )
+            ),
+            state / "conversation_backup_choice",
+            state / "autoservice_choice",
+        ]
+        manager_log = self.tmpdir / "manager-writes.log"
+        make_executable(
+            self.tmpdir / "systemctl",
+            '#!/bin/sh\nprintf "%s\n" "$*" >> "' + str(manager_log) + '"\nexit 0\n',
+        )
+        for target in targets:
+            with self.subTest(target=target):
+                shutil.rmtree(config, ignore_errors=True)
+                shutil.rmtree(state, ignore_errors=True)
+                state.mkdir(parents=True)
+                (state / "autoservice_choice").write_text("no\n")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.unlink(missing_ok=True)
+                if target.name == "user":
+                    target.write_text("blocked directory\n")
+                else:
+                    target.mkdir()
+                manager_log.unlink(missing_ok=True)
+                try:
+                    result = self.run_install("--with-conversation-backups")
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("warning", result.stderr.lower())
+                    calls = manager_log.read_text() if manager_log.exists() else ""
+                    self.assertFalse(
+                        any(part in calls for part in ("daemon-reload", " enable ", " start ")),
+                        calls,
+                    )
+                    choice = state / "autoservice_choice"
+                    if choice.is_dir():
+                        self.assertTrue(choice.is_dir())
+                    else:
+                        self.assertEqual(choice.read_text(), "no\n")
+                finally:
+                    if target.is_dir():
+                        target.chmod(0o700)
+
     def test_autoservice_install_reports_inactive_user_manager(self):
         make_executable(self.tmpdir / "systemctl", "#!/usr/bin/env bash\nexit 1\n")
         result = subprocess.run(
@@ -2295,12 +2698,180 @@ esac
             "restore should launch the resume command instead of typing it into a running CLI",
         )
 
+    def test_restore_defaults_to_warning_even_before_force_deletion(self):
+        (Path(self.env["CODEX_PROC_ROOT"]) / "meminfo").write_text(
+            "MemTotal: 8000000 kB\nMemAvailable: 100000 kB\n"
+        )
+        self.env["TMUX_WINDOWS_OUTPUT"] = "@1\tproj"
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--force", str(self.manifest)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Memory critical", result.stdout + result.stderr)
+        self.assertTrue(any(cmd[0] == "kill-window" for cmd in self.read_tmux_commands()))
+        self.assertTrue(self.codex_add_log.exists())
+
+    def test_empty_explicit_memory_policy_is_invalid_before_mutation(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+            env={**self.env, "CODEXFARM_RESTORE_MEMORY_POLICY": ""},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(self.tmux_log.exists())
+
+    def test_memory_policy_invalid_before_mutation_and_cli_overrides_environment(self):
+        self.env["CODEXFARM_RESTORE_MEMORY_POLICY"] = "invalid"
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(self.tmux_log.exists())
+        for flag in ("--enforce-memory-pressure", "--ignore-memory-pressure"):
+            Path(self.env["TMUX_STATE_FILE"]).unlink(missing_ok=True)
+            result = subprocess.run(
+                [REPO_ROOT / "bin/codex-restore", flag, str(self.manifest)],
+                env=self.env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_or_broken_memory_helper_warns_and_enforcement_refuses(self):
+        helper = self.tmpdir / "health-helper"
+        for broken in (False, True):
+            if broken:
+                make_executable(helper, "#!/bin/sh\nexit 17\n")
+            for policy, code in (("warn", 0), ("enforce", 3), ("ignore", 0)):
+                with self.subTest(broken=broken, policy=policy):
+                    self.tmux_log.unlink(missing_ok=True)
+                    self.codex_add_log.unlink(missing_ok=True)
+                    Path(self.env["TMUX_STATE_FILE"]).unlink(missing_ok=True)
+                    result = subprocess.run(
+                        [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+                        env={
+                            **self.env,
+                            "CODEX_HEALTH_BIN": str(helper),
+                            "CODEXFARM_RESTORE_MEMORY_POLICY": policy,
+                        },
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, code, result.stderr)
+                    if policy == "enforce":
+                        self.assertFalse(self.tmux_log.exists())
+                    elif policy == "warn":
+                        self.assertIn("warning", result.stderr.lower())
+
+    def test_registered_restore_propagates_cli_policy_over_invalid_environment(self):
+        registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/farms.tsv"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(f"session\tmanifest\nwork\t{self.manifest}\n")
+        (Path(self.env["CODEX_PROC_ROOT"]) / "meminfo").write_text(
+            "MemTotal: 8000000 kB\nMemAvailable: 100000 kB\n"
+        )
+        for flag, launches in (
+            ("--enforce-memory-pressure", False),
+            ("--ignore-memory-pressure", True),
+        ):
+            with self.subTest(flag=flag):
+                self.tmux_log.unlink(missing_ok=True)
+                self.codex_add_log.unlink(missing_ok=True)
+                Path(self.env["TMUX_STATE_FILE"]).unlink(missing_ok=True)
+                result = subprocess.run(
+                    [REPO_ROOT / "bin/codex-restore", "--all-registered", flag],
+                    env={**self.env, "CODEXFARM_RESTORE_MEMORY_POLICY": "invalid"},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode == 0, launches, result.stderr)
+                self.assertEqual(self.codex_add_log.exists(), launches)
+                if not launches:
+                    self.assertFalse(self.tmux_log.exists())
+        self.codex_add_log.unlink(missing_ok=True)
+        Path(self.env["TMUX_STATE_FILE"]).unlink(missing_ok=True)
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--all-registered"],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.codex_add_log.exists())
+        self.assertIn("Memory critical", result.stdout)
+
+    def test_provider_restore_wrappers_obey_advisory_enforce_and_ignore(self):
+        session_id = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"
+        (Path(self.env["CODEX_PROC_ROOT"]) / "meminfo").write_text(
+            "MemTotal: 8000000 kB\nMemAvailable: 100000 kB\n"
+        )
+        for provider in ("claude", "gemini"):
+            self.manifest.write_text(
+                f"name\tdir\tcmd\targs\nproj\t{self.project_dir}\t{provider}\t--resume {session_id}\n"
+            )
+            for flags, expected in (
+                ((), 0),
+                (("--enforce-memory-pressure",), 3),
+                (("--ignore-memory-pressure",), 0),
+            ):
+                with self.subTest(provider=provider, flags=flags):
+                    self.tmux_log.unlink(missing_ok=True)
+                    self.codex_add_log.unlink(missing_ok=True)
+                    Path(self.env["TMUX_STATE_FILE"]).unlink(missing_ok=True)
+                    result = subprocess.run(
+                        [REPO_ROOT / "bin" / f"{provider}-restore", *flags, str(self.manifest)],
+                        env=self.env,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    if expected:
+                        self.assertFalse(self.tmux_log.exists())
+                    else:
+                        self.assertIn(
+                            f"|{provider}|--resume {session_id}|", self.codex_add_log.read_text()
+                        )
+
+    def test_restore_ignore_skips_helper_and_enforce_passes_enforcement_flag(self):
+        helper = self.tmpdir / "health-helper"
+        log = self.tmpdir / "health-args"
+        make_executable(helper, '#!/bin/sh\nprintf "%s\n" "$*" >> "' + str(log) + '"\n')
+        self.env["CODEX_HEALTH_BIN"] = str(helper)
+        for policy in ("ignore", "enforce"):
+            Path(self.env["TMUX_STATE_FILE"]).unlink(missing_ok=True)
+            result = subprocess.run(
+                [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+                env={**self.env, "CODEXFARM_RESTORE_MEMORY_POLICY": policy},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            if policy == "ignore":
+                self.assertFalse(log.exists())
+            else:
+                self.assertTrue(log.exists())
+                self.assertEqual(
+                    set(log.read_text().splitlines()), {"--restore-check --enforce-memory-pressure"}
+                )
+
     def test_restore_critical_memory_stops_before_force_deletes_or_launches(self):
         (Path(self.env["CODEX_PROC_ROOT"]) / "meminfo").write_text(
             "MemTotal: 8000000 kB\nMemAvailable: 100000 kB\n"
         )
         result = subprocess.run(
-            [REPO_ROOT / "bin/codex-restore", "--force", str(self.manifest)],
+            [
+                REPO_ROOT / "bin/codex-restore",
+                "--enforce-memory-pressure",
+                "--force",
+                str(self.manifest),
+            ],
             env=self.env,
             capture_output=True,
             text=True,
@@ -2320,7 +2891,7 @@ esac
             )
         )
         result = subprocess.run(
-            [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+            [REPO_ROOT / "bin/codex-restore", "--enforce-memory-pressure", str(self.manifest)],
             env=self.env,
             capture_output=True,
             text=True,

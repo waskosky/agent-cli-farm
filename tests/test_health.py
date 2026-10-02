@@ -27,6 +27,51 @@ class HealthTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.addCleanup(self.temporary.cleanup)
 
+    def test_restore_check_is_advisory_unless_enforced(self):
+        for memory in (Memory(8000, 400, 0), None):
+            for enforce in (False, True):
+                with (
+                    self.subTest(memory=memory, enforce=enforce),
+                    patch(
+                        "sys.argv",
+                        ["codex-health", "--restore-check"]
+                        + (["--enforce-memory-pressure"] if enforce else []),
+                    ),
+                    patch("codex_looper.health.read_memory", return_value=memory),
+                ):
+                    self.assertEqual(main(), 3 if enforce and memory else 0)
+
+    def test_enforce_memory_requires_restore_check(self):
+        with patch("sys.argv", ["codex-health", "--enforce-memory-pressure"]):
+            with self.assertRaises(SystemExit) as result:
+                main()
+            self.assertEqual(result.exception.code, 2)
+
+    def test_explicit_disabled_archive_choices_override_stale_watcher(self):
+        self.prepare_backup()
+        (self.root / "backup-watch.json").write_text('{"archive_enabled": true}')
+        with patch.dict(os.environ, {"CODEXFARM_BACKUP_HEALTH_ENABLED": "0"}):
+            for name in ("autoservice_choice", "conversation_backup_choice"):
+                choice = self.root / name
+                choice.write_text("no\n")
+                self.assertFalse(backups_expected(self.root))
+                self.assertEqual(
+                    backup_issues(self.root, 18000, expected=backups_expected(self.root)), []
+                )
+                with patch.dict(os.environ, {"CODEXFARM_BACKUP_HEALTH_ENABLED": "1"}):
+                    self.assertTrue(backups_expected(self.root))
+                choice.unlink()
+        self.assertTrue((self.root / "backup-status.json").exists())
+        self.assertTrue((self.root / "backup-watch.json").exists())
+
+    def test_scheduled_archives_need_separate_consent(self):
+        with patch.dict(os.environ, {"CODEXFARM_BACKUP_HEALTH_ENABLED": "0"}):
+            (self.root / "autoservice_choice").write_text("yes\n")
+            self.assertFalse(backups_expected(self.root))
+            (self.root / "conversation_backup_choice").write_text("yes\n")
+            self.assertTrue(backups_expected(self.root))
+            self.assertTrue(backup_issues(self.root, 10000, expected=backups_expected(self.root)))
+
     def test_available_memory_and_pressure_drive_alerts_not_old_swap(self):
         (self.root / "meminfo").write_text(
             "MemTotal: 8192000 kB\nMemAvailable: 4096000 kB\n"

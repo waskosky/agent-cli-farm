@@ -262,7 +262,9 @@ check_runtime() {
     info "tmux session $SESSION is not currently running"
   fi
 
-  if command -v systemctl >/dev/null 2>&1 \
+  if [ -f "$STATE_DIR/autoservice_choice" ] && [ "$(cat "$STATE_DIR/autoservice_choice")" = no ]; then
+    info "codex autosave service is deliberately disabled (optional)"
+  elif command -v systemctl >/dev/null 2>&1 \
     && systemctl --user is-enabled --quiet codex-autosave.timer >/dev/null 2>&1; then
     if systemctl --user is-active --quiet codex-autosave.timer >/dev/null 2>&1; then
       ok "codex autosave timer is enabled and active"
