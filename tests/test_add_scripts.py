@@ -1206,6 +1206,171 @@ exit 0
                                 mask.unlink(missing_ok=True)
                                 alias.unlink(missing_ok=True)
 
+    def test_offline_masks_cover_analyzer_and_portable_user_unit_paths(self):
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/farms.tsv"
+        units.mkdir(parents=True)
+        state.mkdir(parents=True)
+        registry.parent.mkdir(parents=True)
+        runtime = self.tmpdir / "runtime"
+        data_home = self.tmpdir / "data-home"
+        data_dirs = [self.tmpdir / "data-one", self.tmpdir / "data-two"]
+        vendor = self.tmpdir / "compiled-vendor-unit-path"
+        self.env["XDG_RUNTIME_DIR"] = str(runtime)
+        self.env["XDG_DATA_HOME"] = str(data_home)
+        self.env["XDG_DATA_DIRS"] = ":".join(map(str, data_dirs))
+        manager_log = self.tmpdir / "manager.log"
+        make_executable(
+            self.tmpdir / "systemctl",
+            '#!/bin/sh\nprintf "%s\n" "$*" >> "' + str(manager_log) + '"\nexit 1\n',
+        )
+        sparse = self.tmpdir / "no-analyzer-bin"
+        sparse.mkdir()
+        for command in (
+            "bash",
+            "basename",
+            "tr",
+            "dirname",
+            "mkdir",
+            "cat",
+            "id",
+            "mktemp",
+            "chmod",
+            "awk",
+            "mv",
+            "rm",
+        ):
+            (sparse / command).symlink_to(shutil.which(command))
+        (sparse / "systemctl").symlink_to(self.tmpdir / "systemctl")
+        names = ("codex-autosave.service", "codex-autosave.timer", "codex-autorestore.service")
+        paths = [
+            data_home / "systemd/user",
+            *(root / "systemd/user" for root in data_dirs),
+            Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user.control",
+            *(
+                runtime / "systemd" / part
+                for part in (
+                    "user.control",
+                    "transient",
+                    "generator.early",
+                    "generator",
+                    "generator.late",
+                )
+            ),
+        ]
+        original_path = self.env["PATH"]
+        for analyzer in (True, False):
+            self.env["PATH"] = original_path if analyzer else str(sparse)
+            for mask_dir in paths + ([vendor] if analyzer else []):
+                mask_dir.mkdir(parents=True, exist_ok=True)
+                self.env["SYSTEMD_TEST_UNIT_PATHS"] = str(mask_dir)
+                make_executable(
+                    self.tmpdir / "systemd-analyze",
+                    '#!/bin/sh\nprintf "%s\n" "$SYSTEMD_TEST_UNIT_PATHS"\n',
+                )
+                for name in names:
+                    with self.subTest(analyzer=analyzer, mask_dir=mask_dir, name=name):
+                        for other in names:
+                            (units / other).write_text("operator " + other)
+                        for choice in ("autoservice_choice", "conversation_backup_choice"):
+                            (state / choice).write_text("no\n")
+                        registry.write_text("session\tmanifest\nold\t/private/old.tsv\n")
+                        baseline_registry = registry.read_bytes()
+                        mask = mask_dir / name
+                        mask.symlink_to("/dev/null")
+                        try:
+                            result = self.run_install("--with-conversation-backups")
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertEqual(os.readlink(mask), "/dev/null")
+                            for other in names:
+                                self.assertEqual((units / other).read_text(), "operator " + other)
+                            self.assertEqual(registry.read_bytes(), baseline_registry)
+                            for choice in ("autoservice_choice", "conversation_backup_choice"):
+                                self.assertEqual((state / choice).read_text(), "no\n")
+                            self.assertIn(name, result.stderr)
+                            self.assertIn("masked", result.stderr.lower())
+                        finally:
+                            mask.unlink()
+        self.assertFalse(
+            any(
+                part in manager_log.read_text() for part in ("daemon-reload", " enable ", " start ")
+            )
+        )
+
+    def test_offline_masks_honor_systemd_unit_path_without_analyzer(self):
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        units.mkdir(parents=True)
+        override = self.tmpdir / "override"
+        override.mkdir()
+        self.env["SYSTEMD_UNIT_PATH"] = str(override)
+        make_executable(self.tmpdir / "systemd-analyze", "#!/bin/sh\nexit 127\n")
+        make_executable(self.tmpdir / "systemctl", "#!/bin/sh\nexit 1\n")
+        for name in ("codex-autosave.service", "codex-autosave.timer", "codex-autorestore.service"):
+            mask = override / name
+            mask.symlink_to("/dev/null")
+            try:
+                result = self.run_install()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(name, result.stderr)
+                self.assertIn("masked", result.stderr.lower())
+                self.assertFalse((units / "codex-autosave.service").exists())
+            finally:
+                mask.unlink()
+
+    def test_autoservice_write_failures_refuse_before_activation(self):
+        config = Path(self.env["XDG_CONFIG_HOME"])
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        targets = [
+            config / "codexfarm/farms.tsv",
+            config / "systemd/user",
+            *(
+                config / "systemd/user" / name
+                for name in (
+                    "codex-autosave.service",
+                    "codex-autosave.timer",
+                    "codex-autorestore.service",
+                )
+            ),
+            state / "conversation_backup_choice",
+            state / "autoservice_choice",
+        ]
+        manager_log = self.tmpdir / "manager-writes.log"
+        make_executable(
+            self.tmpdir / "systemctl",
+            '#!/bin/sh\nprintf "%s\n" "$*" >> "' + str(manager_log) + '"\nexit 0\n',
+        )
+        for target in targets:
+            with self.subTest(target=target):
+                shutil.rmtree(config, ignore_errors=True)
+                shutil.rmtree(state, ignore_errors=True)
+                state.mkdir(parents=True)
+                (state / "autoservice_choice").write_text("no\n")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.unlink(missing_ok=True)
+                if target.name == "user":
+                    target.write_text("blocked directory\n")
+                else:
+                    target.mkdir()
+                manager_log.unlink(missing_ok=True)
+                try:
+                    result = self.run_install("--with-conversation-backups")
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("warning", result.stderr.lower())
+                    calls = manager_log.read_text() if manager_log.exists() else ""
+                    self.assertFalse(
+                        any(part in calls for part in ("daemon-reload", " enable ", " start ")),
+                        calls,
+                    )
+                    choice = state / "autoservice_choice"
+                    if choice.is_dir():
+                        self.assertTrue(choice.is_dir())
+                    else:
+                        self.assertEqual(choice.read_text(), "no\n")
+                finally:
+                    if target.is_dir():
+                        target.chmod(0o700)
+
     def test_autoservice_install_reports_inactive_user_manager(self):
         make_executable(self.tmpdir / "systemctl", "#!/usr/bin/env bash\nexit 1\n")
         result = subprocess.run(

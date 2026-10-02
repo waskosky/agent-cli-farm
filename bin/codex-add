@@ -101,21 +101,25 @@ register_managed_session() {
 
 register_autoservice_farm() {
   local manifest tmp registry_dir
-  manifest="$(default_manifest_path_for_session "$SESSION")"
-  mkdir -p "$CONFIG_DIR" "$(dirname "$manifest")"
+  if [ -d "$AUTOSERVICE_REGISTRY" ]; then
+    echo "Unable to register farm: $AUTOSERVICE_REGISTRY is a directory." >&2
+    return 1
+  fi
+  manifest="$(default_manifest_path_for_session "$SESSION")" || return 1
+  mkdir -p "$CONFIG_DIR" "$(dirname "$manifest")" || return 1
   registry_dir="$(dirname "$AUTOSERVICE_REGISTRY")"
-  mkdir -p "$registry_dir"
-  tmp="$(mktemp "$registry_dir/.farms.tsv.XXXXXX")"
-  chmod 600 "$tmp" 2>/dev/null || true
-  printf 'session\tmanifest\n' > "$tmp"
+  mkdir -p "$registry_dir" || return 1
+  tmp="$(mktemp "$registry_dir/.farms.tsv.XXXXXX")" || return 1
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  printf 'session\tmanifest\n' > "$tmp" || { rm -f "$tmp"; return 1; }
   if [ -f "$AUTOSERVICE_REGISTRY" ]; then
     awk -F '\t' -v session="$SESSION" \
       'NF && $1 != "session" && $1 != session { print }' \
-      "$AUTOSERVICE_REGISTRY" >> "$tmp"
+      "$AUTOSERVICE_REGISTRY" >> "$tmp" || { rm -f "$tmp"; return 1; }
   fi
-  printf '%s\t%s\n' "$SESSION" "$manifest" >> "$tmp"
-  mv "$tmp" "$AUTOSERVICE_REGISTRY"
-  chmod 600 "$AUTOSERVICE_REGISTRY" 2>/dev/null || true
+  printf '%s\t%s\n' "$SESSION" "$manifest" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$AUTOSERVICE_REGISTRY" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$AUTOSERVICE_REGISTRY" || return 1
 }
 
 valid_session_name() {
@@ -423,14 +427,38 @@ show_tmux_tips() {
 }
 
 precheck_autoservice_masks() {
-  local unit manager_state line dir
-  local mask_dirs=("$SYSTEMD_DIR" "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/user"
-    /etc/systemd/user /run/systemd/user /usr/local/lib/systemd/user /usr/lib/systemd/user)
-  local config_dirs=()
-  IFS=: read -r -a config_dirs <<< "${XDG_CONFIG_DIRS:-/etc/xdg}"
-  for dir in "${config_dirs[@]}"; do
-    if [ -n "$dir" ]; then mask_dirs+=("$dir/systemd/user"); fi
-  done
+  local unit manager_state line dir unit_paths runtime_dir use_defaults
+  local mask_dirs=("$SYSTEMD_DIR")
+  local extra_dirs=()
+  # The analyzer reports compiled and environment-specific paths without a user bus.
+  if command -v systemd-analyze >/dev/null 2>&1 \
+    && unit_paths=$(systemd-analyze --user unit-paths 2>/dev/null) && [ -n "$unit_paths" ]; then
+    while IFS= read -r dir; do
+      [ -z "$dir" ] || mask_dirs+=("$dir")
+    done <<< "$unit_paths"
+  else
+    use_defaults=1
+    if [ -n "${SYSTEMD_UNIT_PATH:-}" ]; then
+      IFS=: read -r -a extra_dirs <<< "$SYSTEMD_UNIT_PATH"
+      for dir in "${extra_dirs[@]}"; do
+        [ -z "$dir" ] || mask_dirs+=("$dir")
+      done
+      case "$SYSTEMD_UNIT_PATH" in *:) ;; *) use_defaults=0 ;; esac
+    fi
+    if [ "$use_defaults" -eq 1 ]; then
+      runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+      mask_dirs+=("$CONFIG_HOME/systemd/user.control"
+        "$runtime_dir/systemd/user.control" "$runtime_dir/systemd/transient"
+        "$runtime_dir/systemd/generator.early" /etc/systemd/user
+        "$runtime_dir/systemd/user" /run/systemd/user "$runtime_dir/systemd/generator"
+        "$DATA_HOME/systemd/user" /usr/local/lib/systemd/user /usr/lib/systemd/user
+        /lib/systemd/user "$runtime_dir/systemd/generator.late")
+      IFS=: read -r -a extra_dirs <<< "${XDG_CONFIG_DIRS:-/etc/xdg}:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+      for dir in "${extra_dirs[@]}"; do
+        [ -z "$dir" ] || mask_dirs+=("$dir/systemd/user")
+      done
+    fi
+  fi
   for unit in codex-autosave.service codex-autosave.timer codex-autorestore.service; do
     # Inherited filesystem masks must survive even when the user bus is unavailable.
     for dir in "${mask_dirs[@]}"; do
@@ -459,15 +487,15 @@ install_autoservice_units() {
   local backup_choice="$conversation_backup_flag"
   local save_command="$SAVE_BIN --all-registered"
   if [ -z "$backup_choice" ] && [ -f "$CONVERSATION_BACKUP_CHOICE_FILE" ]; then
-    backup_choice=$(cat "$CONVERSATION_BACKUP_CHOICE_FILE")
+    backup_choice=$(cat "$CONVERSATION_BACKUP_CHOICE_FILE") || return 1
   fi
   [ "$backup_choice" = yes ] || backup_choice=no
   if [ "$backup_choice" = yes ]; then
     save_command="$BACKUP_BIN --archive --min-age 3600"
   fi
-  register_autoservice_farm
-  mkdir -p "$SYSTEMD_DIR"
-  cat > "$SYSTEMD_DIR/codex-autosave.service" <<EOF
+  register_autoservice_farm || return 1
+  mkdir -p "$SYSTEMD_DIR" || return 1
+  cat > "$SYSTEMD_DIR/codex-autosave.service" <<EOF || return 1
 [Unit]
 Description=Codex autosave tmux windows
 After=tmux.service codex-autorestore.service
@@ -488,7 +516,7 @@ TimeoutStartSec=3min
 WantedBy=default.target
 EOF
 
-  cat > "$SYSTEMD_DIR/codex-autosave.timer" <<EOF
+  cat > "$SYSTEMD_DIR/codex-autosave.timer" <<EOF || return 1
 [Unit]
 Description=Save farm recovery data every five minutes
 
@@ -501,7 +529,7 @@ Unit=codex-autosave.service
 WantedBy=timers.target
 EOF
 
-  cat > "$SYSTEMD_DIR/codex-autorestore.service" <<EOF
+  cat > "$SYSTEMD_DIR/codex-autorestore.service" <<EOF || return 1
 [Unit]
 Description=Codex autorestore tmux session on login
 
@@ -515,7 +543,8 @@ ExecStart=$RESTORE_BIN --all-registered
 WantedBy=default.target
 EOF
 
-  printf '%s\n' "$backup_choice" > "$CONVERSATION_BACKUP_CHOICE_FILE"
+  printf '%s\n' "$backup_choice" > "$CONVERSATION_BACKUP_CHOICE_FILE" || return 1
+  printf '%s\n' yes > "$AUTOSERVICE_CHOICE_FILE" || return 1
   if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
     "$SYSTEMCTL_BIN" --user daemon-reload >/dev/null 2>&1 || return 1
     "$SYSTEMCTL_BIN" --user enable codex-autosave.timer codex-autorestore.service >/dev/null 2>&1 || return 1
@@ -528,11 +557,11 @@ EOF
 }
 
 maybe_prompt_autoservice() {
-  mkdir -p "$STATE_DIR"
+  mkdir -p "$STATE_DIR" || return 1
   local choice=""
   local from_file=0
   if [ -f "$AUTOSERVICE_CHOICE_FILE" ]; then
-    choice=$(cat "$AUTOSERVICE_CHOICE_FILE")
+    choice=$(cat "$AUTOSERVICE_CHOICE_FILE") || return 1
     from_file=1
   fi
 
@@ -581,13 +610,12 @@ maybe_prompt_autoservice() {
         fi
         return 0
       fi
-      echo "yes" > "$AUTOSERVICE_CHOICE_FILE"
       ;;
     *)
       if [ "$install_autoservice_only" -eq 1 ]; then
         echo "Autoservice installation aborted."
       elif [ "$from_file" -eq 0 ]; then
-        echo "$choice" > "$AUTOSERVICE_CHOICE_FILE"
+        echo "$choice" > "$AUTOSERVICE_CHOICE_FILE" || return 1
         echo "You can enable later with: codex-add --install-autoservice" >&2
       fi
       ;;

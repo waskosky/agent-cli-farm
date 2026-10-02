@@ -452,7 +452,9 @@ global masks before writing any units or choices, including filesystem masks
 when the user service manager is unavailable. A masked unit causes a refusal
 that names it and preserves all units, masks, registry, and choices; the helper
 never unmasks services. Installation also reports failure if the user service
-manager or timer cannot be activated. Units preserve the installation PATH so
+manager or timer cannot be activated. Activation failure retains the requested
+unit definitions and choices; retry with an explicit `--install-autoservice`
+refresh, since ordinary launches do not retry activation. Units preserve the installation PATH so
 Node/NVM commands remain available outside an interactive shell. Older units
 that call `codex-backup --min-age 3600` become manifest-only after updating the
 helper; refresh the units explicitly to select the current save command.
