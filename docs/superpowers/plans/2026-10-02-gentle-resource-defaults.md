@@ -35,7 +35,7 @@ the following paths; the controller owns this plan and incident design.
 - Modify: `README.md`, `AGENTS.md` — defaults, migration, resource boundaries.
 - Test: `tests/test_add_scripts.py`, `tests/test_health.py`, `tests/test_codex_annotator.py`, and `tests/test_doctor.py` when doctor behavior changes.
 
-- [ ] **Step 1: Add behavioral regressions and observe expected failures.**
+- [x] **Step 1: Add behavioral regressions and observe expected failures.**
 
 Use existing unittest fixtures to run real commands with fake external tools.
 Include critical memory with normal and forced restores, explicit enforcement
@@ -75,7 +75,7 @@ Run focused tests and confirm failures are behavioral, not fixture errors:
 CODEX_ANNOTATOR_AUTOSTART=0 python3 -m unittest tests.test_health tests.test_add_scripts tests.test_codex_annotator -v
 ```
 
-- [ ] **Step 2: Implement advisory restore policy in the shared core.**
+- [x] **Step 2: Implement advisory restore policy in the shared core.**
 
 Replace `ignore_memory` with a validated policy string initialized from
 `CODEXFARM_RESTORE_MEMORY_POLICY` (default `warn`). CLI
@@ -106,7 +106,7 @@ health diagnostic exits stay unchanged. The return contract is:
 return 3 if args.enforce_memory_pressure and level == "critical" else 0
 ```
 
-- [ ] **Step 3: Implement autoservice consent and mask protection.**
+- [x] **Step 3: Implement autoservice consent and mask protection.**
 
 Parse `--with-conversation-backups` / `--without-conversation-backups` as a
 separate `yes` / `no` request, valid only with explicit autoservice install.
@@ -136,7 +136,7 @@ report its name, preserve files/choices, and fail explicit install. Do not
 unmask or instruct automatic unmasking. Retain `Nice=10`, idle I/O priority, and
 the existing three-minute helper timeout; add no agent/account quotas.
 
-- [ ] **Step 4: Align archive health and polling.**
+- [x] **Step 4: Align archive health and polling.**
 
 Keep the explicit diagnostic environment override first. Otherwise, explicit
 archive or autoservice `no` suppresses archive scheduler warnings. An explicit
@@ -153,7 +153,7 @@ Change the annotator fallback to `5.0`; retain positive finite validation and
 explicit environment/CLI overrides. If doctor reports a deliberately disabled
 timer as a fault, make it informational and add a behavior regression.
 
-- [ ] **Step 5: Update guidance and run focused verification.**
+- [x] **Step 5: Update guidance and run focused verification.**
 
 README and CLI help must describe advisory restore defaults, enforce/ignore
 flags, `CODEXFARM_RESTORE_MEMORY_POLICY`, separate persisted archive choice,
@@ -168,7 +168,7 @@ ShellCheck on changed shell commands, and pinned Ruff. Report observed red/green
 test evidence, exact files, and any concerns. Self-review, stage only owned
 paths, and commit the implementation.
 
-- [ ] **Step 6: Independent spec review, then quality review.**
+- [x] **Step 6: Independent spec review, then quality review.**
 
 The controller dispatches a fresh spec reviewer against the full approved
 requirements and actual source. Address every gap and repeat review. Only after
@@ -178,13 +178,19 @@ design in the final publication.
 
 ## Task 2: Verify, publish, merge, and update installed helpers
 
+Prepublication checkpoint: the full 525-test suite passed at `09adc1e`; after
+the installer-only quality fixes, all 44 affected add tests passed at
+`11fed15`. All listed static and isolated integration checks passed. Spec and
+quality reviews approved `11fed15`. Publication CI reruns the complete suite
+on the final commit. The remaining checklist records the publication handoff.
+
 The controller executes this operational task; no production services are
 activated. User approval to publish and merge is already explicit.
 
-- [ ] Run pinned Ruff format/check, Bash syntax and ShellCheck across tracked scripts.
-- [ ] Run full unittest discovery with annotator autostart disabled.
-- [ ] Run `VALIDATE_SKIP_TMUX=1 ./validate.sh`, normal isolated validation, demo, and exact session resume integration.
-- [ ] Install the checksum-pinned deep-history backend in a temporary destination and run its isolated integration.
+- [x] Run pinned Ruff format/check, Bash syntax and ShellCheck across tracked scripts.
+- [x] Run full unittest discovery with annotator autostart disabled.
+- [x] Run `VALIDATE_SKIP_TMUX=1 ./validate.sh`, normal isolated validation, demo, and exact session resume integration.
+- [x] Install the checksum-pinned deep-history backend in a temporary destination and run its isolated integration.
 - [ ] Have a final reviewer confirm the complete change is ready to merge.
 - [ ] Fetch current origin/main, resolve any new integration changes, and rerun checks affected by any edits.
 - [ ] Push the branch, create a PR, wait for both CI Python versions, and merge into origin/main.
