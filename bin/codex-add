@@ -434,7 +434,8 @@ precheck_autoservice_masks() {
   for unit in codex-autosave.service codex-autosave.timer codex-autorestore.service; do
     # Inherited filesystem masks must survive even when the user bus is unavailable.
     for dir in "${mask_dirs[@]}"; do
-      if [ -L "$dir/$unit" ] && [ "$(readlink "$dir/$unit")" = /dev/null ]; then
+      if [ "$dir/$unit" -ef /dev/null ] \
+        || { [ -f "$dir/$unit" ] && [ ! -s "$dir/$unit" ]; }; then
         echo "Autoservice installation refused: $unit is masked; preserving operator choice." >&2
         return 1
       fi

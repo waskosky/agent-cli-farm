@@ -1127,6 +1127,85 @@ exit 0
                     finally:
                         mask.unlink()
 
+    def test_offline_empty_and_resolved_null_masks_preserve_all_service_state(self):
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/farms.tsv"
+        units.mkdir(parents=True)
+        state.mkdir(parents=True)
+        registry.parent.mkdir(parents=True)
+        runtime = self.tmpdir / "runtime"
+        global_config = self.tmpdir / "global-config"
+        self.env["XDG_RUNTIME_DIR"] = str(runtime)
+        self.env["XDG_CONFIG_DIRS"] = str(global_config)
+        make_executable(self.tmpdir / "systemctl", "#!/bin/sh\nexit 1\n")
+        names = ("codex-autosave.service", "codex-autosave.timer", "codex-autorestore.service")
+        registry_bytes = b"session\tmanifest\nsaved-farm\t/private/saved.tsv\n"
+        for mask_dir in (units, runtime / "systemd/user", global_config / "systemd/user"):
+            mask_dir.mkdir(parents=True, exist_ok=True)
+            for mask_kind in ("empty", "nonliteral", "chained"):
+                for name in names:
+                    for registry_exists in (False, True):
+                        with self.subTest(
+                            directory=mask_dir,
+                            mask_kind=mask_kind,
+                            name=name,
+                            registry_exists=registry_exists,
+                        ):
+                            for other in names:
+                                local = units / other
+                                local.unlink(missing_ok=True)
+                                local.write_text("operator " + other)
+                            for choice in ("autoservice_choice", "conversation_backup_choice"):
+                                (state / choice).write_text("no\n")
+                            if registry_exists:
+                                registry.write_bytes(registry_bytes)
+                            else:
+                                registry.unlink(missing_ok=True)
+                            mask = mask_dir / name
+                            mask.unlink(missing_ok=True)
+                            alias = mask_dir / "null-alias"
+                            if mask_kind == "empty":
+                                mask.write_bytes(b"")
+                            elif mask_kind == "nonliteral":
+                                mask.symlink_to("/dev/../dev/null")
+                            else:
+                                alias.symlink_to("/dev/null")
+                                mask.symlink_to("null-alias")
+                            try:
+                                result = self.run_install("--with-conversation-backups")
+                                self.assertNotEqual(result.returncode, 0)
+                                if mask_kind == "empty":
+                                    self.assertFalse(mask.is_symlink())
+                                    self.assertEqual(mask.stat().st_size, 0)
+                                else:
+                                    expected = (
+                                        "/dev/../dev/null"
+                                        if mask_kind == "nonliteral"
+                                        else "null-alias"
+                                    )
+                                    self.assertEqual(os.readlink(mask), expected)
+                                    self.assertTrue(os.path.samefile(mask, "/dev/null"))
+                                    if mask_kind == "chained":
+                                        self.assertEqual(os.readlink(alias), "/dev/null")
+                                for other in names:
+                                    if mask_dir == units and other == name:
+                                        continue
+                                    self.assertEqual(
+                                        (units / other).read_text(), "operator " + other
+                                    )
+                                if registry_exists:
+                                    self.assertEqual(registry.read_bytes(), registry_bytes)
+                                else:
+                                    self.assertFalse(registry.exists())
+                                for choice in ("autoservice_choice", "conversation_backup_choice"):
+                                    self.assertEqual((state / choice).read_text(), "no\n")
+                                self.assertIn(name, result.stderr)
+                                self.assertIn("masked", result.stderr.lower())
+                            finally:
+                                mask.unlink(missing_ok=True)
+                                alias.unlink(missing_ok=True)
+
     def test_autoservice_install_reports_inactive_user_manager(self):
         make_executable(self.tmpdir / "systemctl", "#!/usr/bin/env bash\nexit 1\n")
         result = subprocess.run(
