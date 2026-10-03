@@ -349,29 +349,58 @@ resume a paused goal; that choice remains yours.
 Retries preserve individual-server mode when the original launch used
 `--no-daemon`.
 
-Check installed-helper freshness and manifest resume coverage without printing session IDs:
+Repair farm installation and recovery health, then verify coverage without printing session IDs:
 
 ```bash
 codex-doctor
+codex-doctor --check     # read-only diagnostics
 CODEX_SESSION=work codex-doctor
 codex-doctor --source /path/to/agent-cli-farm /path/to/manifest.tsv
 ```
 
-The doctor exits nonzero for stale or missing installed helpers, malformed or
-unsafe manifests, blank commands, non-UUID or fallback provider resumes, and
-duplicate logical names. Duplicate names are supported by restore, but the
-warning makes them explicit before destructive force restores.
+The doctor repairs by default. It refreshes missing, stale and non-executable
+helpers from the recorded checkout, repairs installed providers' identity hooks,
+captures live conversations, fixes manifest permissions and freshness, restarts
+a stopped memory monitor, starts an enabled but inactive autosave timer, and
+retries a failed autosave service after successful capture. Replaced helpers and
+hook settings are retained privately under the state directory's `doctor-repairs/`.
+Its manifest repair merges current coverage with previously saved conversations,
+retaining snapshot history. `codex-save --merge` selects that policy explicitly;
+ordinary manual saves and conservative autosaves retain their existing behavior.
+Repairs respect disabled services, annotator settings, operator masks and the
+separate conversation-archive opt-in. They do not interrupt conversations or
+install system packages. `--check` performs the original read-only diagnostics;
+`--fix` and `--repair` explicitly select the default repair mode.
+
+The final check exits nonzero for remaining stale or missing helpers, malformed or
+unsafe manifests, blank commands, and non-UUID or fallback provider resumes.
+Duplicate logical names are reported as information because restore supports
+them by occurrence, including older conversations retained during repair.
 It also flags manifests older than 24 hours, enabled but inactive timers, and
 failed autosave services. Codex session discovery checks held writer locks as
 well as open rollouts, so paginated sessions remain discoverable even when
 their rollout descriptor is closed.
 For a running farm, the doctor inspects every pane and compares verified
-conversation IDs with the manifest. Missing entries, unknown identities and
-static shared-server bindings fail the check without printing conversation IDs.
+conversation IDs with the manifest. For an older TUI connected to a local shared
+Codex server, save verifies the connection using reciprocal kernel socket peers
+and the server process, then captures the server's complete durable live
+conversation inventory through read-only metadata requests. This includes other
+clients using that same local server. Saved logical names are reused where
+possible; additional conversations restore as separate windows. The audit
+requires the whole inventory to be covered and rechecks connections and coverage
+before declaring success. It does not infer a pane's conversation from static
+bindings, titles, directories or the newest transcript. On Linux this fallback
+requires `ss` (iproute2) and a server supporting the metadata protocol.
+Unknown remote identities, missing entries and unverified inventories still
+fail the check without printing conversation IDs, preserving previous recovery data.
+Memory monitoring reports managed shared-server process trees separately from
+individual chat panes; host memory pressure still accounts for their RAM use.
+Doctor refreshes its own verified monitor when installed monitor code changes.
 Explicitly enabled history archives continue independently when exact manifest
 capture fails.
 
-To migrate an older shared-server TUI safely, wait until its conversation is idle,
+Normal local shared-server recovery needs no relaunch. To move a TUI to local
+writer ownership instead, wait until its conversation is idle,
 record the exact ID currently shown by Codex's `/status`, and exit that TUI
 normally. From another terminal, relaunch the same conversation through the farm:
 
@@ -613,8 +642,8 @@ Tuning and controls:
 - **`codex-status [--session SESSION] [sessions|windows|activity|logs|loopers]`** - Show status information; `loopers --repair-stale-loopers` marks active state files stopped when their supervisor process is gone
 - **`codex-board [create|link|switch] [session]`** - Manage the default or a named board session for navigation
 - **`codex-resume [session] [--board]`** - Attach/switch to an existing Codex/tmux session or named farm board
-- **`codex-doctor [--session NAME] [--source DIR] [manifest]`** - Check installed-helper freshness and manifest resume coverage without displaying session IDs
-- **`codex-save [--autosave] [manifest]`** - Save exact conversations with retained snapshot history
+- **`codex-doctor [--check | --fix] [--session NAME] [--source DIR] [manifest]`** - Repair farm health and verify recovery coverage; `--check` selects read-only diagnostics
+- **`codex-save [--autosave | --merge] [manifest]`** - Save exact conversations with retained snapshot history; `--merge` also retains previously saved conversations
 - **`codex-restore [-a] [-f] [--list-snapshots] [manifest]`** - Restore or list retained snapshots
 - **`codex-farm-reboot [--detach] [session]`** - Safely save, stop, restore, and optionally attach to a farm
 

@@ -162,10 +162,23 @@ def manifest_lock(manifest: Path):
         yield
 
 
-def publish(candidate: Path, manifest: Path, autosave: bool) -> None:
+def publish(candidate: Path, manifest: Path, autosave: bool, merge: bool = False) -> None:
     rows = parse_manifest(candidate.read_bytes())
-    content = serialize(rows)
     previous = manifest.read_bytes() if manifest.exists() else None
+    if merge and previous is not None:
+        try:
+            previous_rows = parse_manifest(previous)
+        except ValueError:
+            # Retain malformed legacy bytes in history before publishing verified data.
+            previous_rows = []
+        missing = identities(previous_rows) - identities(rows)
+        for row in previous_rows:
+            identity = next(iter(identities([row])))
+            if missing[identity]:
+                rows.append(row)
+                missing[identity] -= 1
+        rows = parse_manifest(serialize(rows))
+    content = serialize(rows)
     if previous == content:
         print(f"Snapshot unchanged; preserved {manifest}")
         return
@@ -194,12 +207,15 @@ def main() -> int:
     save.add_argument("candidate", type=Path)
     save.add_argument("manifest", type=Path)
     save.add_argument("--autosave", action="store_true")
+    save.add_argument("--merge", action="store_true")
     history = commands.add_parser("history")
     history.add_argument("manifest", type=Path)
     lock = commands.add_parser("lock-run")
     lock.add_argument("manifest")
     lock.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.action == "publish" and args.autosave and args.merge:
+        parser.error("--merge cannot be combined with --autosave")
     try:
         if args.action == "validate":
             rows = parse_manifest(args.manifest.read_bytes())
@@ -226,10 +242,10 @@ def main() -> int:
         elif Path(
             os.environ.get("CODEXFARM_LOCKED_MANIFEST", "")
         ) == args.manifest and os.environ.get("CODEXFARM_LOCK_SCRIPT_PID") == str(os.getppid()):
-            publish(args.candidate, args.manifest, args.autosave)
+            publish(args.candidate, args.manifest, args.autosave, args.merge)
         else:
             with manifest_lock(args.manifest):
-                publish(args.candidate, args.manifest, args.autosave)
+                publish(args.candidate, args.manifest, args.autosave, args.merge)
     except (OSError, ValueError) as exc:
         print(f"Manifest operation failed: {exc}", file=sys.stderr)
         return 2

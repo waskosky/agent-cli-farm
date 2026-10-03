@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,7 @@ from codex_looper.health import (
     main,
     read_memory,
     refresh_memory_title,
+    shared_codex_servers,
     tree_memory,
 )
 
@@ -97,6 +99,71 @@ class HealthTests(unittest.TestCase):
             {"@a": {1, 2}, "@b": {4}},
         )
         self.assertEqual(values, {"@a": 7, "@b": 0.5})
+
+    def test_shared_server_tree_is_not_attributed_to_its_parent_pane(self):
+        processes = "10 0 1024 bash\n11 10 2048 codex\n20 11 3072000 codex\n21 20 1024000 worker\n30 0 4096 codex\n"
+        self.assertEqual(
+            tree_memory(processes, {"@a": {10}, "@b": {30}}, excluded={20}), {"@a": 3, "@b": 4}
+        )
+        self.assertEqual(tree_memory(processes, {"shared": {20}}), {"shared": 4000})
+
+    def test_shared_server_detection_checks_subcommand_and_managed_daemon_flag(self):
+        proc = self.root / "proc/20"
+        proc.mkdir(parents=True)
+        processes = "20 11 3072000 codex\n"
+        for argv, expected in (
+            (["/usr/bin/codex", "app-server", "--managed-daemon"], {20}),
+            (["/usr/bin/codex", "--profile", "work", "app-server", "--managed-daemon"], {20}),
+            (["/usr/bin/codex", "--config", "label=app-server", "exec", "--managed-daemon"], set()),
+            (["/usr/bin/codex", "app-server", "--stdio"], set()),
+            (["/usr/bin/codex", "resume", "--managed-daemon"], set()),
+        ):
+            with (
+                self.subTest(argv=argv),
+                patch.dict(os.environ, {"CODEX_PROC_ROOT": str(proc.parent)}),
+            ):
+                (proc / "cmdline").write_bytes(b"\0".join(value.encode() for value in argv) + b"\0")
+                self.assertEqual(shared_codex_servers(processes), expected)
+
+    def test_monitor_reports_shared_server_memory_separately_from_panes(self):
+        proc = self.root / "proc/20"
+        proc.mkdir(parents=True)
+        (proc / "cmdline").write_bytes(b"/usr/bin/codex\0app-server\0--managed-daemon\0")
+        processes = "10 0 1024 bash\n11 10 2048 codex\n20 11 3072000 codex\n21 20 1024000 worker\n"
+        calls = []
+
+        def tmux(command):
+            calls.append(command)
+            return "$0\t@1\t10\t\tproject\n" if command[1] == "list-panes" else ""
+
+        with (
+            patch.dict(os.environ, {"CODEX_PROC_ROOT": str(proc.parent)}),
+            patch("codex_looper.health.read_memory", return_value=Memory(8000, 4000, 0)),
+            patch(
+                "codex_looper.health.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, processes),
+            ),
+        ):
+            monitor = HealthMonitor(self.root, Limits())
+            monitor.tick({"@1"}, tmux, now=10000)
+            monitor.tick({"@1"}, tmux, now=10020)
+        status = json.loads((self.root / "health-status.json").read_text())
+        self.assertEqual(status["windows_mib"], {"@1": 3})
+        self.assertEqual(status["shared_servers_mib"], 4000)
+        self.assertFalse(any("LARGE CHAT" in str(call) for call in calls))
+
+    def test_doctor_shared_server_rss_is_informational_with_healthy_host_memory(self):
+        (self.root / "health-status.json").write_text(
+            json.dumps(
+                {"checked_at": time.time(), "windows_mib": {"@1": 100}, "shared_servers_mib": 4000}
+            )
+        )
+        with (
+            patch("sys.argv", ["codex-health"]),
+            patch("codex_looper.health.state_directory", return_value=self.root),
+            patch("codex_looper.health.read_memory", return_value=Memory(8000, 4000, 0)),
+        ):
+            self.assertEqual(main(), 0)
 
     def test_invalid_thresholds_fail_cleanly(self):
         for values in (

@@ -7,11 +7,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SESSION_META_BIN="${CODEX_SESSION_META_BIN:-$SCRIPT_DIR/codex-session-meta.py}"
 MANIFEST_BIN="$SCRIPT_DIR/codex-manifest.py"
+SHARED_META_BIN="${CODEX_SHARED_META_BIN:-$SCRIPT_DIR/codex-shared-sessions.py}"
 original_args=("$@")
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--all-registered] [--autosave] [manifest-path]
+Usage: $(basename "$0") [--all-registered] [--autosave | --merge] [manifest-path]
 
 Snapshot tmux farm panes to a trusted restore manifest.
 
@@ -19,6 +20,8 @@ Recognized provider panes require an exact session ID. Latest-session fallbacks
 are disabled. All distinct snapshots are retained in <manifest-path>.history/.
 --autosave preserves the restore point when saved conversations would be lost.
 --all-registered always uses this conservative autosave policy.
+--merge retains previously saved conversations while adding current coverage.
+Local shared-server panes save the server's entire durable live inventory.
 Additional provider panes restore as separate windows; split layouts are not saved.
 EOF
 }
@@ -522,6 +525,16 @@ inspect_provider() {
   printf '%s\n' "$tool"
 }
 
+inspect_shared() {
+  local pane="$1" pid provider_pid
+  [ -x "$SHARED_META_BIN" ] || return 1
+  [ "$(inspect_provider "$pane")" = codex ] || return 1
+  [ "$(tmux display-message -p -t "$pane" '#{pane_dead}')" != 1 ] || return 1
+  pid="$(tmux display-message -p -t "$pane" '#{pane_pid}')" || return 1
+  provider_pid="$(provider_pid_from_process_tree codex "$pid")" || return 1
+  "$SHARED_META_BIN" endpoint "$provider_pid" 2>/dev/null
+}
+
 exact_resume_args() {
   local tool="$1"
   local session_id="$2"
@@ -586,9 +599,15 @@ if [ "${1:-}" = "--inspect-provider" ]; then
   inspect_provider "$2"
   exit $?
 fi
+if [ "${1:-}" = "--inspect-shared" ]; then
+  [ "$#" -eq 2 ] || exit 2
+  inspect_shared "$2"
+  exit $?
+fi
 
 all_registered=0
 autosave=0
+merge=0
 args_pos=()
 while (( "$#" )); do
   case "${1:-}" in
@@ -602,6 +621,10 @@ while (( "$#" )); do
       ;;
     --autosave)
       autosave=1
+      shift
+      ;;
+    --merge)
+      merge=1
       shift
       ;;
     --)
@@ -621,6 +644,11 @@ while (( "$#" )); do
       ;;
   esac
 done
+
+if [ "$merge" -eq 1 ] && { [ "$autosave" -eq 1 ] || [ "$all_registered" -eq 1 ]; }; then
+  echo "--merge cannot be combined with --autosave or --all-registered" >&2
+  exit 2
+fi
 
 if [ "${#args_pos[@]}" -gt 1 ]; then
   echo "Unexpected argument: ${args_pos[1]}" >&2
@@ -679,6 +707,9 @@ if ! initial_panes="$(tmux list-panes -s -t "=$SESSION" -F $'#{pane_id}\t#{pane_
   exit 1
 fi
 saved_identities=()
+shared_endpoints=()
+shared_panes=()
+shared_pane_endpoints=()
 
 # The manifest has one row per conversation, regardless of its window or pane.
 while IFS=$'\n' read -r idx; do
@@ -712,6 +743,35 @@ while IFS=$'\n' read -r idx; do
         session_id_for_pane \
           "$tool" "$pane_target" "$pane_pid" "$provider_pid" "$pane_dead"
       )" || identity_status=$?
+    fi
+    if [ "$tool" = codex ] && [ -z "$session_id" ] \
+      && { [ "$identity_status" -eq 1 ] || [ "$identity_status" -eq 4 ]; } \
+      && shared_endpoint="$(inspect_shared "$pane_target")"; then
+      shared_panes+=("$pane_target")
+      shared_pane_endpoints+=("$shared_endpoint")
+      already_captured=0
+      for captured_endpoint in "${shared_endpoints[@]}"; do
+        [ "$captured_endpoint" != "$shared_endpoint" ] || already_captured=1
+      done
+      if [ "$already_captured" -eq 0 ]; then
+        if ! shared_snapshot="$("$SHARED_META_BIN" snapshot "$shared_endpoint" --manifest "$MANIFEST_PATH")"; then
+          exit 1
+        fi
+        while IFS=$'\t' read -r shared_name shared_dir shared_cmd shared_args; do
+          identity="$shared_cmd"$'\t'"${shared_args#resume }"
+          duplicate=0
+          for saved_identity in "${saved_identities[@]}"; do
+            [ "$saved_identity" != "$identity" ] || duplicate=1
+          done
+          [ "$duplicate" -eq 0 ] || continue
+          printf '%s\t%s\t%s\t%s\n' "$shared_name" "$shared_dir" "$shared_cmd" "$shared_args" >> "$tmpfile"
+          saved_identities+=("$identity")
+          saved_windows=$((saved_windows + 1))
+        done <<< "${shared_snapshot#*$'\n'}"
+        shared_endpoints+=("$shared_endpoint")
+      fi
+      first_pane=0
+      continue
     fi
     case "$tool" in
       codex|claude|gemini)
@@ -787,4 +847,14 @@ if ! final_panes="$(tmux list-panes -s -t "=$SESSION" -F $'#{pane_id}\t#{pane_pi
 fi
 publish_args=()
 [ "$autosave" -eq 0 ] || publish_args+=(--autosave)
+[ "$merge" -eq 0 ] || publish_args+=(--merge)
+for index in "${!shared_panes[@]}"; do
+  if [ "$(inspect_shared "${shared_panes[$index]}")" != "${shared_pane_endpoints[$index]}" ]; then
+    echo "Shared-server connection changed during capture; previous snapshot preserved. Retry save." >&2
+    exit 1
+  fi
+done
+for shared_endpoint in "${shared_endpoints[@]}"; do
+  "$SHARED_META_BIN" verify "$shared_endpoint" "$tmpfile" || exit 1
+done
 python3 "$MANIFEST_BIN" publish "$tmpfile" "$MANIFEST_PATH" "${publish_args[@]}"

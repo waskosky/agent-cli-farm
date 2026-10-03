@@ -89,6 +89,13 @@ if args[0] == '--inspect-pane':
     elif pane.get('id'):
         print(pane['provider'] + '\\t' + pane['id'])
     sys.exit(pane.get('identity_status', 0 if pane.get('id') else 1))
+if args[0] == '--inspect-shared':
+    if pane.get('shared'):
+        previous = Path(os.environ['AUDIT_TEST_CALLS']).read_text().splitlines()
+        count = sum(json.loads(call) == ['save', '--inspect-shared', pane['pane']] for call in previous)
+        print(pane.get('shared_after', pane['shared']) if count > 1 else pane['shared'])
+        sys.exit(0)
+    sys.exit(1)
 print('unexpected saver command', file=sys.stderr)
 sys.exit(73)
 """,
@@ -183,6 +190,57 @@ sys.exit(73)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("unknown conversation ID", result.stdout)
+
+    def shared_inventory(self) -> None:
+        helper = self.fake_bin / "shared-meta"
+        make_executable(
+            helper,
+            """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+state = json.loads(Path(os.environ['AUDIT_TEST_STATE']).read_text())
+saved = Path(sys.argv[-1]).read_text()
+sys.exit(1 if state.get('shared_error') or any(value not in saved for value in state['shared_ids']) else 0)
+""",
+        )
+        self.env["CODEX_SHARED_META_BIN"] = str(helper)
+        self.state["shared_ids"] = [SESSION_ID, SECOND_ID]
+        self.state["panes"] = [
+            {
+                "pane": "%1",
+                "pid": "101",
+                "provider": "codex",
+                "identity_status": 4,
+                "shared": "/tmp/codex-server.sock",
+            },
+            {"pane": "%2", "pid": "102", "provider": "codex", "shared": "/tmp/codex-server.sock"},
+        ]
+
+    def test_complete_shared_server_inventory_covers_unmapped_panes(self) -> None:
+        self.shared_inventory()
+        with self.manifest.open("a") as handle:
+            handle.write(f"second\t/tmp/project\tcodex\tresume {SECOND_ID}\n")
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "2 pane(s) covered by complete local shared-server inventories", result.stdout
+        )
+        self.assertNotIn("unverified legacy binding", result.stdout)
+
+    def test_partial_shared_inventory_cannot_be_reported_healthy(self) -> None:
+        self.shared_inventory()
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("complete local shared-server inventory", result.stdout)
+        self.assertNotIn("coverage is complete", result.stdout)
+
+    def test_shared_socket_change_during_audit_prevents_healthy_result(self) -> None:
+        self.shared_inventory()
+        self.state["shared_ids"] = [SESSION_ID]
+        self.state["panes"][0]["shared_after"] = "/tmp/different-server.sock"
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shared-server coverage changed", result.stdout)
 
     def test_legacy_static_binding_requires_normal_exit_and_current_id(self) -> None:
         self.state["panes"][0]["identity_status"] = 4

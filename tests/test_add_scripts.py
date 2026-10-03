@@ -1920,6 +1920,46 @@ esac
         self.assertEqual(inspected.returncode, 4, inspected.stderr)
         self.assertEqual(inspected.stdout, "")
 
+    def shared_meta_helper(self, *, fail_verify=False):
+        helper = self.tmpdir / "shared-meta"
+        helper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "if sys.argv[1] == 'endpoint':\n"
+            "    print('/tmp/verified-local-server.sock')\n"
+            "elif sys.argv[1] == 'snapshot':\n"
+            "    print('name\\tdir\\tcmd\\targs')\n"
+            f"    print('shared-one\\t/tmp/project\\tcodex\\tresume {self.hook_session_id}')\n"
+            f"    print('shared-two\\t/tmp/project\\tcodex\\tresume {self.second_codex_session_id}')\n"
+            "elif sys.argv[1] == 'verify':\n"
+            f"    sys.exit({int(fail_verify)})\n"
+        )
+        helper.chmod(0o755)
+        return str(helper)
+
+    def test_save_captures_complete_verified_local_shared_server_inventory(self):
+        result = self.run_save(
+            NO_CODEX_SESSION="1",
+            HOOK_SESSION_ID=self.hook_session_id,
+            HOOK_SESSION_PID="101",
+            HOOK_SESSION_SOURCE="verified:recovery",
+            CODEX_SHARED_META_BIN=self.shared_meta_helper(),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = self.manifest.read_text()
+        self.assertIn(f"codex\tresume {self.hook_session_id}", content)
+        self.assertIn(f"codex\tresume {self.second_codex_session_id}", content)
+        self.assertEqual(content.count("\tcodex\t"), 2)
+
+    def test_failed_shared_inventory_verification_preserves_previous_snapshot(self):
+        previous = b"previous restore point\n"
+        self.manifest.write_bytes(previous)
+        result = self.run_save(
+            NO_CODEX_SESSION="1", CODEX_SHARED_META_BIN=self.shared_meta_helper(fail_verify=True)
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.manifest.read_bytes(), previous)
+
     def test_current_process_evidence_replaces_static_binding_after_session_switch(self):
         result = self.run_save(
             HOOK_SESSION_ID=self.hook_session_id,

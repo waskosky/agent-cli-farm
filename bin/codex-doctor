@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Diagnose installed-helper drift and restore-manifest session coverage.
+# Repair installed helpers and recovery coverage, then verify the result.
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--session NAME] [--source DIR] [manifest-path]
+Usage: $(basename "$0") [--check | --fix] [--session NAME] [--source DIR] [manifest-path]
 
-Check the installed Agent CLI Farm helpers and a saved restore manifest.
+Repair the installed helpers, session hooks, restore manifest and background health.
+--check runs diagnostics without changes. --fix explicitly selects the default repair mode.
+Repairs retain previous saved conversations, snapshot history and replaced helper files.
 Exact provider session IDs are counted but never printed.
 Audit every live pane for verified conversation coverage in that manifest.
 Also check opted-in archive freshness, the memory monitor heartbeat and host RAM pressure.
@@ -24,6 +26,8 @@ SOURCE_MARKER="$STATE_DIR/install-source"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 issues=0
+repair=1
+mode_seen=0
 
 ok() {
   printf '[OK] %s\n' "$1"
@@ -100,7 +104,8 @@ check_installed_helpers() {
     esac
     installed_file="$INSTALL_DIR/$relative"
     checked=$((checked + 1))
-    if [ ! -f "$installed_file" ] || ! cmp -s "$source_file" "$installed_file"; then
+    if [ ! -f "$installed_file" ] || ! cmp -s "$source_file" "$installed_file" \
+      || { [[ "$relative" != codex_looper/* ]] && [ ! -x "$installed_file" ]; }; then
       mismatched=$((mismatched + 1))
       mismatch_names="${mismatch_names}${mismatch_names:+, }$relative"
     fi
@@ -220,11 +225,10 @@ EOF
     problem "manifest contains $provider_invalid provider command(s) with invalid resume arguments"
   fi
   if [ "$duplicates" -gt 0 ]; then
-    warning "manifest contains $duplicates duplicate logical name occurrence(s); restore matches them by occurrence"
+    info "manifest contains $duplicates duplicate logical name occurrence(s); restore supports these by occurrence"
   fi
   if [ "$rows" -gt 0 ] && [ "$malformed" -eq 0 ] && [ "$blank" -eq 0 ] \
-    && [ "$fallback" -eq 0 ] && [ "$provider_invalid" -eq 0 ] \
-    && [ "$duplicates" -eq 0 ]; then
+    && [ "$fallback" -eq 0 ] && [ "$provider_invalid" -eq 0 ]; then
     ok "manifest resume data is healthy"
   fi
 
@@ -290,6 +294,15 @@ while (( "$#" )); do
       usage
       exit 0
       ;;
+    --check|--fix|--repair)
+      if [ "$mode_seen" -eq 1 ]; then
+        echo "Doctor mode specified multiple times" >&2
+        exit 2
+      fi
+      [ "$1" != --check ] || repair=0
+      mode_seen=1
+      shift
+      ;;
     --session)
       if [ "$#" -lt 2 ]; then
         echo "Missing value for --session" >&2
@@ -352,7 +365,17 @@ esac
 manifest_path="${manifest_path:-$(default_manifest_path_for_session "$SESSION")}"
 
 echo "Agent CLI Farm doctor"
-if resolved_source="$(resolve_source_dir)"; then
+resolved_source="$(resolve_source_dir)" || resolved_source=""
+if [ "$repair" -eq 1 ]; then
+  repair_args=(--install-dir "$INSTALL_DIR" --session "$SESSION")
+  [ -z "$resolved_source" ] || repair_args+=(--source "$resolved_source")
+  if [ ! -x "$SCRIPT_DIR/codex-doctor-repair.py" ]; then
+    problem "automatic repair helper unavailable; reinstall from the source checkout"
+  elif ! "$SCRIPT_DIR/codex-doctor-repair.py" "${repair_args[@]}" "$manifest_path"; then
+    problem "automatic repairs could not resolve every issue (details above)"
+  fi
+fi
+if [ -n "$resolved_source" ]; then
   check_installed_helpers "$resolved_source"
 else
   warning "source checkout unavailable; run setup.sh again or pass --source DIR"

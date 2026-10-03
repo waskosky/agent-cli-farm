@@ -93,7 +93,12 @@ def audit(session: str, manifest: Path, helper: str) -> int:
         return 1
 
     issues = 0
-    providers = covered = excluded = 0
+    providers = covered = excluded = shared = 0
+    servers: dict[str, bool] = {}
+    shared_panes: dict[str, str] = {}
+    shared_helper = os.environ.get(
+        "CODEX_SHARED_META_BIN", str(SCRIPT_DIR / "codex-shared-sessions.py")
+    )
     for pane, _pid, utility in panes:
         try:
             detected = run([helper, "--inspect-provider", pane])
@@ -125,6 +130,27 @@ def audit(session: str, manifest: Path, helper: str) -> int:
             continue
 
         providers += 1
+        if provider == "codex" and inspected.returncode in {1, 4}:
+            try:
+                connected = run([helper, "--inspect-shared", pane])
+                endpoint = connected.stdout.strip()
+                if connected.returncode == 0 and endpoint.startswith("/"):
+                    if endpoint not in servers:
+                        inventory = run([shared_helper, "verify", endpoint, str(manifest)])
+                        servers[endpoint] = inventory.returncode == 0
+                    if not servers[endpoint]:
+                        print(
+                            f"[FAIL] pane {pane} (codex): complete local shared-server inventory "
+                            "is missing or unverified in the manifest; run codex-doctor"
+                        )
+                        issues += 1
+                        continue
+                    shared_panes[pane] = endpoint
+                    shared += 1
+                    covered += 1
+                    continue
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         if inspected.returncode == 4:
             print(
                 f"[FAIL] pane {pane} ({provider}): unverified legacy binding. {migration_hint(session)}"
@@ -165,10 +191,24 @@ def audit(session: str, manifest: Path, helper: str) -> int:
         print("[FAIL] unable to confirm pane enumeration after inspection; retry the audit")
         issues += 1
 
+    try:
+        for pane, endpoint in shared_panes.items():
+            connection = run([helper, "--inspect-shared", pane])
+            if connection.returncode or connection.stdout.strip() != endpoint:
+                raise ValueError("shared-server connection changed during audit")
+        for endpoint in set(shared_panes.values()):
+            if run([shared_helper, "verify", endpoint, str(manifest)]).returncode:
+                raise ValueError("shared-server inventory changed during audit")
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        print("[FAIL] shared-server coverage changed or could not be confirmed; retry the audit")
+        issues += 1
+
     summary = (
         f"{providers} provider pane(s); {covered} covered; "
         f"{excluded} idle history picker(s) excluded"
     )
+    if shared:
+        summary += f"; {shared} pane(s) covered by complete local shared-server inventories"
     if issues:
         print(f"[INFO] live pane recovery coverage is incomplete: {summary}")
         return 1

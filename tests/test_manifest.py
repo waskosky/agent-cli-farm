@@ -70,6 +70,55 @@ class ManifestTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.manifest.read_text(), previous)
 
+    def test_merge_retains_closed_conversations_and_updates_live_metadata(self):
+        old_id = "123e4567-e89b-42d3-a456-426614174001"
+        previous = (
+            HEADER
+            + f"closed\t/tmp/old\tcodex\tresume {old_id}\n"
+            + f"old-name\t/tmp\tcodex\tresume {SESSION_ID}\n"
+        )
+        self.manifest.write_text(previous)
+        candidate = self.root / "candidate.tsv"
+        candidate.write_text(HEADER + f"live\t/tmp/new\tcodex\tresume {SESSION_ID}\n")
+
+        result = self.run_helper("publish", candidate, self.manifest, "--merge")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = self.manifest.read_text()
+        self.assertIn("closed\t/tmp/old", content)
+        self.assertIn("live\t/tmp/new", content)
+        self.assertNotIn("old-name", content)
+        self.assertTrue(
+            any(
+                path.read_text() == previous
+                for path in Path(str(self.manifest) + ".history").glob("*.tsv")
+            )
+        )
+
+    def test_merge_preserves_repeated_generic_window_occurrences(self):
+        row = "shell\t/tmp\tbash\t\n"
+        self.manifest.write_text(HEADER + row + row)
+        candidate = self.root / "candidate.tsv"
+        candidate.write_text(HEADER + row)
+        result = self.run_helper("publish", candidate, self.manifest, "--merge")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.manifest.read_text(), HEADER + row + row)
+
+    def test_merge_archives_malformed_old_manifest_before_repair(self):
+        previous = "malformed legacy manifest\n"
+        self.manifest.write_text(previous)
+        candidate = self.root / "candidate.tsv"
+        candidate.write_text(HEADER + "shell\t/tmp\tbash\t\n")
+        result = self.run_helper("publish", candidate, self.manifest, "--merge")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.manifest.read_bytes(), candidate.read_bytes())
+        self.assertTrue(
+            any(
+                path.read_text() == previous
+                for path in Path(str(self.manifest) + ".history").glob("*.tsv")
+            )
+        )
+
     @unittest.skipUnless(os.name == "posix", "requires flock")
     def test_manifest_operations_wait_for_same_manifest_lock(self):
         import fcntl

@@ -62,10 +62,23 @@ sys.exit(73)
         make_executable(
             self.save_helper,
             """#!/usr/bin/env python3
-import json, os, sys
+import json, os, subprocess, sys, tempfile
 from pathlib import Path
 args = sys.argv[1:]
 panes = json.loads(Path(os.environ['DOCTOR_TEST_PANES']).read_text())
+if args[0] == '--merge':
+    if any(pane.get('provider') and (not pane.get('id') or pane.get('identity_status', 0)) for pane in panes):
+        print('capture unavailable: ' + os.environ.get('DOCTOR_PRIVATE_ID', ''), file=sys.stderr)
+        sys.exit(1)
+    rows = ['name\\tdir\\tcmd\\targs\\n']
+    for pane in panes:
+        if pane.get('provider'):
+            option = 'resume' if pane['provider'] == 'codex' else '--resume'
+            rows.append('pane-' + pane['pane'][1:] + '\\t/tmp/project\\t' + pane['provider'] + '\\t' + option + ' ' + pane['id'] + '\\n')
+    with tempfile.TemporaryDirectory() as root:
+        candidate = Path(root) / 'candidate.tsv'
+        candidate.write_text(''.join(rows))
+        sys.exit(subprocess.run([sys.executable, os.environ['DOCTOR_MANIFEST_BIN'], 'publish', str(candidate), args[-1], '--merge']).returncode)
 pane = next((pane for pane in panes if pane['pane'] == args[-1]), {})
 if args[0] == '--inspect-provider':
     if pane.get('provider'):
@@ -96,6 +109,7 @@ sys.exit(73)
         self.env["PATH"] = f"{self.fake_bin}:{self.env.get('PATH', '')}"
         self.env["CODEX_SAVE_BIN"] = str(self.save_helper)
         self.env["DOCTOR_TEST_PANES"] = str(self.panes_file)
+        self.env["DOCTOR_MANIFEST_BIN"] = str(REPO_ROOT / "bin/codex-manifest.py")
         self.panes_file.write_text(json.dumps(self.panes), encoding="utf-8")
 
     def test_deliberately_disabled_autoservice_is_informational(self):
@@ -112,10 +126,10 @@ sys.exit(73)
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def run_doctor(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_doctor(self, *arguments: str, repair: bool = False) -> subprocess.CompletedProcess[str]:
         self.panes_file.write_text(json.dumps(self.panes), encoding="utf-8")
         return subprocess.run(
-            [DOCTOR_BIN, "--session", "test", *arguments],
+            [DOCTOR_BIN, *([] if repair else ["--check"]), "--session", "test", *arguments],
             env=self.env,
             text=True,
             capture_output=True,
@@ -174,7 +188,7 @@ sys.exit(73)
         env.pop("CODEXFARM_SOURCE_DIR")
 
         result = subprocess.run(
-            [installed_doctor, "--session", "test", self.manifest],
+            [installed_doctor, "--check", "--session", "test", self.manifest],
             env=env,
             text=True,
             capture_output=True,
@@ -247,7 +261,7 @@ sys.exit(73)
 
         result = self.run_doctor(self.manifest)
 
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("duplicate names: 1", result.stdout)
         self.assertIn("duplicate logical name occurrence", result.stdout)
         self.assertNotIn(SESSION_ID, result.stdout)
@@ -339,6 +353,88 @@ sys.exit(73)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("1 idle history picker(s) excluded", result.stdout)
+
+    def test_default_doctor_repairs_helper_drift_and_retains_old_copy(self) -> None:
+        helper = self.install_bin / "codex-save"
+        helper.write_text("old helper\n")
+
+        result = self.run_doctor(self.manifest, repair=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(helper.read_bytes(), (self.source_bin / helper.name).read_bytes())
+        backups = list(
+            (Path(self.env["XDG_STATE_HOME"]) / "codexfarm/doctor-repairs").glob(
+                "*/helpers/codex-save"
+            )
+        )
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), "old helper\n")
+        self.assertIn("refreshed 1", result.stdout)
+
+    def test_default_doctor_repairs_missing_manifest_and_permissions(self) -> None:
+        self.manifest.unlink()
+
+        result = self.run_doctor(self.manifest, repair=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(SESSION_ID, self.manifest.read_text())
+        self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o600)
+        self.assertNotIn(SESSION_ID, result.stdout + result.stderr)
+
+    def test_default_doctor_adds_live_coverage_without_dropping_saved_conversations(self) -> None:
+        previous = self.manifest.read_bytes()
+        self.panes[0]["id"] = SECOND_ID
+
+        result = self.run_doctor(self.manifest, repair=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        content = self.manifest.read_text()
+        self.assertIn(SESSION_ID, content)
+        self.assertIn(SECOND_ID, content)
+        history = list(Path(str(self.manifest) + ".history").glob("*.tsv"))
+        self.assertTrue(any(path.read_bytes() == previous for path in history))
+        self.assertNotIn(SESSION_ID, result.stdout + result.stderr)
+        self.assertNotIn(SECOND_ID, result.stdout + result.stderr)
+
+    def test_failed_automatic_capture_preserves_manifest_and_redacts_helper_errors(self) -> None:
+        previous = self.manifest.read_bytes()
+        self.panes[0].pop("id")
+        self.env["DOCTOR_PRIVATE_ID"] = SESSION_ID
+
+        result = self.run_doctor(self.manifest, repair=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.manifest.read_bytes(), previous)
+        self.assertIn("automatic manifest capture failed", result.stdout)
+        self.assertNotIn(SESSION_ID, result.stdout + result.stderr)
+
+    def test_default_doctor_refreshes_verified_unchanged_manifest(self) -> None:
+        os.utime(self.manifest, (1, 1))
+        self.manifest.chmod(0o644)
+
+        result = self.run_doctor(self.manifest, repair=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertGreater(self.manifest.stat().st_mtime, 1)
+        self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o600)
+
+    def test_check_mode_leaves_helpers_and_manifest_unchanged(self) -> None:
+        helper = self.install_bin / "codex-save"
+        helper.write_text("old helper\n")
+        previous = self.manifest.read_bytes()
+        os.utime(self.manifest, (1, 1))
+
+        result = self.run_doctor(self.manifest)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(helper.read_text(), "old helper\n")
+        self.assertEqual(self.manifest.read_bytes(), previous)
+        self.assertEqual(self.manifest.stat().st_mtime, 1)
+
+    def test_conflicting_modes_fail_before_repairs(self) -> None:
+        result = self.run_doctor("--fix", self.manifest)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("mode specified multiple times", result.stderr)
 
 
 if __name__ == "__main__":

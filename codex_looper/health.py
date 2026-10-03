@@ -114,13 +114,16 @@ def read_memory(proc: Path | None = None) -> Memory | None:
     )
 
 
-def tree_memory(processes: str, roots: dict[str, set[int]]) -> dict[str, float]:
+def tree_memory(
+    processes: str, roots: dict[str, set[int]], *, excluded: set[int] | None = None
+) -> dict[str, float]:
     """RSS attribution only: shared pages may count twice, so never use for host capacity."""
+    excluded = excluded or set()
     children: dict[int, set[int]] = {}
     rss: dict[int, int] = {}
     for line in processes.splitlines():
         try:
-            pid, parent, kib = map(int, line.split())
+            pid, parent, kib = map(int, line.split()[:3])
         except ValueError:
             continue
         rss[pid] = max(0, kib)
@@ -131,12 +134,63 @@ def tree_memory(processes: str, roots: dict[str, set[int]]) -> dict[str, float]:
         pending = list(pids)
         while pending:
             pid = pending.pop()
-            if pid in seen:
+            if pid in seen or pid in excluded:
                 continue
             seen.add(pid)
             pending.extend(children.get(pid, ()))
         totals[window] = sum(rss.get(pid, 0) for pid in seen) / 1024
     return totals
+
+
+def shared_codex_servers(processes: str) -> set[int]:
+    """A managed app server can descend from one pane while serving many TUIs."""
+    servers = set()
+    proc = Path(os.environ.get("CODEX_PROC_ROOT", "/proc"))
+    value_options = {
+        "-c",
+        "--config",
+        "--enable",
+        "--disable",
+        "-p",
+        "--profile",
+        "-C",
+        "--cd",
+        "-m",
+        "--model",
+        "-s",
+        "--sandbox",
+        "-a",
+        "--ask-for-approval",
+        "--remote",
+        "--remote-auth-token-env",
+        "-i",
+        "--image",
+        "--local-provider",
+        "--add-dir",
+    }
+    for line in processes.splitlines():
+        fields = line.split()
+        if len(fields) != 4 or fields[3] not in {"codex", "codex.exe"}:
+            continue
+        try:
+            pid = int(fields[0])
+            argv = (proc / str(pid) / "cmdline").read_bytes().decode().split("\0")
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        if Path(argv[0]).name not in {"codex", "codex.exe"}:
+            continue
+        index = 1
+        while index < len(argv) and argv[index].startswith("-"):
+            if argv[index] == "--":
+                break
+            index += 2 if argv[index] in value_options else 1
+        if (
+            index < len(argv)
+            and argv[index] == "app-server"
+            and "--managed-daemon" in argv[index + 1 :]
+        ):
+            servers.add(pid)
+    return servers
 
 
 def read_json(path: Path) -> dict:
@@ -246,15 +300,18 @@ class HealthMonitor:
                     titles[parts[1]] = (parts[4], parts[3])
         try:
             processes = subprocess.run(
-                ["ps", "-eo", "pid=,ppid=,rss="],
+                ["ps", "-eo", "pid=,ppid=,rss=,comm="],
                 capture_output=True,
                 text=True,
                 timeout=5,
                 check=True,
             ).stdout
-            totals = tree_memory(processes, roots)
+            shared_servers = shared_codex_servers(processes)
+            totals = tree_memory(processes, roots, excluded=shared_servers)
+            shared_mib = tree_memory(processes, {"shared": shared_servers})["shared"]
         except (OSError, subprocess.SubprocessError):
             totals = {}
+            shared_mib = 0.0
         observed: set[str] = set()
         level = memory.level(self.limits) if memory else "unavailable"
         if level in {"warning", "critical"}:
@@ -321,6 +378,7 @@ class HealthMonitor:
                 "memory": asdict(memory) if memory else None,
                 "level": level,
                 "windows_mib": totals,
+                "shared_servers_mib": shared_mib,
                 "warnings": labels,
                 "backup_issues": issues,
             },
@@ -362,6 +420,11 @@ def main() -> int:
         if age(health.get("checked_at"), now) > 60:
             issues.append("memory monitor heartbeat missing or older than 60 seconds")
         else:
+            shared_mib = health.get("shared_servers_mib", 0)
+            if isinstance(shared_mib, int | float) and math.isfinite(shared_mib) and shared_mib > 0:
+                print(
+                    f"[INFO] shared Codex server process trees: {shared_mib:.0f} MiB RSS (host memory accounts for these)"
+                )
             windows = health.get("windows_mib", {})
             if not isinstance(windows, dict):
                 issues.append("invalid memory monitor state; restart codex-annotator")
