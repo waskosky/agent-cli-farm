@@ -53,13 +53,17 @@ Deliver this task in two sequential reviewed parts: 2A implements managed jobs,
 private settings, and launch integration; 2B implements the standalone host helper.
 Neither part runs privileged changes during development.
 
+Task 2A passed specification and quality review at `dab04e9`; 67 affected
+tests passed. A short-job smoke check against the actual user manager verified
+argv, live identity, process groups, priorities, hierarchy, and unlimited caps.
+
 **Files:** Create `bin/codex-job`, `codex_looper/resource_jobs.py`,
 `codex_looper/resource_config.py`, `tests/test_resource_config.py`,
 `bin/codex-resource-host`, `tests/test_resource_jobs.py`,
 `tests/test_resource_host.py`; modify `bin/codex-add`, `tests/test_add_scripts.py`,
 `codex_looper/process.py`, `tests/test_looper.py`, `pyproject.toml`, `README.md`, `AGENTS.md`.
 
-- [ ] Add failing CLI/process tests with private homes and systemd doubles.
+- [x] Add failing CLI/process tests with private homes and systemd doubles.
   Verify argv preservation, agent bypass, optional queue timeout/manual bypass,
   generated scope identities, no implicit ceilings, batch priority/OOM
   preference, missing manager fallback, and mandatory explicit-limit failure.
@@ -76,7 +80,7 @@ self.assertEqual(result.returncode, 0)
 self.assertEqual(result.stdout.strip(), "literal $value; `data`")
 ```
 
-- [ ] Run the new suites, observe meaningful failures, and implement the runner.
+- [x] Run the new suites, observe meaningful failures, and implement the runner.
   Use shared parent `codexfarm.slice`, separate `codexfarm-interactive.slice` and `codexfarm-batch.slice`, generated
   `codexfarm-agent-<hex>.scope` / `codexfarm-batch-<hex>.scope` units, and argv-based
   subprocesses. Batch CPU/I/O weights are 25, Nice is 10, and OOM score is +250;
@@ -84,7 +88,7 @@ self.assertEqual(result.stdout.strip(), "literal $value; `data`")
   Agent scopes pass through their shared parent protection with MemoryLow=infinity.
   Derive a missing user-bus environment only from an owned `/run/user/<uid>`
   directory/socket; preserve explicitly configured bus environments.
-- [ ] Implement private job records and strict identity validation using PID
+- [x] Implement private job records and strict identity validation using PID
   start ticks, UID, scope generation and actual cgroup membership. Accept
   `--restartable` only for batch jobs, with one restart maximum and graceful
   termination limited to the exact owned job. A declared worker environment
@@ -100,7 +104,7 @@ self.assertEqual(result.stdout.strip(), "literal $value; `data`")
   timer. `plan --uid 1003` prints the complete requested change. `apply --uid
   1003` installs the requested 1 GiB protection and maintenance without restarting
   user sessions. Runtime and persistent settings retain backups and restoration.
-- [ ] Integrate agent wrapping only when `CODEXFARM_RESOURCE_PROTECTION=1` or
+- [x] Integrate agent wrapping only when `CODEXFARM_RESOURCE_PROTECTION=1` or
   private resource settings enable it. Trusted shell fragments continue to be
   interpreted once by the existing shell path; the runner receives their exact
   resulting argv. Apply the same optional wrapping to provider commands in the
