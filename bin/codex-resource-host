@@ -631,7 +631,12 @@ class Host:
                     and self.manager.active(user, unit)
                     and self.manager.get(user, unit, prop) == entry["value"]
                 ):
-                    self.manager.set(user, unit, prop, entry["original"])
+                    original = entry["original"]
+                    # systemctl show uses a display marker for an unset weight;
+                    # set-property requires an empty assignment to restore it.
+                    if prop in {"CPUWeight", "IOWeight"} and original == "[not set]":
+                        original = ""
+                    self.manager.set(user, unit, prop, original)
             except (Error, OSError, RuntimeError) as exc:
                 failures.append(str(exc))
 

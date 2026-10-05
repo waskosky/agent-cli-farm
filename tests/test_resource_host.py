@@ -28,7 +28,14 @@ class Manager:
         self.fail = None
 
     def get(self, user, unit, prop):
-        return self.values.get((user, unit, prop), "0" if prop == "MemoryLow" else "100")
+        default = (
+            "[not set]"
+            if prop in {"CPUWeight", "IOWeight"}
+            else "0"
+            if prop == "MemoryLow"
+            else "100"
+        )
+        return self.values.get((user, unit, prop), default)
 
     def masked(self, user, unit):
         return (user, unit) in self.masks
@@ -37,11 +44,16 @@ class Manager:
         return self.values.get((user, unit, "ActiveState"), "active") == "active"
 
     def set(self, user, unit, prop, value):
+        if prop in {"CPUWeight", "IOWeight"}:
+            valid = value == "" or (prop == "CPUWeight" and value == "idle")
+            valid = valid or (str(value).isdecimal() and 1 <= int(value) <= 10000)
+            if not valid:
+                raise RuntimeError(f"InvalidArgument: {prop}={value}")
         self.calls.append(("set", user, unit, prop, value))
         if self.fail == unit:
             self.fail = None
             raise RuntimeError("manager failure")
-        self.values[user, unit, prop] = str(value)
+        self.values[user, unit, prop] = "[not set]" if value == "" else str(value)
 
     def command(self, user, *args):
         self.calls.append(("command", user, *args))
@@ -544,6 +556,52 @@ class HostTests(unittest.TestCase):
                 self.helper.remove()
         self.assertTrue(self.root.joinpath(host.STATE.lstrip("/")).exists())
         self.helper.remove()
+
+    def test_remove_restores_all_unset_weights_with_empty_assignments(self):
+        self.helper.apply(1003)
+        state = json.loads(self.root.joinpath(host.STATE.lstrip("/")).read_text())
+        weights = [item for item in state["runtime"] if item["prop"] in {"CPUWeight", "IOWeight"}]
+        self.assertEqual(len(weights), 4)
+        self.assertTrue(all(item["original"] == "[not set]" for item in weights))
+        self.manager.calls.clear()
+        self.helper.remove()
+        for item in weights:
+            self.assertEqual(
+                self.manager.get(item["user"], item["unit"], item["prop"]), "[not set]"
+            )
+            self.assertIn(("set", item["user"], item["unit"], item["prop"], ""), self.manager.calls)
+        self.assertFalse(self.root.joinpath(host.STATE.lstrip("/")).exists())
+
+    def test_failed_apply_restores_unset_interactive_weights(self):
+        self.manager.fail = "codexfarm-batch.slice"
+        with self.assertRaisesRegex(RuntimeError, "^manager failure$"):
+            self.helper.apply(1003)
+        for unit in ("codexfarm-interactive.slice", "codexfarm-batch.slice"):
+            for prop in ("CPUWeight", "IOWeight"):
+                self.assertEqual(self.manager.get(True, unit, prop), "[not set]")
+        for prop in ("CPUWeight", "IOWeight"):
+            self.assertIn(
+                ("set", True, "codexfarm-interactive.slice", prop, ""), self.manager.calls
+            )
+        self.assertFalse(self.root.joinpath(host.STATE.lstrip("/")).exists())
+        self.assertFalse(self.root.joinpath(host.CONFIG.lstrip("/")).exists())
+
+    def test_remove_preserves_idle_numeric_and_later_operator_weights(self):
+        self.manager.values[True, "codexfarm-interactive.slice", "CPUWeight"] = "idle"
+        self.manager.values[True, "codexfarm-interactive.slice", "IOWeight"] = "457"
+        self.helper.apply(1003)
+        self.manager.values[True, "codexfarm-batch.slice", "IOWeight"] = "999"
+        self.manager.calls.clear()
+        self.helper.remove()
+        self.assertEqual(self.manager.get(True, "codexfarm-interactive.slice", "CPUWeight"), "idle")
+        self.assertEqual(self.manager.get(True, "codexfarm-interactive.slice", "IOWeight"), "457")
+        self.assertEqual(self.manager.get(True, "codexfarm-batch.slice", "IOWeight"), "999")
+        self.assertFalse(
+            any(
+                call[:4] == ("set", True, "codexfarm-batch.slice", "IOWeight")
+                for call in self.manager.calls
+            )
+        )
 
     def test_installed_service_uses_isolated_absolute_interpreter(self):
         self.helper.apply(1003, maintenance=True)
