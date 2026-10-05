@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from .health import read_memory, state_directory
@@ -34,6 +35,8 @@ MAX_OUTPUT_BYTES = 32768
 COOLDOWN_SECONDS = 900
 SUSTAIN_SECONDS = 60
 RETAIN_REPORTS = 20
+CLEANUP_GRACE_SECONDS = 5
+_active_deadline: ContextVar[dict | None] = ContextVar("resource_worker_deadline", default=None)
 
 
 def _reject_constant(_value):
@@ -164,6 +167,12 @@ def _rollback_owned(results: list[dict], store: JobStore) -> None:
                     result["rollback"] = "removed"
                 except (OSError, ValueError):
                     result["rollback"] = "unavailable"
+    except CleanupTimeout:
+        for result in owned:
+            if result.get("rollback") != "removed":
+                result["rollback"] = "unavailable"
+                result["incomplete"] = True
+        raise
     except (WorkerTimeout, KeyboardInterrupt):
         for result in owned:
             if result.get("rollback") != "removed":
@@ -220,76 +229,84 @@ def apply_actions(
     record = {"before": None, "actions": results, "after": None, "complete": False}
     failed_jobs = set()
     try:
-        record["before"] = metrics()
-        write_private_json(journal, record)
-        for action in actions:
-            key, kind = action["job_id"], action["kind"]
-            result = _action_result(action, "not_attempted")
-            results.append(result)
-            identity = identities.get(key)
-            try:
-                if kind not in ("defer", "reduce_workers", "restart"):
-                    raise ValueError("unknown action")
-                if consent_check is not None and consent_check() is not True:
-                    raise ValueError("automatic consent revoked")
-                if kind == "restart" and key in failed_jobs:
-                    raise ValueError("dependent reversible action failed")
-                if not store.validate(key, identity, require_batch=True):
-                    raise ValueError("identity changed")
-            except (OSError, ValueError):
-                failed_jobs.add(key)
-                result["status"] = "rejected_identity_or_consent"
-            else:
-                # This durable intent must remain honest even when the process
-                # dies or a post-mutation write fails. Pending is not rejection.
-                result["status"] = "pending"
-                write_private_json(journal, record)
-                result["status"] = "attempting"
-                try:
-                    if kind == "defer":
-                        result["override_id"] = store.defer_job(
-                            key, action["ttl_seconds"], identity
-                        )
-                    elif kind == "reduce_workers":
-                        result["override_id"] = store.reduce_workers(
-                            key, action["workers"], action["ttl_seconds"], expectedidentity=identity
-                        )
-                    else:
-                        store.request_restart(key, identity)
-                    result["status"] = (
-                        "restart_requested_nonreversible"
-                        if kind == "restart"
-                        else "applied_to_future_launches"
-                    )
-                except ValueError:
-                    # JobStore raises ValueError for preconditions/validation;
-                    # I/O errors can happen after atomic commit and are uncertain.
-                    failed_jobs.add(key)
-                    result["status"] = "rejected_action_preconditions"
-            write_private_json(journal, record)
-        record["after"] = metrics()
-        if deteriorated(record["before"], record["after"]):
-            _rollback_owned(results, store)
-        record["complete"] = not any(result.get("incomplete") for result in results)
-        write_private_json(journal, record)
-    except (OSError, ValueError, WorkerTimeout, KeyboardInterrupt):
-        _incomplete_actions(actions, results)
-        # Only returned override IDs identify our changes. A mutation interrupted
-        # before returning its ID stays uncertain and expires under its bounded TTL;
-        # never infer ownership by enumerating other clients' override files.
-        _rollback_owned(results, store)
-        record["complete"] = False
-        if record["after"] is None:
-            try:
-                record["after"] = metrics()
-            except (OSError, ValueError, WorkerTimeout, KeyboardInterrupt):
-                pass
         try:
+            record["before"] = metrics()
+            write_private_json(journal, record)
+            for action in actions:
+                key, kind = action["job_id"], action["kind"]
+                result = _action_result(action, "not_attempted")
+                results.append(result)
+                identity = identities.get(key)
+                try:
+                    if kind not in ("defer", "reduce_workers", "restart"):
+                        raise ValueError("unknown action")
+                    if consent_check is not None and consent_check() is not True:
+                        raise ValueError("automatic consent revoked")
+                    if kind == "restart" and key in failed_jobs:
+                        raise ValueError("dependent reversible action failed")
+                    if not store.validate(key, identity, require_batch=True):
+                        raise ValueError("identity changed")
+                except (OSError, ValueError):
+                    failed_jobs.add(key)
+                    result["status"] = "rejected_identity_or_consent"
+                else:
+                    # This durable intent must remain honest even when the process
+                    # dies or a post-mutation write fails. Pending is not rejection.
+                    result["status"] = "pending"
+                    write_private_json(journal, record)
+                    result["status"] = "attempting"
+                    try:
+                        if kind == "defer":
+                            result["override_id"] = store.defer_job(
+                                key, action["ttl_seconds"], identity
+                            )
+                        elif kind == "reduce_workers":
+                            result["override_id"] = store.reduce_workers(
+                                key,
+                                action["workers"],
+                                action["ttl_seconds"],
+                                expectedidentity=identity,
+                            )
+                        else:
+                            store.request_restart(key, identity)
+                        result["status"] = (
+                            "restart_requested_nonreversible"
+                            if kind == "restart"
+                            else "applied_to_future_launches"
+                        )
+                    except ValueError:
+                        # JobStore raises ValueError for preconditions/validation;
+                        # I/O errors can happen after atomic commit and are uncertain.
+                        failed_jobs.add(key)
+                        result["status"] = "rejected_action_preconditions"
+                write_private_json(journal, record)
+            record["after"] = metrics()
+            if deteriorated(record["before"], record["after"]):
+                _rollback_owned(results, store)
+            record["complete"] = not any(result.get("incomplete") for result in results)
             write_private_json(journal, record)
         except (OSError, ValueError, WorkerTimeout, KeyboardInterrupt):
-            # The last durable pending intent remains valid; the caller keeps the
-            # completed/uncertain in-memory result and can save it with diagnosis.
-            pass
+            _incomplete_actions(actions, results)
+            # Only returned override IDs identify our changes. A mutation interrupted
+            # before returning its ID stays uncertain and expires under its bounded TTL;
+            # never infer ownership by enumerating other clients' override files.
+            _rollback_owned(results, store)
+            record["complete"] = False
+            if record["after"] is None:
+                try:
+                    record["after"] = metrics()
+                except (OSError, ValueError, WorkerTimeout, KeyboardInterrupt):
+                    pass
+            try:
+                write_private_json(journal, record)
+            except (OSError, ValueError, WorkerTimeout, KeyboardInterrupt):
+                # The last durable pending intent remains valid; the caller keeps the
+                # completed/uncertain in-memory result and can save it with diagnosis.
+                pass
+    except CleanupTimeout:
+        # Terminal deadline: preserve bounded in-memory facts, never try more I/O.
+        _incomplete_actions(actions, results)
+        raise
     return results
 
 
@@ -446,83 +463,104 @@ def _investigate(directory: Path, *, actions: bool, scheduled: bool) -> dict:
     retain(report_dir)
     prompt = model_projection(report)
     reported_jobs = json.loads(prompt)["jobs"]
-    answer_ready = False
     try:
-        raw = investigate(prompt, settings)
-        answer = validate_answer(raw, reported_jobs, trusted)
-        candidate = dict(saved, answer=answer)
-        reserve_report(candidate)
-        saved = candidate
-        answer_ready = True
-        saved["action_results"] = []
-        write_private_json(path, saved)
-        # Consent is hot-read after inference, immediately before applying actions.
-        current = load_settings()
-        consent = (
-            current.investigator == "codex" and current.automatic_actions and (scheduled or actions)
-        )
-        if consent:
-            retain(journal_dir, reserve=1)
-        apply_actions(
-            answer,
-            trusted,
-            store,
-            consent=consent,
-            journal=journal_dir / name,
-            consent_check=automatic_consent,
-            results=saved["action_results"],
-        )
-        saved["status"] = (
-            "diagnosed_actions_incomplete"
-            if any(item.get("incomplete") for item in saved["action_results"])
-            else "diagnosed"
-        )
-    except (
-        OSError,
-        ValueError,
-        subprocess.SubprocessError,
-        WorkerTimeout,
-        KeyboardInterrupt,
-    ) as exc:
-        if answer_ready:
-            ordered = sorted(saved["answer"]["actions"], key=lambda item: item["kind"] == "restart")
-            _incomplete_actions(ordered, saved["action_results"])
-            _rollback_owned(saved["action_results"], store)
-            _save_interrupted_journal(journal_dir / name, saved["action_results"])
-            saved["status"] = "diagnosed_actions_incomplete"
-        else:
-            if isinstance(exc, InvestigatorError):
-                saved["diagnostic"] = str(exc)
-            saved["status"] = "diagnostic_unavailable"
-    persisted = False
-    try:
-        write_private_json(path, saved)
-        persisted = True
-        retain(journal_dir)
-    except (OSError, ValueError, WorkerTimeout, KeyboardInterrupt) as exc:
-        # Never erase validated diagnosis or known effects because storage failed.
-        if answer_ready:
-            saved["status"] = "diagnosed_actions_incomplete"
-            if isinstance(exc, WorkerTimeout | KeyboardInterrupt):
+        answer_ready = False
+        try:
+            raw = investigate(prompt, settings)
+            answer = validate_answer(raw, reported_jobs, trusted)
+            candidate = dict(saved, answer=answer)
+            reserve_report(candidate)
+            saved = candidate
+            answer_ready = True
+            saved["action_results"] = []
+            write_private_json(path, saved)
+            # Consent is hot-read after inference, immediately before applying actions.
+            current = load_settings()
+            consent = (
+                current.investigator == "codex"
+                and current.automatic_actions
+                and (scheduled or actions)
+            )
+            if consent:
+                retain(journal_dir, reserve=1)
+            apply_actions(
+                answer,
+                trusted,
+                store,
+                consent=consent,
+                journal=journal_dir / name,
+                consent_check=automatic_consent,
+                results=saved["action_results"],
+            )
+            saved["status"] = (
+                "diagnosed_actions_incomplete"
+                if any(item.get("incomplete") for item in saved["action_results"])
+                else "diagnosed"
+            )
+        except (
+            OSError,
+            ValueError,
+            subprocess.SubprocessError,
+            WorkerTimeout,
+            KeyboardInterrupt,
+        ) as exc:
+            if answer_ready:
                 ordered = sorted(
                     saved["answer"]["actions"], key=lambda item: item["kind"] == "restart"
                 )
                 _incomplete_actions(ordered, saved["action_results"])
                 _rollback_owned(saved["action_results"], store)
                 _save_interrupted_journal(journal_dir / name, saved["action_results"])
-                persisted = False
-                try:
-                    write_private_json(path, saved)
-                    persisted = True
-                except (OSError, ValueError, WorkerTimeout, KeyboardInterrupt):
-                    pass
-    result = {
-        key: saved[key]
-        for key in ("status", "diagnostic", "answer", "action_results")
-        if key in saved
-    }
-    result["report_persisted"] = persisted
-    return result
+                saved["status"] = "diagnosed_actions_incomplete"
+            else:
+                if isinstance(exc, InvestigatorError):
+                    saved["diagnostic"] = str(exc)
+                saved["status"] = "diagnostic_unavailable"
+        persisted = False
+        try:
+            write_private_json(path, saved)
+            persisted = True
+            retain(journal_dir)
+        except (OSError, ValueError, WorkerTimeout, KeyboardInterrupt) as exc:
+            # Never erase validated diagnosis or known effects because storage failed.
+            if answer_ready:
+                saved["status"] = "diagnosed_actions_incomplete"
+                if isinstance(exc, WorkerTimeout | KeyboardInterrupt):
+                    ordered = sorted(
+                        saved["answer"]["actions"], key=lambda item: item["kind"] == "restart"
+                    )
+                    _incomplete_actions(ordered, saved["action_results"])
+                    _rollback_owned(saved["action_results"], store)
+                    _save_interrupted_journal(journal_dir / name, saved["action_results"])
+                    persisted = False
+                    try:
+                        write_private_json(path, saved)
+                        persisted = True
+                    except (OSError, ValueError, WorkerTimeout, KeyboardInterrupt):
+                        pass
+        result = {
+            key: saved[key]
+            for key in ("status", "diagnostic", "answer", "action_results")
+            if key in saved
+        }
+        result["report_persisted"] = persisted
+        return result
+    except CleanupTimeout:
+        # The cleanup alarm is terminal. Return what is already known without
+        # another metric read, rollback, journal write or persistence retry.
+        if "answer" in saved:
+            ordered = sorted(saved["answer"]["actions"], key=lambda item: item["kind"] == "restart")
+            _incomplete_actions(ordered, saved.setdefault("action_results", []))
+            saved["status"] = "diagnosed_actions_incomplete"
+        else:
+            saved["status"] = "diagnostic_unavailable"
+        result = {
+            key: saved[key]
+            for key in ("status", "diagnostic", "answer", "action_results")
+            if key in saved
+        }
+        result["report_persisted"] = False
+        return result
 
 
 def automatic_consent() -> bool:
@@ -534,21 +572,46 @@ class WorkerTimeout(Exception):
     """Total investigation budget, distinct from recoverable per-action errors."""
 
 
+class CleanupTimeout(BaseException):
+    """Terminal cleanup expiry; recoverable I/O handlers must never swallow it."""
+
+
 @contextmanager
 def worker_deadline(*, seconds: float = 120):
-    def expired(_signum, _frame):
-        raise WorkerTimeout("investigation time budget exceeded")
+    active = _active_deadline.get()
+    if active is not None:
+        # Nested rollback scopes share the root alarm. They cannot create a new
+        # grace period, disarm it on exit, or resurrect an expired outer timer.
+        if active["cleanup_until"] is not None and time.monotonic() >= active["cleanup_until"]:
+            raise CleanupTimeout("investigation cleanup budget exhausted")
+        yield
+        return
 
-    previous = signal.signal(signal.SIGALRM, expired)
     timer = signal.getitimer(signal.ITIMER_REAL)
     started = time.monotonic()
-    signal.setitimer(signal.ITIMER_REAL, min(seconds, timer[0]) if timer[0] else seconds)
+    duration = min(seconds, timer[0]) if timer[0] else seconds
+    state = {"deadline": started + duration, "cleanup_until": None}
+    token = _active_deadline.set(state)
+
+    def expired(_signum, _frame):
+        if state["cleanup_until"] is None:
+            # Absolute and nonrenewable: late delivery consumes grace too.
+            state["cleanup_until"] = state["deadline"] + CLEANUP_GRACE_SECONDS
+            remaining = state["cleanup_until"] - time.monotonic()
+            if remaining > 0:
+                signal.setitimer(signal.ITIMER_REAL, remaining)
+                raise WorkerTimeout("investigation time budget exceeded")
+        raise CleanupTimeout("investigation cleanup budget exhausted")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, duration)
     try:
         yield
     finally:
         remaining = max(0, timer[0] - (time.monotonic() - started)) if timer[0] else 0
         signal.setitimer(signal.ITIMER_REAL, remaining, timer[1])
         signal.signal(signal.SIGALRM, previous)
+        _active_deadline.reset(token)
 
 
 def run_investigation(directory: Path, *, actions=False, scheduled=False, lock_fd=None) -> dict:
@@ -628,7 +691,14 @@ def main(argv=None) -> int:
                 )
         print(json.dumps(result, allow_nan=False, ensure_ascii=True))
         return 0
-    except (OSError, ValueError, TypeError, subprocess.SubprocessError, WorkerTimeout):
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        subprocess.SubprocessError,
+        WorkerTimeout,
+        CleanupTimeout,
+    ):
         print(
             "codex-resource: private settings, telemetry, or investigator unavailable",
             file=sys.stderr,

@@ -662,9 +662,10 @@ and supplies fixed instructions plus a strict output schema. Unsupported CLI,
 model catalog or managed policy fails diagnostically. No unrestricted fallback
 or provider transport override is used. The whole provider invocation, including
 capability probes, has a 120-second budget and bounded output. The worker also
-has a 120-second overall deadline. After that deadline, rollback of known
-reversible overrides gets at most five seconds of best-effort cleanup; this
-grace never extends a still-active worker deadline. Failed or interrupted writes
+has a 120-second overall deadline. All post-timeout rollback, metrics, journal
+recovery and report persistence share one absolute five-second cleanup grace.
+It cannot be renewed by nested cleanup or retries, and exhaustion stops further
+I/O while preserving known diagnosis/results in memory. Failed or interrupted writes
 retain honest pending/uncertain action results and preserve validated diagnosis.
 An override whose ID could not be returned stays uncertain until its bounded TTL
 expires; unrelated overrides are never selected for cleanup.

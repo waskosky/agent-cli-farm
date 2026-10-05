@@ -867,6 +867,194 @@ class IncidentTests(unittest.TestCase):
         self.assertEqual(result["action_results"][0]["rollback"], "removed")
         self.assertTrue(result["report_persisted"])
 
+    def test_one_cleanup_budget_bounds_recovery_journal_and_releases_lock(self):
+        import signal
+        import time
+
+        from codex_looper.resource_config import write_private_json
+
+        writes = 0
+        recovery_timers = []
+        results = []
+
+        def write(path, value):
+            nonlocal writes
+            writes += 1
+            if writes == 3:
+                time.sleep(0.6)
+            if writes >= 4:
+                recovery_timers.append(signal.getitimer(signal.ITIMER_REAL)[0])
+                time.sleep(0.4)
+            return write_private_json(path, value)
+
+        started = time.monotonic()
+        stopped = None
+        with (
+            patch.object(incidents, "CLEANUP_GRACE_SECONDS", 0.15, create=True),
+            patch.object(incidents, "write_private_json", side_effect=write),
+        ):
+            try:
+                with incidents.incident_lock(self.root), incidents.worker_deadline(seconds=0.3):
+                    incidents.apply_actions(
+                        {"actions": [{"kind": "restart", "job_id": self.job}]},
+                        self.trusted,
+                        self.store,
+                        consent=True,
+                        journal=self.root / "journal.json",
+                        metrics=lambda: {},
+                        results=results,
+                    )
+            except BaseException as exc:
+                stopped = exc
+        self.assertTrue(recovery_timers and recovery_timers[0] > 0, recovery_timers)
+        self.assertLess(time.monotonic() - started, 0.62)
+        self.assertEqual(type(stopped).__name__, "CleanupTimeout")
+        self.assertEqual(writes, 4)
+        self.store.request_restart.assert_called_once()
+        self.assertEqual(results[0]["status"], "restart_requested_nonreversible")
+        with incidents.incident_lock(self.root) as lock:
+            self.assertIsNotNone(lock)
+
+    def test_one_cleanup_budget_stops_stalled_metrics_before_another_write(self):
+        import time
+
+        from codex_looper.resource_config import write_private_json
+
+        writes = 0
+        samples = 0
+
+        def write(path, value):
+            nonlocal writes
+            writes += 1
+            if writes == 3:
+                time.sleep(0.6)
+            return write_private_json(path, value)
+
+        def metrics():
+            nonlocal samples
+            samples += 1
+            if samples == 2:
+                time.sleep(0.4)
+            return {}
+
+        stopped = None
+        with (
+            patch.object(incidents, "CLEANUP_GRACE_SECONDS", 0.15, create=True),
+            patch.object(incidents, "write_private_json", side_effect=write),
+        ):
+            try:
+                with incidents.worker_deadline(seconds=0.3):
+                    incidents.apply_actions(
+                        {"actions": [{"kind": "restart", "job_id": self.job}]},
+                        self.trusted,
+                        self.store,
+                        consent=True,
+                        journal=self.root / "journal.json",
+                        metrics=metrics,
+                    )
+            except BaseException as exc:
+                stopped = exc
+        self.assertEqual(type(stopped).__name__, "CleanupTimeout")
+        self.assertEqual(writes, 3)
+        self.assertEqual(samples, 2)
+
+    def test_multiple_rollbacks_share_grace_without_followup_persistence(self):
+        import time
+
+        from codex_looper.resource_config import write_private_json
+
+        writes = 0
+        results = []
+        other = "d" * 32
+        self.store.defer_job.side_effect = ["b" * 32, "c" * 32]
+        rolled = []
+
+        def rollback(key):
+            rolled.append(key)
+            time.sleep(0.02 if len(rolled) == 1 else 0.4)
+
+        self.store.rollback_override.side_effect = rollback
+
+        def write(path, value):
+            nonlocal writes
+            writes += 1
+            if writes == 5:
+                time.sleep(0.6)
+            return write_private_json(path, value)
+
+        actions = [
+            {"kind": "defer", "job_id": key, "ttl_seconds": 300} for key in (self.job, other)
+        ]
+        stopped = None
+        with (
+            patch.object(incidents, "CLEANUP_GRACE_SECONDS", 0.15, create=True),
+            patch.object(incidents, "write_private_json", side_effect=write),
+        ):
+            try:
+                with incidents.worker_deadline(seconds=0.3):
+                    incidents.apply_actions(
+                        {"actions": actions},
+                        dict(self.trusted, **{other: {}}),
+                        self.store,
+                        consent=True,
+                        journal=self.root / "journal.json",
+                        metrics=lambda: {},
+                        results=results,
+                    )
+            except BaseException as exc:
+                stopped = exc
+        self.assertEqual(type(stopped).__name__, "CleanupTimeout")
+        self.assertEqual(rolled, ["b" * 32, "c" * 32])
+        self.assertEqual(writes, 5)
+        self.assertEqual(results[0]["rollback"], "removed")
+        self.assertEqual(results[1]["rollback"], "unavailable")
+
+    def test_final_report_shares_expired_worker_grace_and_keeps_diagnosis(self):
+        import signal
+        import time
+
+        from codex_looper import resource_investigator
+        from codex_looper.resource_config import write_private_json
+
+        settings = ResourceSettings(investigator="codex", automatic_actions=True)
+        report = {"memory": {}, "jobs": self.jobs, "consumers": []}
+        journal_writes = report_writes = 0
+        timers = []
+
+        def write(path, value):
+            nonlocal journal_writes, report_writes
+            if path.parent.name == "journals":
+                journal_writes += 1
+                if journal_writes == 3:
+                    time.sleep(0.6)
+            elif path.parent.name == "reports":
+                report_writes += 1
+                if report_writes >= 3:
+                    timers.append(signal.getitimer(signal.ITIMER_REAL)[0])
+                    time.sleep(0.4)
+            return write_private_json(path, value)
+
+        with (
+            patch.object(incidents, "CLEANUP_GRACE_SECONDS", 0.15, create=True),
+            patch.object(incidents, "load_settings", return_value=settings),
+            patch.object(incidents, "read_memory", return_value=Memory(8192, 2048, 0)),
+            patch.object(incidents, "JobStore", return_value=self.store),
+            patch.object(incidents, "collect_report", return_value=(report, self.trusted)),
+            patch.object(
+                resource_investigator,
+                "investigate",
+                return_value=self.answer([{"kind": "restart", "job_id": self.job}]),
+            ),
+            patch.object(incidents, "write_private_json", side_effect=write),
+            incidents.worker_deadline(seconds=0.3),
+        ):
+            result = incidents._investigate(self.root, actions=True, scheduled=False)
+        self.assertTrue(timers and timers[0] > 0, timers)
+        self.assertEqual(report_writes, 3)
+        self.assertEqual(result["answer"]["diagnosis"], "fixture")
+        self.assertEqual(result["action_results"][0]["status"], "restart_requested_nonreversible")
+        self.assertFalse(result["report_persisted"])
+
 
 class ResourceCliTests(unittest.TestCase):
     def setUp(self):
