@@ -16,7 +16,7 @@ The starting commit is upstream `cc15bc2`. Baseline: 568 unit tests passed.
 **Files:** Create `codex_looper/resource_policy.py`, `tests/test_resource_policy.py`;
 modify `codex_looper/health.py`, `tests/test_health.py`, `README.md`.
 
-- [ ] Write failing tests for fixed default thresholds on 4/8/64 GiB hosts, exact
+- [x] Write failing tests for fixed default thresholds on 4/8/64 GiB hosts, exact
   1024/1536 boundaries, percentage compatibility, invalid/unknown counters, and
   swap/stall behavior. A representative assertion is:
 
@@ -28,31 +28,36 @@ def test_default_headroom_does_not_scale_with_ram(self):
         self.assertEqual(Memory(total, 2048, 0).level(Limits()), "ok")
 ```
 
-- [ ] Run `python3 -m unittest discover -s tests -p 'test_resource_policy.py' -v`
+- [x] Run `python3 -m unittest discover -s tests -p 'test_resource_policy.py' -v`
   and `python3 -m unittest discover -s tests -p 'test_health.py' -v`; confirm
   feature assertions fail before implementation.
-- [ ] Implement validated `HeadroomSettings` and `HeadroomGate`. The gate API is
+- [x] Implement validated `HeadroomSettings` and `HeadroomGate`. The gate API is
   `sample(memory, now=<monotonic seconds>) -> bool`, where true means admission
   is allowed. Enter waiting at <=1024 MiB or critical memory stalls; exit after
   >=1536 MiB and below-warning stalls continuously for 30 seconds. Unknown
   counters and total <=1536 MiB return true with an advisory reason. Expose a
   human-readable `reason` and never issue process operations.
-- [ ] Preserve the existing `Limits` constructor compatibility and restore exit
+- [x] Preserve the existing `Limits` constructor compatibility and restore exit
   contracts. Add fixed MiB fields/policy, explicit MiB overrides, and preserve
   legacy explicit percentage variables. Append I/O pressure as a separate
   optional memory-reading field without making I/O stalls a RAM restore refusal.
-- [ ] Test recovery resets, clock rollback, configuration validation, and
+- [x] Test recovery resets, clock rollback, configuration validation, and
   thresholds that do not fit a tiny host. Verify critical advisory/enforced
   behavior and shared-server accounting regressions remain covered.
-- [ ] Update the health README, run the affected suites and pinned Ruff, commit,
+- [x] Update the health README, run the affected suites and pinned Ruff, commit,
   and complete spec and quality reviews before Task 2.
 
 ## Task 2: Managed scopes, job identity, and explicit host protection
 
+Deliver this task in two sequential reviewed parts: 2A implements managed jobs,
+private settings, and launch integration; 2B implements the standalone host helper.
+Neither part runs privileged changes during development.
+
 **Files:** Create `bin/codex-job`, `codex_looper/resource_jobs.py`,
+`codex_looper/resource_config.py`, `tests/test_resource_config.py`,
 `bin/codex-resource-host`, `tests/test_resource_jobs.py`,
 `tests/test_resource_host.py`; modify `bin/codex-add`, `tests/test_add_scripts.py`,
-`pyproject.toml`, `README.md`, `AGENTS.md`.
+`codex_looper/process.py`, `tests/test_looper.py`, `pyproject.toml`, `README.md`, `AGENTS.md`.
 
 - [ ] Add failing CLI/process tests with private homes and systemd doubles.
   Verify argv preservation, agent bypass, optional queue timeout/manual bypass,
@@ -72,10 +77,13 @@ self.assertEqual(result.stdout.strip(), "literal $value; `data`")
 ```
 
 - [ ] Run the new suites, observe meaningful failures, and implement the runner.
-  Use separate `codexfarm-interactive.slice` and `codexfarm-batch.slice`, generated
+  Use shared parent `codexfarm.slice`, separate `codexfarm-interactive.slice` and `codexfarm-batch.slice`, generated
   `codexfarm-agent-<hex>.scope` / `codexfarm-batch-<hex>.scope` units, and argv-based
   subprocesses. Batch CPU/I/O weights are 25, Nice is 10, and OOM score is +250;
   agents have no imposed ceilings. Root-side agent OOM preference is -250.
+  Agent scopes pass through their shared parent protection with MemoryLow=infinity.
+  Derive a missing user-bus environment only from an owned `/run/user/<uid>`
+  directory/socket; preserve explicitly configured bus environments.
 - [ ] Implement private job records and strict identity validation using PID
   start ticks, UID, scope generation and actual cgroup membership. Accept
   `--restartable` only for batch jobs, with one restart maximum and graceful
@@ -95,16 +103,19 @@ self.assertEqual(result.stdout.strip(), "literal $value; `data`")
 - [ ] Integrate agent wrapping only when `CODEXFARM_RESOURCE_PROTECTION=1` or
   private resource settings enable it. Trusted shell fragments continue to be
   interpreted once by the existing shell path; the runner receives their exact
-  resulting argv. Normal setup remains privilege-free and creates no services.
+  resulting argv. Apply the same optional wrapping to provider commands in the
+  looper without altering provider argument construction or recovery identities.
+  Normal setup remains privilege-free and creates no services.
 - [ ] Run affected suites and lint, document job/host commands and trust
   boundaries, commit, then complete both review stages.
 
 ## Task 3: Incident reports, remote diagnosis, authorized remedies, and rollout
 
-**Files:** Create `bin/codex-resource`, `codex_looper/resource_config.py`,
+**Files:** Create `bin/codex-resource`,
 `codex_looper/resource_reports.py`, `codex_looper/resource_incidents.py`,
 `codex_looper/resource_investigator.py`, `tests/test_resource_incidents.py`,
-`tests/test_resource_investigator.py`, `tests/test_resource_config.py`;
+`tests/test_resource_investigator.py`; extend `codex_looper/resource_config.py`
+and `tests/test_resource_config.py` as needed;
 modify `codex_looper/health.py`, `codex_looper/resource_jobs.py`, `setup.sh`,
 `tests/test_setup.py`, `README.md`, `AGENTS.md`, `pyproject.toml`.
 

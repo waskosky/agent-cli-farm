@@ -46,7 +46,9 @@ agent; an explicitly requested hard limit fails before execution if enforcement
 is unavailable.
 
 Future agents and managed batch jobs use separate systemd user scopes and slices.
-The interactive slice has a shared 1 GiB `MemoryLow` budget. The batch slice has
+The `codexfarm.slice` parent and interactive slice have a shared 1 GiB `MemoryLow`
+budget. Agent scope `MemoryLow=infinity` passes through that shared parent budget;
+it does not create an independent reservation for each agent. The batch slice has
 lower CPU and I/O weights, with no CPU quota, memory ceiling, swap ceiling,
 or task ceiling by default. Batch processes get a modest positive OOM score;
 interactive protection uses a modest negative score where privileges allow.
@@ -61,7 +63,9 @@ manifests. Records are written atomically with owner-only permissions.
 An explicit `--restartable` declaration authorizes at most one graceful restart
 of a batch job per run. Agents cannot be declared restartable. A registered
 worker-count environment setting allows future worker-count reductions without
-editing project files. Actions operate on exact live job identities, verify
+editing project files. Such overrides are scoped to an exact private command
+recipe fingerprint and expire; applying a reduction to an already running job
+requires that job's separately declared restart consent. Actions operate on exact live job identities, verify
 ownership and process/scope generation, and never select processes by name or
 largest RSS. A restart waits for recovered headroom before re-execution.
 
@@ -80,7 +84,8 @@ scores inside managed batch scopes. It must verify UID and actual cgroup
 membership through `/proc`, bound its work, and never read or execute an LLM
 response, user command, or arbitrary job recipe as root. Existing verified
 agent PIDs can receive a one-shot score adjustment without moving or restarting
-them. The helper imposes no workload limits, sends no signals to agents, and
+them; their existing session scopes receive the corresponding runtime protection
+within the same shared parent budget. The helper imposes no workload limits, sends no signals to agents, and
 does not alter the retired host guard or backup units.
 
 Applying and removing are idempotent, refuse masked target units, preserve
