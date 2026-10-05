@@ -13,6 +13,8 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from codex_looper.resource_policy import finite_number, valid_memory_reading
+
 MEMORY_FLAG_PATTERN = r"\*[0-9]+(?:\.[0-9]+)?\+?MB\*\*"
 
 
@@ -41,7 +43,10 @@ def config_directory() -> Path:
 
 
 def number(name: str, default: float) -> float:
-    value = float(os.environ.get(name, default))
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        raise ValueError(f"{name} must be a positive finite number") from None
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be a positive finite number")
     return value
@@ -52,17 +57,42 @@ class Limits:
     warning_percent: float = 20
     critical_percent: float = 10
     session_mib: float = 1024
+    policy: str = "headroom"
+    warning_mib: float = 1536
+    critical_mib: float = 1024
+
+    def __post_init__(self) -> None:
+        for name in (
+            "warning_percent",
+            "critical_percent",
+            "session_mib",
+            "warning_mib",
+            "critical_mib",
+        ):
+            value = getattr(self, name)
+            if not finite_number(value) or value <= 0:
+                raise ValueError(f"{name} must be a positive finite number")
+        if not 0 < self.critical_percent < self.warning_percent < 100:
+            raise ValueError("memory percentages must satisfy 0 < critical < warning < 100")
+        if not self.critical_mib < self.warning_mib:
+            raise ValueError("memory MiB thresholds must satisfy 0 < critical < warning")
+        if self.policy not in ("headroom", "percent"):
+            raise ValueError("CODEXFARM_MEMORY_POLICY must be headroom or percent")
 
     @classmethod
     def from_env(cls) -> Limits:
-        result = cls(
+        legacy = any(
+            name in os.environ
+            for name in ("CODEXFARM_MEMORY_WARN_PERCENT", "CODEXFARM_MEMORY_CRITICAL_PERCENT")
+        )
+        return cls(
             number("CODEXFARM_MEMORY_WARN_PERCENT", 20),
             number("CODEXFARM_MEMORY_CRITICAL_PERCENT", 10),
             number("CODEXFARM_MEMORY_SESSION_MIB", 1024),
+            os.environ.get("CODEXFARM_MEMORY_POLICY", "percent" if legacy else "headroom"),
+            number("CODEXFARM_MEMORY_WARN_MIB", 1536),
+            number("CODEXFARM_MEMORY_CRITICAL_MIB", 1024),
         )
-        if not 0 < result.critical_percent < result.warning_percent < 100:
-            raise ValueError("memory percentages must satisfy 0 < critical < warning < 100")
-        return result
 
 
 @dataclass(frozen=True)
@@ -71,12 +101,20 @@ class Memory:
     available_mib: float
     swap_used_mib: float
     pressure_percent: float = 0
+    io_pressure_percent: float = 0
 
     def level(self, limits: Limits) -> str:
-        available = 100 * self.available_mib / self.total_mib
-        if available <= limits.critical_percent or self.pressure_percent >= 25:
+        if not valid_memory_reading(self):
+            return "unavailable"
+        if limits.policy == "percent":
+            available = 100 * (self.available_mib / self.total_mib)
+            critical, warning = limits.critical_percent, limits.warning_percent
+        else:
+            available = self.available_mib
+            critical, warning = limits.critical_mib, limits.warning_mib
+        if available <= critical or self.pressure_percent >= 25:
             return "critical"
-        if available <= limits.warning_percent or self.pressure_percent >= 10:
+        if available <= warning or self.pressure_percent >= 10:
             return "warning"
         return "ok"
 
@@ -84,7 +122,8 @@ class Memory:
         return (
             f"{self.available_mib:.0f}/{self.total_mib:.0f} MiB RAM available, "
             f"{self.swap_used_mib:.0f} MiB swap used, "
-            f"memory stalls {self.pressure_percent:.1f}%"
+            f"memory stalls {self.pressure_percent:.1f}%, "
+            f"I/O stalls {self.io_pressure_percent:.1f}%"
         )
 
 
@@ -98,20 +137,27 @@ def read_memory(proc: Path | None = None) -> Memory | None:
         total, available = fields["MemTotal"], fields["MemAvailable"]
         if total <= 0 or not 0 <= available <= total:
             return None
-    except (OSError, ValueError, KeyError, IndexError):
+    except (OSError, ValueError, KeyError, IndexError, OverflowError):
         return None
-    pressure = 0.0
+    return Memory(
+        total,
+        available,
+        max(0, fields.get("SwapTotal", 0) - fields.get("SwapFree", 0)),
+        read_pressure(proc / "pressure/memory"),
+        read_pressure(proc / "pressure/io"),
+    )
+
+
+def read_pressure(path: Path) -> float:
+    """Unavailable PSI is optional; keep memory and I/O signals separate."""
     try:
-        for line in (proc / "pressure/memory").read_text().splitlines():
+        for line in path.read_text().splitlines():
             if line.startswith("some "):
-                pressure = float(dict(item.split("=", 1) for item in line.split()[1:])["avg10"])
-                if not math.isfinite(pressure) or not 0 <= pressure <= 100:
-                    pressure = 0.0
+                value = float(dict(item.split("=", 1) for item in line.split()[1:])["avg10"])
+                return value if math.isfinite(value) and 0 <= value <= 100 else 0.0
     except (OSError, ValueError, KeyError):
         pass
-    return Memory(
-        total, available, max(0, fields.get("SwapTotal", 0) - fields.get("SwapFree", 0)), pressure
-    )
+    return 0.0
 
 
 def tree_memory(
@@ -386,7 +432,17 @@ class HealthMonitor:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Report farm memory, backup and monitor health.")
+    parser = argparse.ArgumentParser(
+        description="Report farm memory, backup and monitor health.",
+        epilog=(
+            "RAM defaults: warning <=1536 MiB available, critical <=1024 MiB. "
+            "CODEXFARM_MEMORY_POLICY=headroom|percent; CODEXFARM_MEMORY_WARN_MIB "
+            "and CODEXFARM_MEMORY_CRITICAL_MIB override headroom. Explicit legacy "
+            "CODEXFARM_MEMORY_WARN_PERCENT or CODEXFARM_MEMORY_CRITICAL_PERCENT select percent "
+            "unless policy=headroom. Memory PSI warns at 10%, critical at 25%; "
+            "I/O PSI and used swap are informational."
+        ),
+    )
     parser.add_argument(
         "--restore-check", action="store_true", help="report RAM pressure without blocking restore"
     )

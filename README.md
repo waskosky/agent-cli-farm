@@ -579,15 +579,25 @@ Defaults and environment overrides (set before starting the annotator):
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `CODEXFARM_MEMORY_WARN_PERCENT` | `20` | Warn at or below this percentage of RAM available |
-| `CODEXFARM_MEMORY_CRITICAL_PERCENT` | `10` | Critical pressure; restore stops only with explicit enforcement |
+| `CODEXFARM_MEMORY_POLICY` | `headroom` | Use fixed available MiB; `percent` selects percentage thresholds. Explicit legacy percentage variables select `percent` when policy is absent |
+| `CODEXFARM_MEMORY_WARN_MIB` | `1536` | In headroom mode, warn at or below this available RAM |
+| `CODEXFARM_MEMORY_CRITICAL_MIB` | `1024` | In headroom mode, critical at or below this available RAM; restore stops only with explicit enforcement |
+| `CODEXFARM_MEMORY_WARN_PERCENT` | `20` | In percent mode, warn at or below this percentage of RAM available |
+| `CODEXFARM_MEMORY_CRITICAL_PERCENT` | `10` | In percent mode, critical at or below this percentage of RAM available |
 | `CODEXFARM_MEMORY_SESSION_MIB` | `1024` | Warn when a window's process tree exceeds this RSS |
 | `CODEXFARM_HEALTH_ENABLED` | `1` | Set to `0` to disable periodic memory and optional archive checks |
 | `CODEXFARM_BACKUP_HEALTH_ENABLED` | `0` | Set to `1` to require periodic full archives; archive watchers and explicit service archive consent also opt in |
 | `CODEXFARM_HEALTH_STATUS` | `1` | Set to `0` to leave `status-right` formatting alone |
 
+The default 1536/1024 MiB thresholds stay fixed on 4, 8, and 64 GiB hosts.
+Set `CODEXFARM_MEMORY_POLICY=headroom` to use MiB thresholds even when legacy
+percentage variables are present. All thresholds must be positive and finite,
+with critical below warning; percentages must also be below 100. Legacy
+percentage settings remain validated in headroom mode.
+
 Linux memory pressure stalls (`some avg10`) also trigger warning at 10% and
-critical at 25%. Previously used swap alone does not trigger an alert. RSS is
+critical at 25%. I/O stalls are reported separately and do not cause a RAM alert
+or restore refusal. Previously used swap alone does not trigger an alert. RSS is
 an attribution estimate that can count shared pages more than once; host
 pressure uses `MemAvailable`, not summed process RSS. The monitor reports swap
 usage for context. It never kills, pauses, or restarts chats. A 15-second poll
