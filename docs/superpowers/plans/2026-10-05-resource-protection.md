@@ -122,11 +122,17 @@ self.assertEqual(result.stdout.strip(), "literal $value; `data`")
 
 ## Task 3: Incident reports, remote diagnosis, authorized remedies, and rollout
 
-The Task 3 implementation is committed at `7898d2`; 142 focused/affected tests
+Task 3 passed specification and quality review at `0ca5641`. The final integrated
+feature passed review at `fcd5538`, including safe migration of the existing farm
+state directory after setup. All 767 unit tests and required publication checks
 pass. Seven native CLI loopback cases verify final JSON, rejected tools,
 instruction/skill isolation, a positive control, and the actual 16 KiB input
-budget. Tests use synthetic authentication; remote login/model execution and
-production activation remain unverified. Independent review is in progress.
+budget. Review regressions cover exact cgroup paths, stable process samples,
+truthful interrupted-action journals, and one nonrenewable cleanup deadline.
+Private-umask fixtures and post-action alarm fixtures avoid environment and
+filesystem timing assumptions; substituting the defective timer makes all four
+alarm regressions fail. Tests use synthetic authentication; actual remote
+login/model execution and privileged activation remain separate rollout checks.
 
 **Files:** Create `bin/codex-resource`,
 `codex_looper/resource_reports.py`, `codex_looper/resource_incidents.py`,
@@ -166,7 +172,7 @@ modify `codex_looper/health.py`, `codex_looper/resource_jobs.py`, `setup.sh`,
   single restart request on a registered restartable batch job. Automatic
   actions require separate consent. Journal before/after metrics and bounded
   reversible-policy rollback; never execute generated shell commands.
-- [ ] Verify setup installation parity and documentation. Run all required
+- [x] Verify setup installation parity and documentation. Run all required
   repository checks and two-stage review; address every material finding.
 - [ ] Push a PR, wait for exact-head CI, merge to `main`, synchronize the local
   main checkout, and install helpers with `--without-session-hook`.
