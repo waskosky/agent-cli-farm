@@ -912,6 +912,13 @@ if [ ${#tool_args[@]} -gt 0 ]; then
     CMDLINE="$CMDLINE $quoted_arg"
   done
 fi
+# The original tmux shell interprets trusted ARGS_ENV exactly once. The
+# resource runner receives the resulting argv, including literal tool arguments.
+JOB_RUNNER="$(dirname "$0")/codex-job"
+if [ -x "$JOB_RUNNER" ] && "$JOB_RUNNER" _agent-enabled; then
+  printf -v quoted_job_runner '%q' "$JOB_RUNNER"
+  CMDLINE="$quoted_job_runner run --role agent -- $CMDLINE"
+fi
 WINDOW_CMDLINE="$CMDLINE"
 if remain_on_exit_enabled; then
   WINDOW_CMDLINE="tmux set-window-option -q remain-on-exit on >/dev/null 2>&1 || true; exec $CMDLINE"

@@ -829,6 +829,58 @@ fresh_session_per_loop = "false"
         self.assertLess(elapsed, 2)
         self.assertIsNotNone(result.returncode)
 
+    def test_resource_wrapper_keeps_looper_owned_session_and_timeout_cleanup(self):
+        from unittest.mock import patch
+
+        from codex_looper.resource_jobs import JobStore, process_identity
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bindir = root / "bin"
+            bindir.mkdir()
+            make_executable(bindir / "systemctl", "#!/usr/bin/env bash\nexit 1\n")
+            env = {
+                "HOME": td,
+                "XDG_STATE_HOME": str(root / "state"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "CODEXFARM_RESOURCE_PROTECTION": "1",
+                "PATH": str(bindir) + ":" + os.environ["PATH"],
+            }
+            started = []
+
+            async def exercise():
+                return await self.looper.run_command(
+                    command=[
+                        sys.executable,
+                        "-c",
+                        "import os,json,time; print(json.dumps([os.getpid(),os.getpgrp(),os.getsid(0)]),flush=True); time.sleep(20)",
+                    ],
+                    cwd=root,
+                    env=env,
+                    timeout_seconds=3,
+                    log_path=root / "run.log",
+                    agent_kind="generic",
+                    patterns=[],
+                    scan_stdout=False,
+                    kill_on_stop_pattern=True,
+                    stream_output=False,
+                    on_process_started=lambda pid, pgid: started.append((pid, pgid)),
+                )
+
+            result = asyncio.run(exercise())
+            self.assertTrue(result.timed_out)
+            self.assertEqual(started[0][0], started[0][1])
+            with patch.dict(os.environ, env):
+                store = JobStore()
+                records = list(store.path.glob("*.json"))
+                records = [p for p in records if len(p.stem) == 32]
+                self.assertEqual(len(records), 1, "agent launch was not wrapped")
+                record = json.loads(records[0].read_text())
+            self.assertEqual(record["role"], "agent")
+            self.assertIsNone(process_identity(record["payload_pid"]))
+            output = (root / "run.log").read_text()
+            self.assertIn(", " + str(started[0][0]) + ", " + str(started[0][0]) + "]", output)
+
     def test_run_command_drains_jsonl_line_larger_than_asyncio_default_limit(self) -> None:
         async def exercise() -> tuple[object, str, int]:
             large_text = "x" * (70 * 1024)

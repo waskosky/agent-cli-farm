@@ -612,6 +612,79 @@ or older-than-60-second heartbeat once managed sessions have been registered.
 If the annotator itself stops, run the doctor: a dead process cannot issue its
 own live warning. Host pressure checks currently require Linux counters.
 
+### Optional managed jobs
+
+`codex-job run --role batch -- command argument ...` runs literal argv without
+shell expansion or default resource ceilings. User scopes are optional by default:
+if the user manager or scope launcher is unavailable, it warns before launching
+without a scope. `--scope required` fails before the payload instead. Use
+`--scope off` to avoid user-manager calls entirely.
+
+```bash
+# Advisory admission, lower relative batch priorities, no caps:
+codex-job run --role batch -- make all
+
+# Wait for headroom before new work; declare workers for a future temporary reduction:
+codex-job run --role batch --memory-policy queue --queue-timeout 300 \
+  --worker-env CARGO_BUILD_JOBS --workers 8 -- cargo build
+
+# Explicit batch-only memory enforcement; never falls back without these limits:
+codex-job run --role batch --memory-high 2048 --memory-max 3072 -- make all
+
+# Optional interactive protection, including tmux launches and Looper agents:
+CODEXFARM_RESOURCE_PROTECTION=1 codex-add -d /path/to/project
+```
+
+Batch admission is advisory unless `--memory-policy queue` is explicit or private
+settings enable `queue_background`. Queueing starts when available RAM is at most
+1024 MiB or memory stalls reach 25%. After waiting, admission needs at least
+1536 MiB and stalls below 10% continuously for 30 seconds. Unknown counters and
+hosts too small for the thresholds stay advisory. A queue timeout exits 124
+without starting the payload; `--memory-policy ignore` manually bypasses both
+headroom and temporary recipe deferrals. These checks never stop running work.
+
+Agent jobs bypass admission and retain their terminal and inherited process group.
+They cannot opt into restarts or memory ceilings. Agent scopes request relative
+CPU/I/O preference and memory protection through `codexfarm-interactive.slice`
+and its shared `codexfarm.slice` parent. Batch scopes use
+`codexfarm-batch.slice`, CPU/I/O weights of 25, nice 10, and OOM adjustment +250.
+An agent's negative OOM adjustment needs a separately opted-in privileged helper;
+the unprivileged runner reports that limitation. Runtime slice preferences install
+no unit files and preserve stronger existing parent memory protection. No scope
+sets CPU, swap, task, or time ceilings by default.
+
+Resource settings live in `$XDG_CONFIG_HOME/codexfarm/resource-settings.json`
+(default `~/.config/codexfarm`). `protect_agents`, `queue_background`, and
+`automatic_actions` default false; `investigator` defaults `off`. Settings reject
+unknown fields, invalid types, nonfinite numbers, symlinks, foreign ownership, and
+public settings files. Reading absent settings creates nothing. Explicit settings
+writes use atomic 0600 files and may tighten the owned target directory to 0700;
+ordinary optional agent lookup warns and launches normally if settings or private
+job registration are inaccessible. Use the Python `resource_config.load_settings` /
+`write_settings(ResourceSettings(...))` APIs until the configuration CLI is available.
+
+Job recipes and identity records are private under
+`$XDG_STATE_HOME/codexfarm/resources/jobs`, using 0700 directories and atomic 0600
+files. Public `JobStore.public` / `list_jobs` reports exclude argv, cwd, and
+arbitrary environment values. Remedies select recorded UID, PID/start ticks,
+cgroup, and scope generation rather than process names. Temporary worker and
+deferral overrides apply only to matching argv, cwd, and declared worker variables;
+they expire and can be rolled back. The worker allowlist is `CARGO_BUILD_JOBS`,
+`CMAKE_BUILD_PARALLEL_LEVEL`, `OMP_NUM_THREADS`, and `UV_THREADPOOL_SIZE`.
+
+`--restartable` grants a batch job permission for at most one externally requested
+restart. Memory thresholds never request a restart on their own. A request must
+revalidate live ownership and consent, sends TERM only to the dedicated batch
+process group, waits up to ten seconds for graceful cleanup, verifies no old batch descendants
+remain, and requires a fresh recovery period
+before relaunch. A recovery timeout leaves the record `queued_timeout` and exits
+124. Worker reductions affect an existing job only through this separately
+consented restart. The `JobStore.identity`, `request_restart`, `reduce_workers`,
+`defer_job`, `delete_override` (also `rollback_override`), and `recipe_overrides`
+APIs support the later incident controller. Temporary overrides last at most one
+hour, records and overrides have bounded retention, and no payload output is copied
+to this store.
+
 ### Memory labels
 
 Run `codex-memoryflag` to prefix high-memory tmux windows with measured usage, such as `*349.1MB**`. The compact `MB` label uses MiB (1024 KiB), rounded to one decimal place. It scans tmux sockets available to the current user, sums each window's pane process trees by RSS, and renames windows at or above the threshold. The threshold controls when the label appears; the number is the measured RSS, not the threshold. Shared pages can count more than once.
@@ -645,6 +718,7 @@ Tuning and controls:
 - **`codex-add [session] [directory]`** - Add a new Codex instance, optionally selecting a named farm
 - **`codex-annotator`** - Track RUN/READY/ERR state and notify when windows become READY
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
+- **`codex-job run [options] -- argv ...`** - Run declared jobs with optional scopes, batch admission and explicit restart consent
 - **`codex-health`** - Check RAM pressure, the monitor heartbeat and opted-in archive health
 - **`codex-backup [--archive]`** - Save exact farm identities; full conversation archives require `--archive`
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
@@ -665,6 +739,7 @@ Claude and Gemini equivalents use the same tmux workflow and accept the same fla
 ## Environment Variables
 
 Common:
+- **`CODEXFARM_RESOURCE_PROTECTION`** - Set to `1` to opt into optional agent scopes for add scripts and Looper (default off)
 - **`CODEX_SESSION`** - tmux session name (default: `codexfarm`)
 - **`CODEX_NAME`** - window name (default: directory basename)
 - **`CODEX_CMD`** - command to run (default: `codex`)

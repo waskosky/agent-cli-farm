@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .models import STREAM_READ_CHUNK_BYTES, ConfigError, ProcessResult
+from .resource_jobs import optional_agent_command
 from .retry import parse_output_line, safety_policy_code
 
 TerminateProcessGroup = Callable[[asyncio.subprocess.Process], Awaitable[None]]
@@ -114,6 +115,7 @@ async def run_command(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     merged_env = os.environ.copy()
     merged_env.update(env)
+    command = optional_agent_command(command, merged_env)
 
     try:
         process = await asyncio.create_subprocess_exec(

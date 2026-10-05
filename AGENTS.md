@@ -72,3 +72,31 @@ not expose a structured status channel through tmux.
   backup files and retain opted-in archive budgets and priority safeguards.
 - Annotator polling defaults to five seconds, preserving environment and CLI
   overrides and native provider titles.
+
+## Managed job identity and consent
+
+- `codex-job` and `codex_looper.resource_jobs` accept exact argv; never add shell
+  evaluation or reinterpret provider arguments or trusted launcher fragments.
+- Agent wrapping is opt-in through `CODEXFARM_RESOURCE_PROTECTION=1` or private
+  `protect_agents` settings. Agent admission is always immediate; retain terminal
+  behavior and the Looper-created process group. Agents never accept ceilings,
+  restart requests, pause, or OOM-kill remedies.
+- Batch queueing and all other resource features default off. Explicit batch
+  memory limits require scope enforcement and fail before execution if unavailable.
+  Normal optional scope failure can fall back only before the durable inner-start
+  handshake; a payload error must never cause a second execution.
+- Scope properties must be scope-supported. Apply batch nice/OOM preferences in
+  the payload trampoline. Runtime slice preferences never write/unmask unit files
+  and must preserve stronger existing shared-parent MemoryLow values.
+- All remedies require a live recorded UID, PID/start ticks, actual cgroup and
+  scope generation. Never select by process name. Restart consent is batch-only,
+  explicit, and limited to one request; termination targets only its dedicated
+  launch group, with revalidated stable handles for surviving descendants.
+- Worker overrides use only the numeric allowlist and exact recipe fingerprints;
+  bounded TTL reductions and deferrals affect future launches. Existing jobs
+  change worker counts only after a separately consented restart. Public metadata
+  excludes argv, cwd and arbitrary environment values. Private state stays bounded
+  with 0700 directories, 0600 atomic files, and stale-record cleanup.
+- Keep tests in `tests/test_resource_config.py` and `tests/test_resource_jobs.py`,
+  plus launcher and Looper regressions. Use private homes and systemd doubles for
+  verification; do not install services or change live tmux sessions in tests.
