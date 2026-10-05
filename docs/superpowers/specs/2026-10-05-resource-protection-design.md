@@ -116,6 +116,8 @@ mode and JSON-schema output, and disables available shell, browser, computer,
 image, apps, plugins, hooks, skills, and multi-agent tooling. A worker-only model
 catalog also clears model-derived shell, code-mode, collaboration, patch, and
 usage-instruction metadata; accepted feature flags alone are insufficient.
+A small fixed worker instruction file replaces generic coding instructions;
+report input leaves room for native framing within the 16 KiB input budget.
 Unsupported required capabilities/catalogs fail diagnostically, never fall back
 to an unrestricted agent. The adapter has bounded input, output, time, and its
 own low-priority execution; optional model/binary overrides are explicit.

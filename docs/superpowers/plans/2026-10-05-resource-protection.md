@@ -57,6 +57,11 @@ Task 2A passed specification and quality review at `dab04e9`; 67 affected
 tests passed. A short-job smoke check against the actual user manager verified
 argv, live identity, process groups, priorities, hierarchy, and unlimited caps.
 
+Task 2B is implemented at `b3baa61`; all 48 host-helper tests pass. Review fixes
+cover inactive-slice restoration, pending OOM-write recovery and operator edits,
+and independent rollback after subprocess timeouts. Final review is in progress;
+privileged activation has not been run.
+
 **Files:** Create `bin/codex-job`, `codex_looper/resource_jobs.py`,
 `codex_looper/resource_config.py`, `tests/test_resource_config.py`,
 `bin/codex-resource-host`, `tests/test_resource_jobs.py`,
@@ -94,16 +99,17 @@ self.assertEqual(result.stdout.strip(), "literal $value; `data`")
   termination limited to the exact owned job. A declared worker environment
   variable supports bounded future worker reductions. Never signal unrelated
   processes or select by process name.
-- [ ] Add host-helper tests for plan-only/no root writes, explicit apply,
+- [x] Add host-helper tests for plan-only/no root writes, explicit apply,
   preserved stronger MemoryLow, parent hierarchy, root-owned installed helper,
   masked unit refusal, idempotence, failures/rollback, stale PID and wrong UID
   rejection, removal preserving operator edits, and unchanged retired guard and
   autosave masks.
-- [ ] Implement a standalone host helper with `plan`, `apply`, `maintain`, and
+- [x] Implement a standalone host helper with `plan`, `apply`, `maintain`, and
   `remove` subcommands, a root-owned configuration and narrow OOM maintenance
   timer. `plan --uid 1003` prints the complete requested change. `apply --uid
-  1003` installs the requested 1 GiB protection and maintenance without restarting
-  user sessions. Runtime and persistent settings retain backups and restoration.
+  1003 --with-maintenance` explicitly installs the requested 1 GiB protection and
+  maintenance without restarting user sessions. Runtime and persistent settings
+  retain backups and restoration.
 - [x] Integrate agent wrapping only when `CODEXFARM_RESOURCE_PROTECTION=1` or
   private resource settings enable it. Trusted shell fragments continue to be
   interpreted once by the existing shell path; the runner receives their exact
@@ -144,6 +150,8 @@ modify `codex_looper/health.py`, `codex_looper/resource_jobs.py`, `setup.sh`,
   refresh while never copying credentials into reports or printing them. Test
   actual registered additional_tools and rejected execution/patch/collaboration
   dispatch through local fake transport, plus excluded user-context sentinels.
+  Use a small fixed model instruction file and verify actual request input size,
+  leaving room for native CLI framing within the 16 KiB input budget.
   A fake provider runs all deterministic tests without live authentication.
 - [ ] Test model output type/schema validation, unknown actions, agent targets,
   stale identities, malicious telemetry labels, and oversized output. Implement
