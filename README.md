@@ -614,6 +614,75 @@ own live warning. Host pressure checks currently require Linux counters.
 
 ### Optional managed jobs
 
+The optional host layer is a separate, standalone administrative helper. Setup
+copies `codex-resource-host` into `~/bin`; it never applies host changes. Review
+its read-only JSON plan, then explicitly apply the same options as root:
+
+```bash
+/usr/bin/python3 -I "$HOME/bin/codex-resource-host" plan --uid "$(id -u)"
+sudo /usr/bin/python3 -I "$HOME/bin/codex-resource-host" apply --uid "$(id -u)"
+
+# Optional: include the dedicated 30-second OOM preference maintenance timer.
+# Use this pair instead of the pair above if maintenance is wanted.
+/usr/bin/python3 -I "$HOME/bin/codex-resource-host" plan --uid "$(id -u)" --with-maintenance
+sudo /usr/bin/python3 -I "$HOME/bin/codex-resource-host" apply --uid "$(id -u)" --with-maintenance
+
+# Undo only this installation's expected files, runtime values and PID scores.
+sudo /usr/bin/python3 -I /usr/local/libexec/codexfarm-resource-protection.py remove
+```
+
+Apply requires an available system manager and the selected UID's user manager;
+connection failures abort. The helper derives `/run/user/UID/bus` for an own-UID
+plan, including shells without user-bus environment variables. Root connects to
+the selected user manager with absolute `systemctl --user --machine=UID@.host`.
+It uses fixed paths and sanitized subprocess environments, with no CLI or
+environment override for root/config paths. Maintenance runs an isolated absolute
+`/usr/bin/python3 -I` and imports only the standard library.
+
+The shared **1 GiB MemoryLow protects memory already in use** through `user.slice`,
+`user-UID.slice`, `user@UID.service`, `codexfarm.slice` and the interactive child.
+It does **not** reserve an empty free gigabyte or guarantee OOM immunity. Existing
+stronger values, including infinity, remain stronger; unknown values are left
+alone. Interactive and batch sibling slices receive relative CPU/IO weights
+200 and 25. This helper adds no resource ceilings.
+
+The plan lists every dedicated drop-in and touched administrative path. Farm
+slice drop-ins under `/etc/systemd/user/` have **global user-unit scope**: they
+also apply to other users who launch those exact named farm slices. OOM updates
+are restricted to the configured UID. The root-owned installed helper is
+`/usr/local/libexec/codexfarm-resource-protection.py` (0755), with private config
+`/etc/codexfarm-resource-protection.json` (0600). The private journal and lock live
+under `/var/lib/codexfarm-resource-protection/` (0700); one bounded original-file
+snapshot is retained under `/var/backups/codexfarm-resource-protection-originals/`
+(0700). A subsequent installation replaces that single snapshot.
+
+For an existing agent, append `--agent PID:STARTTICKS` to both plan and apply.
+For example, obtain start ticks from field 22 of `/proc/PID/stat` (parse after
+its final `)` because process names can contain spaces). The helper validates
+UID, ticks and actual cgroup, applies a one-shot OOM preference of -250, and gives
+an existing matching `session-*.scope` runtime MemoryLow within the same shared
+budget. It never moves or restarts the process: moving a PID would not migrate
+its already charged memory. Without maintenance, future processes get only the
+ordinary user-level preferences available to the launcher.
+
+Optional maintenance adjusts only exact `codexfarm-agent-<32hex>.scope` paths
+under the interactive slice and `codexfarm-batch-<32hex>.scope` paths under the
+batch slice, including their descendants. It uses -250 for agents and +250 for
+batch, preserving stronger role preferences, and inspects at most 4096 PIDs for
+two seconds per run. The private restoration journal is capped at 4096 process
+records and 16 MiB; each original managed file is capped at 1 MiB.
+
+Apply is idempotent for the same configuration. Remove before changing the UID,
+maintenance selection, or one-shot targets. Every target mask is checked before
+mutation, including user local/runtime/global masks. Old host guards, build
+slice masks, autosave masks and unrelated drop-ins remain untouched. Failed
+writes/manager operations trigger best-effort rollback. Remove restores only
+expected hashes/values and matching PID identities whose OOM score is still the
+one applied here; later operator changes survive. Dead sessions are not started.
+If rollback reports an error, correct the reported manager/filesystem issue and
+retry remove; the private journal and trusted recovery helper are retained when
+runtime rollback cannot finish. No farm/provider/session restart is performed.
+
 `codex-job run --role batch -- command argument ...` runs literal argv without
 shell expansion or default resource ceilings. User scopes are optional by default:
 if the user manager or scope launcher is unavailable, it warns before launching
@@ -725,6 +794,7 @@ Tuning and controls:
 - **`codex-annotator`** - Track RUN/READY/ERR state and notify when windows become READY
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
 - **`codex-job run [options] -- argv ...`** - Run declared jobs with optional scopes, batch admission and explicit restart consent
+- **`codex-resource-host plan|apply|maintain|remove`** - Review and explicitly install standalone host memory/OOM preferences
 - **`codex-health`** - Check RAM pressure, the monitor heartbeat and opted-in archive health
 - **`codex-backup [--archive]`** - Save exact farm identities; full conversation archives require `--archive`
 - **`codex-watch`** - Monitor all Codex logs in consolidated view

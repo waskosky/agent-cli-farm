@@ -103,3 +103,24 @@ not expose a structured status channel through tmux.
 - Keep tests in `tests/test_resource_config.py` and `tests/test_resource_jobs.py`,
   plus launcher and Looper regressions. Use private homes and systemd doubles for
   verification; do not install services or change live tmux sessions in tests.
+
+## Explicit host memory protection
+
+- `bin/codex-resource-host` is standalone Python 3.10+ stdlib administrative code.
+  It must never import the user-writable farm package, execute recipes/providers,
+  select processes by name, move sessions, or restart workloads.
+- Setup copies the helper only. `plan --uid UID` is read-only; only explicit root
+  `apply --uid UID` installs the root-owned helper/config and dedicated drop-ins.
+  `--with-maintenance` explicitly adds its own 30-second root timer.
+- Preserve stronger/unknown MemoryLow values. The 1 GiB shared hierarchy protects
+  used memory, never reserves free RAM, and gives no OOM immunity. Interactive
+  CPU/IO weights are 200 versus batch 25; never introduce ceilings here.
+- Precheck every target mask, including user local/runtime/global locations, before
+  mutation. Read user-home paths only through the isolated UID-dropped mask probe.
+  Never unmask host guards, build slices, autosave, or helper targets.
+- Root OOM changes require configured UID, start ticks, actual exact dedicated
+  scope (or explicitly supplied existing session), and stable proc directory FDs.
+  Maintenance scans at most 4096 PIDs for two seconds, with a bounded private
+  restoration journal. Preserve later operator changes and reused PID identities.
+- Use `tests/test_resource_host.py` with private roots/proc trees and manager
+  doubles. Never install host protection or mutate actual services in tests.
