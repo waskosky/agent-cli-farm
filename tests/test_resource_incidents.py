@@ -35,7 +35,9 @@ class ReportTests(unittest.TestCase):
         (folder / "stat").write_text(
             f"{pid} (untrusted name) S " + " ".join(["0"] * 18 + [str(ticks)])
         )
-        (folder / "status").write_text(f"Name:\tlabel\x1b[31m\nVmRSS:\t{rss} kB\n")
+        (folder / "status").write_text(
+            f"Name:\tlabel\x1b[31m\nUid:\t{os.getuid()} {os.getuid()} {os.getuid()} {os.getuid()}\nVmRSS:\t{rss} kB\n"
+        )
         (folder / "cgroup").write_text("0::/batch")
         (folder / "smaps_rollup").write_text(f"Pss: {rss // 2} kB\n")
         (folder / "cmdline").write_text("SECRET_ARGV")
@@ -107,6 +109,134 @@ class ReportTests(unittest.TestCase):
             proc=self.proc, store=self.store, cgroup_root=group.parent, previous=second
         )
         self.assertIsNone(third["consumers"][0]["cgroup_growth_mib"])
+
+    def test_cgroup_files_use_exact_path_not_truncated_display(self):
+        folder = self.process(100)
+        relative = "a" * 126 + "/" + "b" * 125
+        groups = self.root / "cgroups"
+        parent = groups / relative
+        child = parent / "actual"
+        child.mkdir(parents=True)
+        (parent / "memory.current").write_text(str(9 * 1048576))
+        (child / "memory.current").write_text(str(1048576))
+        (folder / "cgroup").write_text("0::/" + relative + "/actual")
+        report, _ = reports.collect_report(proc=self.proc, store=self.store, cgroup_root=groups)
+        item = report["consumers"][0]
+        self.assertEqual(item["cgroup_current_mib"], 1)
+        self.assertLessEqual(len(item["cgroup"]), 256)
+        self.assertNotIn("/actual", json.dumps(report))
+
+    def test_long_cgroup_identity_uses_complete_bounded_raw_value(self):
+        folder = self.process(100)
+        raw = "0::/" + "/".join(["x" * 100] * 23)
+        (folder / "cgroup").write_text(raw + "/first")
+        first, _ = reports.collect_report(proc=self.proc, store=self.store)
+        (folder / "cgroup").write_text(raw + "/second")
+        second, _ = reports.collect_report(proc=self.proc, store=self.store, previous=first)
+        self.assertNotEqual(
+            first["consumers"][0]["cgroup_identity"], second["consumers"][0]["cgroup_identity"]
+        )
+        self.assertIsNone(second["consumers"][0]["growth_mib"])
+        self.assertNotIn("/second", json.dumps(second))
+
+    def test_process_uid_comes_from_status_not_nondumpable_directory_owner(self):
+        folder = self.process(100)
+        uid = os.getuid() + 100
+        (folder / "status").write_text(
+            f"Name: private\nUid: {uid} {uid} {uid} {uid}\nVmRSS: 1024 kB\n"
+        )
+        report, _ = reports.collect_report(proc=self.proc, store=self.store)
+        self.assertEqual(report["consumers"][0]["uid"], uid)
+
+    def test_changed_identity_during_scan_is_discarded(self):
+        folder = self.process(100)
+        read = reports._read
+        changed = False
+
+        def racing_read(path, *args, **kwargs):
+            nonlocal changed
+            value = read(path, *args, **kwargs)
+            if Path(path).name == "cgroup" and not changed:
+                changed = True
+                uid = os.getuid() + 1
+                (folder / "status").write_text(
+                    f"Name: changed\nUid: {uid} {uid} {uid} {uid}\nVmRSS: 8192 kB\n"
+                )
+            return value
+
+        with patch.object(reports, "_read", side_effect=racing_read):
+            report, _ = reports.collect_report(proc=self.proc, store=self.store)
+        self.assertEqual(report["consumers"], [])
+
+    def test_pss_races_discard_consumer_and_do_not_mix_growth_or_cgroup(self):
+        for change in ("ticks", "uid", "cgroup", "directory"):
+            with self.subTest(change=change):
+                folder = self.process(100)
+                first, _ = reports.collect_report(proc=self.proc, store=self.store)
+                read = reports._read
+                changed = False
+
+                def racing_read(path, *args, change=change, folder=folder, read=read, **kwargs):
+                    nonlocal changed
+                    if Path(path).name == "smaps_rollup" and not changed:
+                        changed = True
+                        if change == "directory":
+                            folder.rename(self.root / "old-process")
+                            self.process(100, ticks=999, rss=8192 * 1024)
+                        elif change == "ticks":
+                            self.process(100, ticks=999, rss=8192 * 1024)
+                        elif change == "uid":
+                            uid = os.getuid() + 1
+                            (folder / "status").write_text(
+                                f"Name: changed\nUid: {uid} {uid} {uid} {uid}\nVmRSS: 8192 kB\n"
+                            )
+                        else:
+                            (folder / "cgroup").write_text("0::/other")
+                        (folder / "smaps_rollup").write_text("Pss: 8388608 kB\n")
+                    return read(path, *args, **kwargs)
+
+                with patch.object(reports, "_read", side_effect=racing_read):
+                    report, _ = reports.collect_report(
+                        proc=self.proc, store=self.store, previous=first
+                    )
+                self.assertTrue(changed)
+                self.assertEqual(report["consumers"], [])
+
+    def test_report_keeps_only_top_process_handles_and_releases_them(self):
+        for pid in range(1, 60):
+            self.process(pid, rss=pid * 1024)
+        before = len(list(Path("/proc/self/fd").iterdir()))
+        seen = []
+        read = reports._read
+
+        def observed_read(path, *args, **kwargs):
+            seen.append(len(list(Path("/proc/self/fd").iterdir())))
+            return read(path, *args, **kwargs)
+
+        with patch.object(reports, "_read", side_effect=observed_read):
+            report, _ = reports.collect_report(proc=self.proc, store=self.store)
+        self.assertEqual(len(report["consumers"]), 20)
+        self.assertLessEqual(max(seen), before + 25)
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before)
+
+    def test_cgroup_paths_reject_escape_symlinks_and_oversized_raw_values(self):
+        folder = self.process(100)
+        groups = self.root / "groups"
+        groups.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "memory.current").write_text(str(9 * 1048576))
+        (groups / "linked").symlink_to(outside)
+        for raw in ("0::/../outside", "0:://" + str(outside).lstrip("/"), "0::/linked"):
+            with self.subTest(raw=raw):
+                (folder / "cgroup").write_text(raw)
+                report, _ = reports.collect_report(
+                    proc=self.proc, store=self.store, cgroup_root=groups
+                )
+                self.assertNotIn("cgroup_current_mib", report["consumers"][0])
+        (folder / "cgroup").write_text("0::/" + "x" * 8193)
+        report, _ = reports.collect_report(proc=self.proc, store=self.store, cgroup_root=groups)
+        self.assertEqual(report["consumers"], [])
 
 
 class IncidentTests(unittest.TestCase):
@@ -446,6 +576,296 @@ class IncidentTests(unittest.TestCase):
         )
         self.store.defer_job.assert_called_once()
         self.store.request_restart.assert_not_called()
+
+    def failing_journal_writer(self, failure=OSError, *, permanent=True):
+        from codex_looper.resource_config import write_private_json
+
+        calls = 0
+
+        def write(path, value):
+            nonlocal calls
+            if path.parent.name == "journals" or path.name == "journal.json":
+                calls += 1
+                if calls >= 3 and (permanent or calls == 3):
+                    raise failure("fixture write failure")
+            return write_private_json(path, value)
+
+        return write
+
+    def test_restart_post_journal_failure_retains_honest_pending_and_known_result(self):
+        path = self.root / "journal.json"
+        action = {"kind": "restart", "job_id": self.job}
+        with patch.object(
+            incidents, "write_private_json", side_effect=self.failing_journal_writer()
+        ):
+            result = incidents.apply_actions(
+                {"actions": [action]},
+                self.trusted,
+                self.store,
+                consent=True,
+                journal=path,
+                metrics=lambda: {},
+            )
+        self.store.request_restart.assert_called_once_with(self.job, self.identity)
+        durable = json.loads(path.read_text())
+        self.assertEqual(durable["actions"][0]["status"], "pending")
+        self.assertEqual(durable["actions"][0]["kind"], "restart")
+        self.assertEqual(durable["actions"][0]["job_id"], self.job)
+        self.assertEqual(result[0]["status"], "restart_requested_nonreversible")
+        self.assertTrue(result[0]["incomplete"])
+        self.assertIsNone(durable["after"])
+
+    def test_post_journal_failure_rolls_back_only_known_own_override(self):
+        overrides = {"unrelated": "keep"}
+
+        def defer(*_args):
+            overrides["b" * 32] = "new"
+            return "b" * 32
+
+        self.store.defer_job.side_effect = defer
+        self.store.rollback_override.side_effect = lambda key: overrides.pop(key, None)
+        action = {"kind": "defer", "job_id": self.job, "ttl_seconds": 123}
+        path = self.root / "journal.json"
+        with patch.object(
+            incidents, "write_private_json", side_effect=self.failing_journal_writer()
+        ):
+            result = incidents.apply_actions(
+                {"actions": [action]},
+                self.trusted,
+                self.store,
+                consent=True,
+                journal=path,
+                metrics=lambda: {},
+            )
+        self.assertEqual(overrides, {"unrelated": "keep"})
+        self.store.rollback_override.assert_called_once_with("b" * 32)
+        self.assertEqual(result[0]["rollback"], "removed")
+        durable = json.loads(path.read_text())["actions"][0]
+        self.assertEqual(durable["status"], "pending")
+        self.assertEqual(durable["ttl_seconds"], 123)
+
+    def test_mutator_oserror_after_commit_reports_uncertain_restart_without_retry(self):
+        committed = []
+
+        def restart(*_args):
+            committed.append("requested")
+            raise OSError("directory fsync failed after replace")
+
+        self.store.request_restart.side_effect = restart
+        result = incidents.apply_actions(
+            {"actions": [{"kind": "restart", "job_id": self.job}]},
+            self.trusted,
+            self.store,
+            consent=True,
+            journal=self.root / "journal.json",
+            metrics=lambda: {},
+        )
+        self.assertEqual(committed, ["requested"])
+        self.assertEqual(result[0]["status"], "restart_request_outcome_uncertain_nonreversible")
+        self.assertTrue(result[0]["incomplete"])
+        self.assertEqual(json.loads((self.root / "journal.json").read_text())["actions"], result)
+
+    def test_timeout_in_mutator_cleans_known_override_and_records_uncertain_restart(self):
+        self.store.request_restart.side_effect = incidents.WorkerTimeout("fixture timeout")
+        actions = [
+            {"kind": "defer", "job_id": self.job, "ttl_seconds": 300},
+            {"kind": "restart", "job_id": self.job},
+        ]
+        result = incidents.apply_actions(
+            {"actions": actions},
+            self.trusted,
+            self.store,
+            consent=True,
+            journal=self.root / "journal.json",
+            metrics=lambda: {},
+        )
+        self.store.rollback_override.assert_called_once_with("b" * 32)
+        self.assertEqual(result[0]["rollback"], "removed")
+        self.assertEqual(result[1]["status"], "restart_request_outcome_uncertain_nonreversible")
+        self.assertTrue(result[1]["incomplete"])
+
+    def test_timeout_after_returned_override_cleans_up_and_persists_result(self):
+        path = self.root / "journal.json"
+        action = {"kind": "reduce_workers", "job_id": self.job, "workers": 2, "ttl_seconds": 60}
+        with patch.object(
+            incidents,
+            "write_private_json",
+            side_effect=self.failing_journal_writer(incidents.WorkerTimeout, permanent=False),
+        ):
+            result = incidents.apply_actions(
+                {"actions": [action]},
+                self.trusted,
+                self.store,
+                consent=True,
+                journal=path,
+                metrics=lambda: {},
+            )
+        self.store.rollback_override.assert_called_once_with("c" * 32)
+        self.assertEqual(result[0]["rollback"], "removed")
+        self.assertEqual(json.loads(path.read_text())["actions"], result)
+
+    def test_investigation_retains_diagnosis_and_action_result_when_journal_fails(self):
+        from codex_looper import resource_investigator
+
+        settings = ResourceSettings(investigator="codex", automatic_actions=True)
+        report = {"memory": {}, "jobs": self.jobs, "consumers": []}
+        with (
+            patch.object(incidents, "load_settings", return_value=settings),
+            patch.object(incidents, "read_memory", return_value=Memory(8192, 2048, 0)),
+            patch.object(incidents, "JobStore", return_value=self.store),
+            patch.object(incidents, "collect_report", return_value=(report, self.trusted)),
+            patch.object(
+                resource_investigator,
+                "investigate",
+                return_value=self.answer([{"kind": "restart", "job_id": self.job}]),
+            ),
+            patch.object(
+                incidents, "write_private_json", side_effect=self.failing_journal_writer()
+            ),
+        ):
+            result = incidents._investigate(self.root, actions=True, scheduled=False)
+        self.assertEqual(result["answer"]["diagnosis"], "fixture")
+        self.assertEqual(result["status"], "diagnosed_actions_incomplete")
+        self.assertEqual(result["action_results"][0]["status"], "restart_requested_nonreversible")
+        saved = json.loads(next((self.root / "reports").glob("*.json")).read_text())
+        self.assertEqual(saved["answer"]["diagnosis"], "fixture")
+        self.assertEqual(saved["action_results"], result["action_results"])
+        self.assertLessEqual(len(json.dumps(saved).encode()), 65536)
+
+    def test_outer_timeout_after_actions_keeps_results_and_cleans_own_override(self):
+        from codex_looper import resource_investigator
+
+        settings = ResourceSettings(investigator="codex", automatic_actions=True)
+        report = {"memory": {}, "jobs": self.jobs, "consumers": []}
+        apply = incidents.apply_actions
+
+        def interrupt_after_actions(*args, **kwargs):
+            apply(*args, **kwargs)
+            raise incidents.WorkerTimeout("between return and caller assignment")
+
+        with (
+            patch.object(incidents, "load_settings", return_value=settings),
+            patch.object(incidents, "read_memory", return_value=Memory(8192, 2048, 0)),
+            patch.object(incidents, "JobStore", return_value=self.store),
+            patch.object(incidents, "collect_report", return_value=(report, self.trusted)),
+            patch.object(
+                resource_investigator,
+                "investigate",
+                return_value=self.answer([{"kind": "defer", "job_id": self.job}]),
+            ),
+            patch.object(incidents, "apply_actions", side_effect=interrupt_after_actions),
+        ):
+            result = incidents._investigate(self.root, actions=True, scheduled=False)
+        self.store.rollback_override.assert_called_once_with("b" * 32)
+        self.assertEqual(result["answer"]["diagnosis"], "fixture")
+        self.assertEqual(result["action_results"][0]["rollback"], "removed")
+        self.assertTrue(result["report_persisted"])
+
+    def test_real_restart_atomic_commit_then_fsync_error_is_uncertain(self):
+        import stat
+
+        from codex_looper import resource_config, resource_jobs
+
+        store = resource_jobs.JobStore(self.root / "jobs")
+        store._prepare()
+        directory_inode = store.path.stat().st_ino
+        fsync = os.fsync
+
+        def fail_after_commit(fd):
+            info = os.fstat(fd)
+            if stat.S_ISDIR(info.st_mode) and info.st_ino == directory_inode:
+                raise OSError("directory fsync after atomic replace")
+            return fsync(fd)
+
+        with (
+            patch.object(store, "validate", return_value=True),
+            patch.object(store, "_batch", return_value={"restartable": True, "restart_count": 0}),
+            patch.object(resource_config.os, "fsync", side_effect=fail_after_commit),
+        ):
+            result = incidents.apply_actions(
+                {"actions": [{"kind": "restart", "job_id": self.job}]},
+                self.trusted,
+                store,
+                consent=True,
+                journal=self.root / "journal.json",
+                metrics=lambda: {},
+            )
+        self.assertEqual(
+            json.loads(store.request_path(self.job).read_text())["identity"], self.identity
+        )
+        self.assertEqual(result[0]["status"], "restart_request_outcome_uncertain_nonreversible")
+
+    def test_missing_initial_journal_prevents_every_mutation(self):
+        action = {"kind": "restart", "job_id": self.job}
+        with patch.object(incidents, "write_private_json", side_effect=OSError("disk unavailable")):
+            result = incidents.apply_actions(
+                {"actions": [action]},
+                self.trusted,
+                self.store,
+                consent=True,
+                journal=self.root / "journal.json",
+                metrics=lambda: {},
+            )
+        self.store.request_restart.assert_not_called()
+        self.assertEqual(result[0]["status"], "not_attempted_after_failure")
+        self.assertTrue(result[0]["incomplete"])
+
+    def test_cleanup_after_expired_worker_has_its_own_bounded_grace(self):
+        import time
+
+        original = incidents.worker_deadline
+        self.store.rollback_override.side_effect = lambda _key: time.sleep(0.2)
+        results = [{"override_id": "b" * 32, "status": "applied_to_future_launches"}]
+        with patch.object(
+            incidents, "worker_deadline", side_effect=lambda **_kwargs: original(seconds=0.01)
+        ):
+            incidents._rollback_owned(results, self.store)
+        self.assertEqual(results[0]["rollback"], "unavailable")
+        self.assertTrue(results[0]["incomplete"])
+
+    def test_nested_cleanup_deadline_never_extends_worker_budget(self):
+        import time
+
+        with (
+            self.assertRaises(incidents.WorkerTimeout),
+            incidents.worker_deadline(seconds=0.01),
+            incidents.worker_deadline(seconds=0.2),
+        ):
+            time.sleep(0.05)
+
+    def test_timeout_in_final_report_write_preserves_diagnosis_and_cleanup(self):
+        from codex_looper import resource_investigator
+        from codex_looper.resource_config import write_private_json
+
+        settings = ResourceSettings(investigator="codex", automatic_actions=True)
+        report = {"memory": {}, "jobs": self.jobs, "consumers": []}
+        report_writes = 0
+
+        def write(path, value):
+            nonlocal report_writes
+            if path.parent.name == "reports":
+                report_writes += 1
+                if report_writes == 3:
+                    raise incidents.WorkerTimeout("during final persistence")
+            return write_private_json(path, value)
+
+        with (
+            patch.object(incidents, "load_settings", return_value=settings),
+            patch.object(incidents, "read_memory", return_value=Memory(8192, 2048, 0)),
+            patch.object(incidents, "JobStore", return_value=self.store),
+            patch.object(incidents, "collect_report", return_value=(report, self.trusted)),
+            patch.object(
+                resource_investigator,
+                "investigate",
+                return_value=self.answer([{"kind": "defer", "job_id": self.job}]),
+            ),
+            patch.object(incidents, "write_private_json", side_effect=write),
+        ):
+            result = incidents._investigate(self.root, actions=True, scheduled=False)
+        self.store.rollback_override.assert_called_once_with("b" * 32)
+        self.assertEqual(result["answer"]["diagnosis"], "fixture")
+        self.assertEqual(result["action_results"][0]["rollback"], "removed")
+        self.assertTrue(result["report_persisted"])
 
 
 class ResourceCliTests(unittest.TestCase):

@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import time
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -30,23 +32,99 @@ def label(value: object, limit: int = 96) -> str:
     return clean
 
 
-def _read(path: Path, limit: int = 8192) -> str:
-    with path.open("r", encoding="utf-8", errors="replace") as stream:
-        return stream.read(limit)
+def _read(path: Path | str, limit: int = 8192, *, directory_fd: int | None = None) -> str:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("resource counter must be a regular file")
+        value = stream.read(limit + 1)
+    if len(value) > limit:
+        raise ValueError("resource counter exceeds read limit")
+    return value.decode("utf-8", "surrogateescape")
 
 
-def _counters(path: Path, limit: int = 24) -> dict:
+def _counters(directory_fd: int, name: str, limit: int = 24) -> dict:
     result = {}
     try:
-        for line in _read(path).splitlines():
+        for line in _read(name, directory_fd=directory_fd).splitlines():
             parts = line.split()
             if len(parts) == 2 and parts[1].isdigit():
                 result[label(parts[0], 40)] = min(int(parts[1]), 2**63 - 1)
                 if len(result) >= limit:
                     break
-    except OSError:
+    except (OSError, ValueError):
         pass
     return result
+
+
+@contextmanager
+def _directory(path: Path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _status(fd: int) -> dict:
+    return dict(
+        line.split(":", 1) for line in _read("status", directory_fd=fd).splitlines() if ":" in line
+    )
+
+
+def _uids(fields: dict) -> tuple[int, ...]:
+    values = tuple(int(value) for value in fields["Uid"].split())
+    if len(values) != 4 or any(value < 0 for value in values):
+        raise ValueError("process credentials unavailable")
+    return values
+
+
+def _process_identity(fd: int) -> tuple:
+    raw = _read("stat", directory_fd=fd)
+    fields = raw[raw.rindex(")") + 2 :].split()
+    if fields[0] == "Z":
+        raise ValueError("process exited")
+    return int(fields[19]), _uids(_status(fd)), _read("cgroup", directory_fd=fd).rstrip("\n")
+
+
+def _same_process(folder: Path, fd: int, identity: tuple) -> bool:
+    # A retained proc directory never retargets a reused PID. Checking the current
+    # directory additionally detects replacement in proc fixtures/mounted views.
+    current, opened = folder.stat(follow_symlinks=False), os.fstat(fd)
+    return (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino) and _process_identity(
+        fd
+    ) == identity
+
+
+def _group_sample(raw_cgroup: str, root: Path) -> dict:
+    """Walk the exact kernel path beneath a stable cgroup root; display is never input."""
+    if not raw_cgroup.startswith("0::/") or "\n" in raw_cgroup:
+        return {}
+    relative = raw_cgroup[4:]
+    parts = relative.split("/") if relative else []
+    if any(part in ("", ".", "..") for part in parts):
+        return {}
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        result = {
+            "memory_stat": _counters(fd, "memory.stat", 16),
+            "memory_events": _counters(fd, "memory.events", 8),
+        }
+        try:
+            result["cgroup_inode"] = os.fstat(fd).st_ino
+            result["cgroup_current_mib"] = (
+                int(_read("memory.current", 64, directory_fd=fd)) / 1048576
+            )
+            result["cgroup_growth_mib"] = None
+        except (OSError, ValueError):
+            pass
+        return result
+    finally:
+        os.close(fd)
 
 
 def _key(item: dict) -> tuple:
@@ -71,85 +149,99 @@ def collect_report(
         "jobs": [],
     }
     candidates = []
+    rss_by_pid = {}
     try:
-        with os.scandir(proc) as entries:
-            for entry in entries:
-                if clock() - started >= SCAN_SECONDS or report["scanned_pids"] >= MAX_SCAN_PIDS:
-                    break
-                if not entry.name.isdigit():
-                    continue
-                report["scanned_pids"] += 1
-                try:
-                    folder = proc / entry.name
-                    info = entry.stat(follow_symlinks=False)
-                    raw = _read(folder / "stat")
-                    ticks = int(raw[raw.rindex(")") + 2 :].split()[19])
-                    fields = dict(
-                        line.split(":", 1)
-                        for line in _read(folder / "status").splitlines()
-                        if ":" in line
-                    )
-                    rss = int(fields.get("VmRSS", "0").split()[0]) / 1024
-                    cgroup = _read(folder / "cgroup", 2048).strip()
-                    candidates.append(
-                        {
-                            "pid": int(entry.name),
-                            "start_ticks": ticks,
-                            "uid": info.st_uid,
-                            "label": label(fields.get("Name", "").strip()),
-                            "cgroup": label(cgroup, 256),
-                            "cgroup_identity": hashlib.sha256(cgroup.encode()).hexdigest(),
-                            "rss_mib": rss,
-                            "pss_mib": None,
-                            "growth_mib": None,
-                        }
-                    )
-                except (OSError, ValueError, IndexError):
-                    continue
-    except OSError:
-        pass
-    old = {_key(item): item for item in (previous or {}).get("consumers", [])}
-    for item in sorted(candidates, key=lambda item: item["rss_mib"], reverse=True)[:MAX_CONSUMERS]:
-        prior = old.get(_key(item))
-        if prior is not None:
-            item["growth_mib"] = round(item["rss_mib"] - prior["rss_mib"], 3)
-        if clock() - started < SCAN_SECONDS:
-            try:
-                for line in _read(proc / str(item["pid"]) / "smaps_rollup").splitlines():
-                    if line.startswith("Pss:"):
-                        item["pss_mib"] = int(line.split()[1]) / 1024
+        try:
+            with os.scandir(proc) as entries:
+                for entry in entries:
+                    if clock() - started >= SCAN_SECONDS or report["scanned_pids"] >= MAX_SCAN_PIDS:
                         break
-            except (OSError, ValueError, IndexError):
-                pass
-        # cgroup paths are untrusted; never permit traversal outside the mounted root.
-        relative = item["cgroup"].removeprefix("0::/")
-        if (
-            clock() - started < SCAN_SECONDS
-            and item["cgroup"].startswith("0::/")
-            and ".." not in Path(relative).parts
+                    if not entry.name.isdigit():
+                        continue
+                    report["scanned_pids"] += 1
+                    folder = proc / entry.name
+                    try:
+                        with _directory(folder) as fd:
+                            identity = _process_identity(fd)
+                            fields = _status(fd)
+                            rss = int(fields.get("VmRSS", "0").split()[0]) / 1024
+                            if (
+                                rss < 0
+                                or _uids(fields) != identity[1]
+                                or not _same_process(folder, fd, identity)
+                            ):
+                                continue
+                            ticks, uids, raw_cgroup = identity
+                            item = {
+                                "pid": int(entry.name),
+                                "start_ticks": ticks,
+                                "uid": uids[1],
+                                "label": label(fields.get("Name", "").strip()),
+                                "cgroup": label(raw_cgroup, 256),
+                                "cgroup_identity": hashlib.sha256(
+                                    raw_cgroup.encode("utf-8", "surrogateescape")
+                                ).hexdigest(),
+                                "rss_mib": rss,
+                                "pss_mib": None,
+                                "growth_mib": None,
+                            }
+                            rss_by_pid[item["pid"]] = rss
+                            # Retain at most 20 proc handles, regardless of the scan count.
+                            if len(candidates) == MAX_CONSUMERS:
+                                smallest = min(candidates, key=lambda value: value[3]["rss_mib"])
+                                if rss <= smallest[3]["rss_mib"]:
+                                    continue
+                                candidates.remove(smallest)
+                                os.close(smallest[0])
+                            candidates.append((os.dup(fd), folder, identity, item))
+                    except (OSError, ValueError, IndexError, KeyError):
+                        continue
+        except OSError:
+            pass
+        old = {_key(item): item for item in (previous or {}).get("consumers", [])}
+        for fd, folder, identity, item in sorted(
+            candidates, key=lambda value: value[3]["rss_mib"], reverse=True
         ):
-            group = cgroup_root / relative
-            item["memory_stat"] = _counters(group / "memory.stat", 16)
-            item["memory_events"] = _counters(group / "memory.events", 8)
+            prior = old.get(_key(item))
             try:
-                item["cgroup_inode"] = group.stat().st_ino
-                item["cgroup_current_mib"] = int(_read(group / "memory.current", 64)) / 1048576
-                item["cgroup_growth_mib"] = None
-                if (
-                    prior
-                    and prior.get("cgroup_inode") == item["cgroup_inode"]
-                    and finite_number(prior.get("cgroup_current_mib"))
-                ):
-                    item["cgroup_growth_mib"] = (
-                        item["cgroup_current_mib"] - prior["cgroup_current_mib"]
-                    )
-            except (OSError, ValueError):
-                pass
-        report["consumers"].append(item)
+                if clock() - started < SCAN_SECONDS:
+                    if not _same_process(folder, fd, identity):
+                        continue
+                    try:
+                        for line in _read("smaps_rollup", directory_fd=fd).splitlines():
+                            if line.startswith("Pss:"):
+                                item["pss_mib"] = int(line.split()[1]) / 1024
+                                break
+                    except (OSError, ValueError, IndexError):
+                        pass
+                    if clock() - started < SCAN_SECONDS:
+                        try:
+                            item.update(_group_sample(identity[2], cgroup_root))
+                        except (OSError, ValueError):
+                            pass
+                    # Reject the entire sample when RSS, PSS or group counters may
+                    # belong to different credentials, start ticks or membership.
+                    if not _same_process(folder, fd, identity):
+                        continue
+                if prior is not None:
+                    item["growth_mib"] = round(item["rss_mib"] - prior["rss_mib"], 3)
+                    if (
+                        "cgroup_current_mib" in item
+                        and prior.get("cgroup_inode") == item["cgroup_inode"]
+                        and finite_number(prior.get("cgroup_current_mib"))
+                    ):
+                        item["cgroup_growth_mib"] = (
+                            item["cgroup_current_mib"] - prior["cgroup_current_mib"]
+                        )
+                report["consumers"].append(item)
+            except (OSError, ValueError, IndexError, KeyError):
+                continue
+    finally:
+        for fd, *_rest in candidates:
+            os.close(fd)
     store = store or JobStore()
     identities = {}
     try:
-        rss_by_pid = {item["pid"]: item["rss_mib"] for item in candidates}
         jobs = sorted(
             store.list_jobs(limit=512),
             key=lambda job: (
