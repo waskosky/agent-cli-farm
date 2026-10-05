@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -878,23 +879,29 @@ class IncidentTests(unittest.TestCase):
         results = []
 
         def write(path, value):
-            nonlocal writes
+            nonlocal writes, started
             writes += 1
+            if writes == 1:
+                time.sleep(0.4)  # Initial persistence may exceed the test alarm budget.
             if writes == 3:
+                self.store.request_restart.assert_called_once()
+                started = time.monotonic()
+                deadline.enter_context(incidents.worker_deadline(seconds=0.3))
                 time.sleep(0.6)
             if writes >= 4:
                 recovery_timers.append(signal.getitimer(signal.ITIMER_REAL)[0])
                 time.sleep(0.4)
             return write_private_json(path, value)
 
-        started = time.monotonic()
+        started = None
         stopped = None
         with (
+            ExitStack() as deadline,
             patch.object(incidents, "CLEANUP_GRACE_SECONDS", 0.15, create=True),
             patch.object(incidents, "write_private_json", side_effect=write),
         ):
             try:
-                with incidents.incident_lock(self.root), incidents.worker_deadline(seconds=0.3):
+                with incidents.incident_lock(self.root):
                     incidents.apply_actions(
                         {"actions": [{"kind": "restart", "job_id": self.job}]},
                         self.trusted,
@@ -926,7 +933,11 @@ class IncidentTests(unittest.TestCase):
         def write(path, value):
             nonlocal writes
             writes += 1
+            if writes == 1:
+                time.sleep(0.4)  # Initial persistence may exceed the test alarm budget.
             if writes == 3:
+                self.store.request_restart.assert_called_once()
+                deadline.enter_context(incidents.worker_deadline(seconds=0.3))
                 time.sleep(0.6)
             return write_private_json(path, value)
 
@@ -939,19 +950,19 @@ class IncidentTests(unittest.TestCase):
 
         stopped = None
         with (
+            ExitStack() as deadline,
             patch.object(incidents, "CLEANUP_GRACE_SECONDS", 0.15, create=True),
             patch.object(incidents, "write_private_json", side_effect=write),
         ):
             try:
-                with incidents.worker_deadline(seconds=0.3):
-                    incidents.apply_actions(
-                        {"actions": [{"kind": "restart", "job_id": self.job}]},
-                        self.trusted,
-                        self.store,
-                        consent=True,
-                        journal=self.root / "journal.json",
-                        metrics=metrics,
-                    )
+                incidents.apply_actions(
+                    {"actions": [{"kind": "restart", "job_id": self.job}]},
+                    self.trusted,
+                    self.store,
+                    consent=True,
+                    journal=self.root / "journal.json",
+                    metrics=metrics,
+                )
             except BaseException as exc:
                 stopped = exc
         self.assertEqual(type(stopped).__name__, "CleanupTimeout")
@@ -978,7 +989,11 @@ class IncidentTests(unittest.TestCase):
         def write(path, value):
             nonlocal writes
             writes += 1
+            if writes == 1:
+                time.sleep(0.4)  # Initial persistence may exceed the test alarm budget.
             if writes == 5:
+                self.assertEqual(self.store.defer_job.call_count, 2)
+                deadline.enter_context(incidents.worker_deadline(seconds=0.3))
                 time.sleep(0.6)
             return write_private_json(path, value)
 
@@ -987,20 +1002,20 @@ class IncidentTests(unittest.TestCase):
         ]
         stopped = None
         with (
+            ExitStack() as deadline,
             patch.object(incidents, "CLEANUP_GRACE_SECONDS", 0.15, create=True),
             patch.object(incidents, "write_private_json", side_effect=write),
         ):
             try:
-                with incidents.worker_deadline(seconds=0.3):
-                    incidents.apply_actions(
-                        {"actions": actions},
-                        dict(self.trusted, **{other: {}}),
-                        self.store,
-                        consent=True,
-                        journal=self.root / "journal.json",
-                        metrics=lambda: {},
-                        results=results,
-                    )
+                incidents.apply_actions(
+                    {"actions": actions},
+                    dict(self.trusted, **{other: {}}),
+                    self.store,
+                    consent=True,
+                    journal=self.root / "journal.json",
+                    metrics=lambda: {},
+                    results=results,
+                )
             except BaseException as exc:
                 stopped = exc
         self.assertEqual(type(stopped).__name__, "CleanupTimeout")
@@ -1025,8 +1040,17 @@ class IncidentTests(unittest.TestCase):
             nonlocal journal_writes, report_writes
             if path.parent.name == "journals":
                 journal_writes += 1
+                if journal_writes == 1:
+                    time.sleep(0.4)  # Setup must not consume the recovery test budget.
                 if journal_writes == 3:
+                    self.store.request_restart.assert_called_once()
+                    deadline.enter_context(incidents.worker_deadline(seconds=0.3))
                     time.sleep(0.6)
+                if journal_writes == 4:
+                    # This test stalls final report persistence; do not spend its
+                    # short cleanup grace on an unrelated real journal fsync.
+                    self.assertFalse(value["complete"])
+                    return None
             elif path.parent.name == "reports":
                 report_writes += 1
                 if report_writes >= 3:
@@ -1035,6 +1059,7 @@ class IncidentTests(unittest.TestCase):
             return write_private_json(path, value)
 
         with (
+            ExitStack() as deadline,
             patch.object(incidents, "CLEANUP_GRACE_SECONDS", 0.15, create=True),
             patch.object(incidents, "load_settings", return_value=settings),
             patch.object(incidents, "read_memory", return_value=Memory(8192, 2048, 0)),
@@ -1046,7 +1071,7 @@ class IncidentTests(unittest.TestCase):
                 return_value=self.answer([{"kind": "restart", "job_id": self.job}]),
             ),
             patch.object(incidents, "write_private_json", side_effect=write),
-            incidents.worker_deadline(seconds=0.3),
+            incidents.incident_lock(self.root),
         ):
             result = incidents._investigate(self.root, actions=True, scheduled=False)
         self.assertTrue(timers and timers[0] > 0, timers)
@@ -1054,6 +1079,10 @@ class IncidentTests(unittest.TestCase):
         self.assertEqual(result["answer"]["diagnosis"], "fixture")
         self.assertEqual(result["action_results"][0]["status"], "restart_requested_nonreversible")
         self.assertFalse(result["report_persisted"])
+        self.assertEqual(journal_writes, 4)
+        self.store.request_restart.assert_called_once()
+        with incidents.incident_lock(self.root) as lock:
+            self.assertIsNotNone(lock)
 
 
 class ResourceCliTests(unittest.TestCase):
