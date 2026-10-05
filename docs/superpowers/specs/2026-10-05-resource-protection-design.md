@@ -107,13 +107,21 @@ allows one investigator at a time, with a 15-minute cooldown, bounded retained
 reports, a timeout, and a low-memory deferral. The monitor itself never waits for
 an LLM. Monitoring failures remain advisory and do not stop annotation.
 
-The default remote adapter uses the existing Codex CLI login. It executes from
-an empty private working directory, ignores user configuration/rules, uses
-ephemeral/read-only mode and JSON-schema output, and disables available shell,
-browser, computer, image, apps, plugins, hooks, skills, and multi-agent tooling.
-Unsupported required isolation options fail diagnostically, never fall back to
-an unrestricted agent. The adapter has bounded input, output, time, and its own
-low-priority execution; optional model/binary overrides are explicit.
+The default remote adapter uses the existing Codex CLI login. It executes with
+private HOME, CODEX_HOME, and working directories. The private CLI home links
+only the existing owner-only authentication cache; it does not copy credentials
+into reports or print them. Normal native CLI authentication-cache refresh
+remains allowed. It ignores user configuration/rules, uses ephemeral/read-only
+mode and JSON-schema output, and disables available shell, browser, computer,
+image, apps, plugins, hooks, skills, and multi-agent tooling. A worker-only model
+catalog also clears model-derived shell, code-mode, collaboration, patch, and
+usage-instruction metadata; accepted feature flags alone are insufficient.
+Unsupported required capabilities/catalogs fail diagnostically, never fall back
+to an unrestricted agent. The adapter has bounded input, output, time, and its
+own low-priority execution; optional model/binary overrides are explicit.
+Local fake-transport tests verify tool registration (including additional_tools
+input items), rejected execution/patch/collaboration dispatch, and exclusion of
+original user instruction/skill sentinels without invoking a remote model.
 
 Reports include bounded process/cgroup growth samples, RSS/PSS attribution,
 pressure, swap context, cgroup events, and sanitized managed-job metadata.

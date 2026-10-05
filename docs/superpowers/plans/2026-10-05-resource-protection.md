@@ -133,9 +133,14 @@ modify `codex_looper/health.py`, `codex_looper/resource_jobs.py`, `setup.sh`,
   Integrate scheduling in the health monitor without blocking annotation.
 - [ ] Test the Codex adapter's required isolation flags and unsupported-version
   failure. Implement ephemeral/read-only/schema-constrained diagnosis in a
-  private empty directory, ignoring ordinary user config and disabling tool
-  features supported by the CLI. Preserve existing CLI authentication; never
-  persist or print credentials. A fake provider runs all deterministic tests.
+  private HOME/CODEX_HOME/cwd, ignoring ordinary user config and disabling tool
+  features supported by the CLI. Clear model-derived tooling in a private catalog
+  selected from the bundled model catalog; flags alone are insufficient. Preserve
+  existing CLI login with an authentication-only link, permitting native cache
+  refresh while never copying credentials into reports or printing them. Test
+  actual registered additional_tools and rejected execution/patch/collaboration
+  dispatch through local fake transport, plus excluded user-context sentinels.
+  A fake provider runs all deterministic tests without live authentication.
 - [ ] Test model output type/schema validation, unknown actions, agent targets,
   stale identities, malicious telemetry labels, and oversized output. Implement
   a deterministic allowlist for job deferral, declared worker reduction, and a
