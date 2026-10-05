@@ -68,6 +68,25 @@ class HostTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        self.account = host.pwd.struct_passwd(
+            (
+                "fixture-user",
+                "x",
+                1003,
+                2003,
+                "",
+                str(self.root / "home/fixture-user"),
+                "/bin/false",
+            )
+        )
+
+        def getpwuid(uid):
+            self.assertEqual(uid, self.account.pw_uid)
+            return self.account
+
+        accounts = patch.object(host.pwd, "getpwuid", side_effect=getpwuid)
+        accounts.start()
+        self.addCleanup(accounts.stop)
         self.manager = Manager()
         self.helper = host.Host(host.Paths(self.root), self.manager, owner=os.getuid())
         real_write = host.os.write
@@ -360,6 +379,7 @@ class HostTests(unittest.TestCase):
             self.assertNotIn("PYTHONPATH", kwargs["env"])
             if "-c" in argv:
                 self.assertEqual(kwargs["user"], 1003)
+                self.assertEqual(kwargs["group"], self.account.pw_gid)
                 self.assertEqual(kwargs["extra_groups"], [])
                 self.assertIn("-I", argv)
                 return subprocess.CompletedProcess(argv, 0, "1", "")
