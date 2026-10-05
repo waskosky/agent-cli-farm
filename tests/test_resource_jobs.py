@@ -285,6 +285,8 @@ class JobTests(unittest.TestCase):
         state.parent.mkdir(parents=True)
         destination = self.root / "destination"
         destination.mkdir(mode=0o755)
+        destination.chmod(0o755)
+        self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o755)
         state.symlink_to(destination, target_is_directory=True)
         with self.assertRaises(ValueError):
             self.store._prepare()
@@ -297,6 +299,8 @@ class JobTests(unittest.TestCase):
         self.assertEqual(state.read_text(), "existing file")
         state.unlink()
         state.mkdir(mode=0o755)
+        state.chmod(0o755)
+        self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o755)
         with patch.object(jobs.os, "getuid", return_value=os.getuid() + 1):
             with self.assertRaises(ValueError):
                 self.store._prepare()
@@ -324,6 +328,8 @@ class JobTests(unittest.TestCase):
             if Path(path) == state:
                 state.rename(previous)
                 state.mkdir(mode=0o755)
+                state.chmod(0o755)
+                self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o755)
             return original_open(path, flags, *args, **kwargs)
 
         with patch.object(jobs.os, "open", side_effect=replace_before_open):
