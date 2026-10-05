@@ -713,9 +713,14 @@ class HostTests(unittest.TestCase):
                 / "etc/systemd/user/codexfarm-batch.slice.d/90-codexfarm-resource-protection.conf"
             ).exists()
         )
-        for name in (host.CODE, host.CONFIG, host.STATE):
+        for name in (host.CODE, host.CONFIG, host.STATE, f"/etc/systemd/system/{host.TIMER}"):
             self.assertTrue(self.root.joinpath(name.lstrip("/")).exists())
+        self.manager.calls.clear()
         self.helper.remove()
+        self.assertIn(("command", False, "stop", host.TIMER), self.manager.calls)
+        self.assertFalse(self.root.joinpath(host.STATE.lstrip("/")).exists())
+        self.helper.remove()
+        self.assertEqual(self.manager.calls.count(("command", False, "stop", host.TIMER)), 1)
 
     def test_runtime_timeout_continues_other_undo_and_can_be_retried(self):
         self.helper.apply(1003)
@@ -805,6 +810,73 @@ class HostTests(unittest.TestCase):
         self.helper.maintain()
         self.assertEqual((first / "oom_score_adj").read_text(), "0")
         self.assertEqual((second / "oom_score_adj").read_text(), "-250")
+
+    def test_timer_stop_failure_retains_definition_until_retry_then_restores_original(self):
+        timer = self.root / "etc/systemd/system" / host.TIMER
+        timer.parent.mkdir(parents=True)
+        original = "[Timer]\nOnUnitActiveSec=2min\n"
+        timer.write_text(original)
+        self.manager.values[False, host.TIMER, "ActiveState"] = "inactive"
+        self.helper.apply(1003, maintenance=True)
+        installed = timer.read_text()
+        command = self.manager.command
+
+        def fail_stop(user, *args):
+            if args == ("stop", host.TIMER):
+                raise RuntimeError("timer stop failed")
+            command(user, *args)
+
+        with patch.object(self.manager, "command", side_effect=fail_stop):
+            with self.assertRaisesRegex(host.Error, "rollback incomplete.*timer stop failed"):
+                self.helper.remove()
+        self.assertEqual(timer.read_text(), installed)
+        self.assertEqual(self.manager.get(True, "codexfarm-batch.slice", "CPUWeight"), "[not set]")
+        self.manager.calls.clear()
+
+        def check_stop(user, *args):
+            if args == ("stop", host.TIMER):
+                self.assertTrue(self.root.joinpath(host.STATE.lstrip("/")).exists())
+                self.assertEqual(timer.read_text(), installed)
+            command(user, *args)
+
+        with patch.object(self.manager, "command", side_effect=check_stop):
+            self.helper.remove()
+        self.assertIn(("command", False, "stop", host.TIMER), self.manager.calls)
+        self.assertEqual(timer.read_text(), original)
+        self.assertFalse(self.root.joinpath(host.STATE.lstrip("/")).exists())
+        self.helper.remove()
+        self.assertEqual(self.manager.calls.count(("command", False, "stop", host.TIMER)), 1)
+
+    def test_timer_recovery_preserves_later_operator_edit_or_mask(self):
+        for change in ("edit", "mask"):
+            with self.subTest(change=change):
+                self.manager.values[False, host.TIMER, "ActiveState"] = "inactive"
+                self.helper.apply(1003, maintenance=True)
+                command = self.manager.command
+
+                def fail_stop(user, *args, command=command):
+                    if args == ("stop", host.TIMER):
+                        raise RuntimeError("timer stop failed")
+                    command(user, *args)
+
+                with patch.object(self.manager, "command", side_effect=fail_stop):
+                    with self.assertRaisesRegex(host.Error, "rollback incomplete"):
+                        self.helper.remove()
+                timer = self.root / "etc/systemd/system" / host.TIMER
+                if change == "edit":
+                    timer.write_text("# operator replacement\n")
+                else:
+                    timer.unlink(missing_ok=True)
+                    timer.symlink_to("/dev/null")
+                    self.manager.masks.add((False, host.TIMER))
+                self.manager.calls.clear()
+                self.helper.remove()
+                self.assertNotIn(("command", False, "stop", host.TIMER), self.manager.calls)
+                if change == "edit":
+                    self.assertEqual(timer.read_text(), "# operator replacement\n")
+                else:
+                    self.assertEqual(os.readlink(timer), "/dev/null")
+                timer.unlink()
 
     def test_installed_service_uses_isolated_absolute_interpreter(self):
         self.helper.apply(1003, maintenance=True)

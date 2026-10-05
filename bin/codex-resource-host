@@ -622,16 +622,19 @@ class Host:
 
     def restore(self, state):
         failures = []
+        timer_definition = f"/etc/systemd/system/{TIMER}"
+        timer_stop_pending = False
         try:
             if (
                 state["timer_started"]
                 and not state["timer_was_active"]
                 and not self.manager.masked(False, TIMER)
-                and self.file_matches(f"/etc/systemd/system/{TIMER}", state)
+                and self.file_matches(timer_definition, state)
             ):
                 # Never unmask; stop only this helper's timer.
                 self.manager.command(False, "stop", TIMER)
         except (Error, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            timer_stop_pending = True
             failures.append(str(exc))
         try:
             if state["timer_link_created"]:
@@ -688,6 +691,10 @@ class Host:
 
         for name, entry in reversed(list(state["files"].items())):
             if name in {CODE, CONFIG}:
+                continue
+            if timer_stop_pending and name == timer_definition:
+                # A retry needs the installed definition to verify timer ownership.
+                # Other independent undo can proceed, but do not erase that proof.
                 continue
             try:
                 restore_file(name, entry)
