@@ -14,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import select
 import signal
 import stat
 import subprocess
@@ -409,7 +410,7 @@ class JobStore:
             validate_workers(value.get("worker_env"), count)
             if value.get("workers") is None or count >= value["workers"]:
                 raise ValueError("worker remedy must reduce the declared count")
-            overrides = self.recipe_overrides(value["recipe_fingerprint"])
+            overrides = self._recipe_overrides_locked(value["recipe_fingerprint"])
             if "workers" in overrides and count > overrides["workers"]:
                 raise ValueError("worker remedy cannot increase an existing reduction")
             return self._override(value, "workers", count, ttl)
@@ -421,7 +422,7 @@ class JobStore:
             return self._override(value, "defer", True, seconds)
 
     def _override(self, value: dict, kind: str, item: object, ttl: float) -> str:
-        self.recipe_overrides("")
+        self._recipe_overrides_locked("")
         if len(list(self.overrides_path.glob("*.json"))[: MAX_JOBS + 1]) >= MAX_JOBS:
             raise ValueError("temporary override retention limit reached")
         key = secrets.token_hex(16)
@@ -448,16 +449,26 @@ class JobStore:
     def recipe_overrides(self, fingerprint: str) -> dict:
         if not self.overrides_path.exists():
             return {}
+        with self._locked():
+            return self._recipe_overrides_locked(fingerprint)
+
+    def _recipe_overrides_locked(self, fingerprint: str) -> dict:
+        """Read/expire overrides while the caller owns the store lock."""
         private_directory(self.overrides_path)
         result: dict = {}
         now = time.time()
         for path in sorted(self.overrides_path.glob("*.json"))[:MAX_JOBS]:
-            value = read_private_json(path)
+            try:
+                value = read_private_json(path)
+            except FileNotFoundError:
+                # An operator may remove a private override without our lock.
+                # Existing unsafe paths still fail strict validation.
+                continue
             expiry = value.get("expires_at")
             if not finite_number(expiry):
                 raise ValueError("invalid override expiry")
             if expiry <= now:
-                path.unlink()
+                path.unlink(missing_ok=True)
                 continue
             if value.get("recipe_fingerprint") != fingerprint:
                 continue
@@ -510,7 +521,7 @@ class JobStore:
                     for suffix in (".json", ".started.json", ".restart.json"):
                         (self.path / (path.stem + suffix)).unlink(missing_ok=True)
             # Also clean expired overrides without exposing private recipes.
-            self.recipe_overrides("")
+            self._recipe_overrides_locked("")
 
 
 def memory_policy(explicit: str | None, role: str, settings: ResourceSettings) -> str:
@@ -590,12 +601,54 @@ def _group_members(group: int) -> list[dict]:
         if index >= MAX_PROC_SCAN:
             raise ValueError("process identity scan budget exhausted; refusing restart")
         if path.name.isdigit():
-            identity = process_identity(int(path.name))
-            if identity and identity["pgid"] == group and identity["sid"] == group:
+            pid = int(path.name)
+            identity = process_identity(pid)
+            if identity is None:
+                try:
+                    belongs = os.getpgid(pid) == group and os.getsid(pid) == group
+                except ProcessLookupError:
+                    continue
+                except OSError:
+                    belongs = False
+                if belongs:
+                    try:
+                        raw = (path / "stat").read_text()
+                        zombie = raw[raw.rindex(")") + 2 :].split()[0] == "Z"
+                    except (OSError, ValueError, IndexError):
+                        zombie = False
+                    if not zombie:
+                        raise ValueError("batch group member identity unreadable; refusing restart")
+                continue
+            if identity["pgid"] == group and identity["sid"] == group:
                 if identity["uid"] != os.getuid():
                     raise ValueError("batch group contains a foreign UID")
                 members.append(identity)
     return members
+
+
+def _captured_member_state(member: dict, fd: int | None) -> str:
+    current = process_identity(member["pid"])
+    if current is not None:
+        if current["uid"] != member["uid"] or current["start_ticks"] != member["start_ticks"]:
+            return "dead"
+        return "live" if current == member else "unknown"
+    if fd is not None:
+        try:
+            if select.select([fd], [], [], 0)[0]:
+                return "dead"
+        except OSError:
+            pass
+    try:
+        path = Path("/proc") / str(member["pid"])
+        path.stat()
+        raw = (path / "stat").read_text()
+        if raw[raw.rindex(")") + 2 :].split()[0] == "Z":
+            return "dead"
+    except FileNotFoundError:
+        return "dead"
+    except (OSError, ValueError, IndexError):
+        pass
+    return "unknown"
 
 
 def terminate_owned_batch(
@@ -620,16 +673,27 @@ def terminate_owned_batch(
                     fd = os.pidfd_open(member["pid"])
                 except ProcessLookupError:
                     continue
-            if process_identity(member["pid"]) != member:
+            state = _captured_member_state(member, fd)
+            if state != "live":
                 if fd is not None:
                     os.close(fd)
+                if state == "unknown":
+                    raise ValueError(
+                        "batch member identity changed or unreadable; refusing restart"
+                    )
                 continue
             handles[key] = (member, fd)
 
     def empty_group() -> bool:
         members = _group_members(group)
         capture(members)
-        return not members
+        live_known = False
+        for member, fd in handles.values():
+            state = _captured_member_state(member, fd)
+            if state == "unknown":
+                raise ValueError("known batch member identity unavailable; refusing restart")
+            live_known = live_known or state == "live"
+        return not members and not live_known
 
     try:
         capture(initial)
@@ -653,7 +717,10 @@ def terminate_owned_batch(
             if empty_group():
                 return
             for member, fd in list(handles.values()):
-                if process_identity(member["pid"]) != member:
+                state = _captured_member_state(member, fd)
+                if state == "unknown":
+                    raise ValueError("batch identity unavailable before signal; refusing restart")
+                if state == "dead":
                     continue
                 try:
                     if fd is not None:
@@ -691,7 +758,6 @@ def handle_restart(
     if _group_members(group):
         raise ValueError("old batch group has live descendants; restart refused")
     store.request_path(job_id).unlink(missing_ok=True)
-    store.marker_path(job_id).unlink(missing_ok=True)
     store.update(
         job_id, restart_count=1, status="queued", payload_pid=None, payload_start_ticks=None
     )
@@ -706,6 +772,9 @@ def handle_restart(
     ):
         store.update(job_id, status="queued_timeout")
         return False
+    # Prior execution evidence remains durable throughout recovery. Only a
+    # successfully admitted next attempt can clear its old handshake marker.
+    store.marker_path(job_id).unlink(missing_ok=True)
     return True
 
 
@@ -903,6 +972,7 @@ def _wait(
                 warn("restart request rejected: identity or consent changed")
                 store.request_path(record["job_id"]).unlink(missing_ok=True)
                 if process.poll() is not None:
+                    store.update(record["job_id"], status="failed")
                     return 1, False
             else:
                 return process.returncode or 0, restart
@@ -1073,10 +1143,12 @@ def main(argv: list[str] | None = None) -> int:
                     env[record["worker_env"]] = str(count)
                     record = store.update(record["job_id"], workers=count)
                 continue
-            if store.read(record["job_id"])["status"] == "queued_timeout":
+            current = store.read(record["job_id"])
+            if current["status"] == "queued_timeout":
                 return 124
+            restart_failed = current["status"] == "failed" and current["restart_count"] == 1
             marker = store.marker_path(record["job_id"])
-            if scoped and not marker.exists():
+            if scoped and not marker.exists() and not restart_failed:
                 if mandatory:
                     warn("required scope creation failed; payload not launched")
                     store.update(record["job_id"], status="failed")

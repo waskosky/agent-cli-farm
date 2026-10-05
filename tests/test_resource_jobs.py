@@ -1054,3 +1054,256 @@ class JobTests(unittest.TestCase):
         with patch.object(jobs, "process_identity", return_value=None):
             self.store.cleanup(now=8 * 86400)
         self.assertTrue(self.store.record_path(record["job_id"]).exists())
+
+    def test_termination_refuses_known_member_with_unreadable_existing_identity(self):
+        process, record = self.live_record()
+        member = jobs.process_identity(process.pid)
+        terminated = False
+        original_identity = jobs.process_identity
+
+        def identity(pid):
+            if terminated and pid == process.pid:
+                return None
+            return original_identity(pid)
+
+        def term(_group, _signum):
+            nonlocal terminated
+            terminated = True
+
+        with (
+            patch.object(
+                jobs, "_group_members", side_effect=lambda group: [] if terminated else [member]
+            ),
+            patch.object(jobs, "process_identity", side_effect=identity),
+            patch.object(jobs.os, "killpg", side_effect=term),
+            patch.object(jobs.signal, "pidfd_send_signal") as send,
+        ):
+            with self.assertRaises(ValueError):
+                jobs.terminate_owned_batch(
+                    self.store, record["job_id"], self.store.identity(record["job_id"]), grace=0.01
+                )
+        send.assert_not_called()
+        self.assertIsNone(process.poll())
+
+    def test_current_detectable_group_member_with_unreadable_identity_is_not_ignored(self):
+        process, _record = self.live_record()
+        original = jobs.process_identity
+        with patch.object(
+            jobs,
+            "process_identity",
+            side_effect=lambda pid: None if pid == process.pid else original(pid),
+        ):
+            with self.assertRaises(ValueError):
+                jobs._group_members(process.pid)
+
+    def test_concurrent_expired_override_reads_are_idempotent(self):
+        import concurrent.futures
+        import threading
+
+        _, record = self.live_record()
+        key = self.store.defer_job(record["job_id"], 1, self.store.identity(record["job_id"]))
+        path = self.store.overrides_path / (key + ".json")
+        value = jobs.read_private_json(path)
+        value["expires_at"] = 1
+        jobs.write_private_json(path, value)
+        first_read, second_read, release = threading.Event(), threading.Event(), threading.Event()
+        guard = threading.Lock()
+        count = 0
+        original = jobs.read_private_json
+
+        def read(target):
+            nonlocal count
+            value = original(target)
+            if target == path:
+                with guard:
+                    count += 1
+                    ordinal = count
+                if ordinal == 1:
+                    first_read.set()
+                    release.wait(2)
+                else:
+                    second_read.set()
+            return value
+
+        with (
+            patch.object(jobs, "read_private_json", side_effect=read),
+            concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            one = pool.submit(self.store.recipe_overrides, record["recipe_fingerprint"])
+            self.assertTrue(first_read.wait(2))
+            two = pool.submit(self.store.recipe_overrides, record["recipe_fingerprint"])
+            second_read.wait(0.1)
+            release.set()
+            self.assertEqual(one.result(timeout=3), {})
+            self.assertEqual(two.result(timeout=3), {})
+        self.assertFalse(path.exists())
+
+    def test_override_disappearing_between_listing_and_read_is_benign(self):
+        _, record = self.live_record()
+        key = self.store.defer_job(record["job_id"], 10, self.store.identity(record["job_id"]))
+        path = self.store.overrides_path / (key + ".json")
+        original = jobs.read_private_json
+
+        def remove_and_read(target):
+            if target == path:
+                path.unlink(missing_ok=True)
+            return original(target)
+
+        with patch.object(jobs, "read_private_json", side_effect=remove_and_read):
+            self.assertEqual(self.store.recipe_overrides(record["recipe_fingerprint"]), {})
+        path.symlink_to(self.root / "missing-target")
+        with self.assertRaises(ValueError):
+            self.store.recipe_overrides(record["recipe_fingerprint"])
+
+    def test_reduce_workers_locked_operation_finishes_within_bounded_timeout(self):
+        _, record = self.live_record()
+        script = (
+            "from codex_looper.resource_jobs import JobStore; s=JobStore(); job="
+            + repr(record["job_id"])
+            + '; s.reduce_workers(job,4,expectedidentity=s.identity(job)); print(s.recipe_overrides(s.read(job)["recipe_fingerprint"])["workers"])'
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=ROOT,
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=4,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "4")
+
+    def test_main_recovery_error_never_falls_back_or_executes_second_payload(self):
+        import threading
+
+        for exception in (OSError("memory sample unavailable"), ValueError("override unavailable")):
+            with self.subTest(exception=type(exception).__name__):
+                output = self.root / ("execution-" + type(exception).__name__)
+                code = (
+                    "import time; from pathlib import Path; p=Path(" + repr(str(output)) + "); "
+                    "old=p.read_text() if p.exists() else ''; p.write_text(old+'x'); time.sleep(20 if not old else 0)"
+                )
+                calls, errors, processes = [], [], []
+                launch = jobs._launch
+
+                def private_launch(
+                    store,
+                    record,
+                    args,
+                    env,
+                    scoped,
+                    attempt_calls=calls,
+                    original_launch=launch,
+                    owned_processes=processes,
+                ):
+                    attempt_calls.append(scoped)
+                    process = original_launch(store, record, args, env, False)
+                    owned_processes.append(process)
+                    return process
+
+                admission = jobs.admit
+
+                def failing_recovery(
+                    *args, failure=exception, original_admission=admission, **kwargs
+                ):
+                    if kwargs.get("recovery"):
+                        raise failure
+                    return original_admission(*args, **kwargs)
+
+                def request(output_path=output, payload_code=code, request_errors=errors):
+                    try:
+                        deadline = time.monotonic() + 5
+                        while not output_path.exists() and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        for path in self.store._records():
+                            record = self.store.read(path.stem)
+                            if record["status"] == "running" and record["argv"][-1] == payload_code:
+                                self.store.request_restart(
+                                    record["job_id"], self.store.identity(record["job_id"])
+                                )
+                                return
+                        raise AssertionError("running private payload not found")
+                    except BaseException as error:
+                        request_errors.append(error)
+
+                requester = threading.Thread(target=request)
+                requester.start()
+                try:
+                    with (
+                        patch.object(jobs, "_scope_ready", return_value=True),
+                        patch.object(jobs, "_launch", side_effect=private_launch),
+                        patch.object(jobs, "admit", side_effect=failing_recovery),
+                    ):
+                        result = jobs.main(
+                            [
+                                "run",
+                                "--role",
+                                "batch",
+                                "--restartable",
+                                "--memory-policy",
+                                "ignore",
+                                "--",
+                                sys.executable,
+                                "-c",
+                                code,
+                            ]
+                        )
+                finally:
+                    requester.join(timeout=6)
+                    for process in processes:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait()
+                self.assertFalse(requester.is_alive())
+                self.assertEqual(errors, [])
+                self.assertNotEqual(result, 0)
+                self.assertEqual(calls, [True])
+                self.assertEqual(output.read_text(), "x")
+
+    def test_override_lookup_and_rollback_complete_consistently(self):
+        import concurrent.futures
+        import threading
+
+        _, record = self.live_record()
+        key = self.store.defer_job(record["job_id"], 10, self.store.identity(record["job_id"]))
+        path = self.store.overrides_path / (key + ".json")
+        enumerated, release, rolled_back = threading.Event(), threading.Event(), threading.Event()
+        original = jobs.read_private_json
+        first_thread = None
+
+        def read(target):
+            nonlocal first_thread
+            if target == path and first_thread is None:
+                first_thread = threading.get_ident()
+                enumerated.set()
+                release.wait(2)
+            return original(target)
+
+        def rollback():
+            self.store.delete_override(key)
+            rolled_back.set()
+
+        with (
+            patch.object(jobs, "read_private_json", side_effect=read),
+            concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            reader = pool.submit(self.store.recipe_overrides, record["recipe_fingerprint"])
+            self.assertTrue(enumerated.wait(2))
+            remover = pool.submit(rollback)
+            rolled_back.wait(0.1)
+            release.set()
+            snapshot = reader.result(timeout=3)
+            remover.result(timeout=3)
+            self.assertIn("defer_until", snapshot)
+        self.assertEqual(self.store.recipe_overrides(record["recipe_fingerprint"]), {})
+
+    def test_confirmed_zombie_member_is_dead_without_pidfd(self):
+        process, _record = self.live_record()
+        member = jobs.process_identity(process.pid)
+        process.terminate()
+        deadline = time.monotonic() + 2
+        while jobs.process_identity(process.pid) is not None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(jobs._captured_member_state(member, None), "dead")
