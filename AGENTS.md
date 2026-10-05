@@ -72,3 +72,80 @@ not expose a structured status channel through tmux.
   backup files and retain opted-in archive budgets and priority safeguards.
 - Annotator polling defaults to five seconds, preserving environment and CLI
   overrides and native provider titles.
+
+## Managed job identity and consent
+
+- `codex-job` and `codex_looper.resource_jobs` accept exact argv; never add shell
+  evaluation or reinterpret provider arguments or trusted launcher fragments.
+- Agent wrapping is opt-in through `CODEXFARM_RESOURCE_PROTECTION=1` or private
+  `protect_agents` settings. Agent admission is always immediate; retain terminal
+  behavior and the Looper-created process group. Agents never accept ceilings,
+  restart requests, pause, or OOM-kill remedies.
+- Batch queueing and all other resource features default off. Explicit batch
+  memory limits require scope enforcement and fail before execution if unavailable.
+  Normal optional scope failure can fall back only before the durable inner-start
+  handshake; a payload error must never cause a second execution.
+- Scope properties must be scope-supported. Apply batch nice/OOM preferences in
+  the payload trampoline. Runtime slice preferences never write/unmask unit files
+  and must preserve stronger or unknown MemoryLow values on both shared parent
+  and interactive child. Apply role weights at sibling slices as well as scopes.
+- All remedies require a live recorded UID, PID/start ticks, actual cgroup and
+  scope generation. Never select by process name. Restart consent is batch-only,
+  explicit, and limited to one request; termination targets only its dedicated
+  launch group, with revalidated stable handles for surviving descendants.
+- Worker overrides use only the numeric allowlist and exact recipe fingerprints;
+  bounded TTL reductions and deferrals affect future launches. Existing jobs
+  change worker counts only after a separately consented restart. Public metadata
+  excludes argv, cwd and arbitrary environment values. Private state stays bounded
+  with 0700 directories, 0600 atomic files, and stale-record cleanup. Never prune
+  records with any live or unreadable recorded process identity; temporary scope
+  query failures must leave running records recoverable.
+- Keep tests in `tests/test_resource_config.py` and `tests/test_resource_jobs.py`,
+  plus launcher and Looper regressions. Use private homes and systemd doubles for
+  verification; do not install services or change live tmux sessions in tests.
+
+## Explicit host memory protection
+
+- `bin/codex-resource-host` is standalone Python 3.10+ stdlib administrative code.
+  It must never import the user-writable farm package, execute recipes/providers,
+  select processes by name, move sessions, or restart workloads.
+- Setup copies the helper only. `plan --uid UID` is read-only; only explicit root
+  `apply --uid UID` installs the root-owned helper/config and dedicated drop-ins.
+  `--with-maintenance` explicitly adds its own 30-second root timer.
+- Preserve stronger/unknown MemoryLow values. The 1 GiB shared hierarchy protects
+  used memory, never reserves free RAM, and gives no OOM immunity. Interactive
+  CPU/IO weights are 200 versus batch 25; never introduce ceilings here.
+- Precheck every target mask, including user local/runtime/global locations, before
+  mutation. Read user-home paths only through the isolated UID-dropped mask probe.
+  Never unmask host guards, build slices, autosave, or helper targets.
+- Root OOM changes require configured UID, start ticks, actual exact dedicated
+  scope (or explicitly supplied existing session), and stable proc directory FDs.
+  Maintenance scans at most 4096 PIDs for two seconds, with a bounded private
+  restoration journal. Preserve later operator changes and reused PID identities.
+- Use `tests/test_resource_host.py` with private roots/proc trees and manager
+  doubles. Never install host protection or mutate actual services in tests.
+
+## Optional incident investigation
+
+- `codex-resource` configuration only writes private settings. All four independent
+  options default off; no daemon/timer, host guard or backup changes are implicit.
+- Health status is written before optional scheduling. Sustained pressure needs
+  60 seconds, one global nonblocking lock, 15-minute cooldown and at least 512 MiB
+  MemAvailable. Unknown samples/failures stay advisory; annotation never awaits LLMs.
+- Reports must bound PID scans/time, sanitize labels, omit recipes/argv/cwd/env and
+  conversations, and retain private 64 KiB files with 20-report/journal limits.
+  Keep full trusted identity snapshots local; model projection chooses job IDs only.
+- Codex isolation requires private HOME/CODEX_HOME/cwd, auth-only link, no user
+  config/rules, read-only ephemeral execution, normalized bundled model metadata,
+  disabled tooling and fixed instructions. Bound probes and provider time/output.
+  Never ship fake provider routing, parse credentials or fall back unrestricted.
+- Validate the entire strict output before mutations. Manual actions need explicit
+  CLI intent plus stored consent; scheduled actions need stored consent. Recheck
+  consent after inference and job identity/UID/cgroup/generation before each remedy.
+  Only registered batch deferral, declared worker reduction and one consented
+  restart request are allowed. Restarts are nonreversible requests. TTL rollback
+  removes only this investigation's own reversible overrides.
+- Test with synthetic authentication and loopback SSE; no live model or login calls.
+  `CODEXFARM_TEST_NATIVE_CODEX=/absolute/native/codex python3 -m unittest
+  tests.test_resource_investigator` runs the optional native isolation matrix,
+  checking actual additional_tools, forbidden dispatch and final JSON delivery.

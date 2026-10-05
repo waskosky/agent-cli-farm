@@ -98,6 +98,80 @@ esac
         lines = self.tmux_log.read_text(encoding="utf-8").splitlines()
         return [line.split() for line in lines]
 
+    def test_resource_agent_wrapper_preserves_once_interpreted_fragment_and_literal_args(self):
+        capture = self.tmpdir / "window-command"
+        argv_file = self.tmpdir / "argv.json"
+        count = self.tmpdir / "fragment-count"
+        target = self.tmpdir / "project"
+        target.mkdir()
+        tmux = self.tmpdir / "tmux"
+        script = tmux.read_text().replace(
+            "  new-window)\n", '  new-window)\n    printf %s "${@: -1}" > "$TMUX_CAPTURE_WINDOW"\n'
+        )
+        tmux.write_text(script)
+        provider = self.tmpdir / "provider"
+        make_executable(
+            provider,
+            "#!/usr/bin/env python3\nimport os,sys,json\n"
+            + 'if "--help" not in sys.argv: open(os.environ["ARGV_FILE"],"w").write(json.dumps(sys.argv[1:]))\n',
+        )
+        make_executable(self.tmpdir / "systemctl", "#!/usr/bin/env bash\nexit 1\n")
+        env = {
+            **self.env,
+            "CODEXFARM_RESOURCE_PROTECTION": "1",
+            "CODEX_CMD": str(provider),
+            "TMUX_CAPTURE_WINDOW": str(capture),
+            "ARGV_FILE": str(argv_file),
+            "CODEX_ARGS": '"$(printf x >> ' + str(count) + '; printf trusted)"',
+        }
+        literal = "$value; `data`"
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-add", "-d", str(target), "--", literal],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = capture.read_text()
+        self.assertIn("codex-job run --role agent --", command)
+        execute = subprocess.run(
+            ["bash", "-c", command], cwd=target, env=env, text=True, capture_output=True, timeout=8
+        )
+        self.assertEqual(execute.returncode, 0, execute.stderr)
+        self.assertEqual(json.loads(argv_file.read_text()), ["trusted", literal])
+        self.assertEqual(count.read_text(), "x")
+
+    def test_resource_private_settings_optin_and_inaccessible_lookup_failopen(self):
+        from unittest.mock import patch
+
+        from codex_looper.resource_config import ResourceSettings, write_settings
+
+        with patch.dict(os.environ, self.env, clear=True):
+            path = write_settings(ResourceSettings(protect_agents=True))
+        for private, expected in [(True, True), (False, False)]:
+            path.chmod(0o600 if private else 0o644)
+            capture = self.tmpdir / "capture"
+            tmux = self.tmpdir / "tmux"
+            script = tmux.read_text()
+            if "TMUX_CAPTURE_WINDOW" not in script:
+                tmux.write_text(
+                    script.replace(
+                        "  new-window)\n",
+                        '  new-window)\n    printf %s "${@: -1}" > "$TMUX_CAPTURE_WINDOW"\n',
+                    )
+                )
+            env = {**self.env, "TMUX_CAPTURE_WINDOW": str(capture)}
+            result = subprocess.run(
+                [REPO_ROOT / "bin/codex-add", "-d", str(self.tmpdir)],
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual("codex-job run --role agent --" in capture.read_text(), expected)
+            if not private:
+                self.assertIn("optional resource settings unavailable", result.stderr)
+
     def test_help_does_not_require_tmux_or_agent(self):
         env = self.env.copy()
         sparse_path = self.tmpdir / "sparse-path"

@@ -88,9 +88,107 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(Memory(8000, 1500, 0).level(Limits()), "warning")
         self.assertEqual(Memory(8000, 799, 0).level(Limits()), "critical")
 
+    def test_default_headroom_does_not_scale_with_ram(self):
+        for total in (4096, 8192, 65536):
+            for available, expected in ((1400, "warning"), (1024, "critical"), (2048, "ok")):
+                with self.subTest(total=total, available=available):
+                    self.assertEqual(Memory(total, available, 0).level(Limits()), expected)
+        self.assertEqual(Memory(8192, 1536, 0).level(Limits()), "warning")
+        self.assertEqual(Memory(8192, 1537, 0).level(Limits()), "ok")
+        self.assertEqual(Memory(8192, 1025, 0).level(Limits()), "warning")
+
+    def test_legacy_percentage_overrides_select_percent_policy(self):
+        for values in (
+            {"CODEXFARM_MEMORY_WARN_PERCENT": "20"},
+            {"CODEXFARM_MEMORY_CRITICAL_PERCENT": "10"},
+            {"CODEXFARM_MEMORY_POLICY": "percent"},
+        ):
+            with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
+                limits = Limits.from_env()
+                self.assertEqual(Memory(65536, 2048, 0).level(limits), "critical")
+                self.assertEqual(Memory(4096, 1400, 0).level(limits), "ok")
+
+    def test_explicit_headroom_policy_wins_over_percent_overrides(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CODEXFARM_MEMORY_POLICY": "headroom",
+                "CODEXFARM_MEMORY_WARN_PERCENT": "40",
+                "CODEXFARM_MEMORY_CRITICAL_PERCENT": "30",
+                "CODEXFARM_MEMORY_WARN_MIB": "1800",
+                "CODEXFARM_MEMORY_CRITICAL_MIB": "1200",
+            },
+            clear=True,
+        ):
+            limits = Limits.from_env()
+            self.assertEqual(Memory(65536, 1800, 0).level(limits), "warning")
+            self.assertEqual(Memory(65536, 1200, 0).level(limits), "critical")
+            self.assertEqual(Memory(65536, 2048, 0).level(limits), "ok")
+
+    def test_limits_preserve_existing_positional_fields(self):
+        limits = Limits(30, 15, 2000)
+        self.assertEqual(
+            (limits.warning_percent, limits.critical_percent, limits.session_mib), (30, 15, 2000)
+        )
+
+    def test_invalid_headroom_and_policy_configuration_fail_clearly(self):
+        for values in (
+            {"CODEXFARM_MEMORY_POLICY": "other"},
+            {"CODEXFARM_MEMORY_WARN_MIB": "nan"},
+            {"CODEXFARM_MEMORY_CRITICAL_MIB": "inf"},
+            {"CODEXFARM_MEMORY_WARN_MIB": "1024"},
+            {"CODEXFARM_MEMORY_CRITICAL_MIB": "-1"},
+            {"CODEXFARM_MEMORY_POLICY": "headroom", "CODEXFARM_MEMORY_WARN_PERCENT": "nan"},
+            {
+                "CODEXFARM_MEMORY_POLICY": "headroom",
+                "CODEXFARM_MEMORY_WARN_PERCENT": "10",
+                "CODEXFARM_MEMORY_CRITICAL_PERCENT": "20",
+            },
+        ):
+            with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
+                with self.assertRaises(ValueError):
+                    Limits.from_env()
+        for values in ((True, 10, 1024), (20, 10, float("nan")), (10, 20, 1024)):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                Limits(*values)
+
+    def test_io_pressure_is_reported_separately_and_does_not_refuse_restore(self):
+        (self.root / "meminfo").write_text("MemTotal: 8388608 kB\nMemAvailable: 4194304 kB\n")
+        self.assertEqual(getattr(read_memory(self.root), "io_pressure_percent", None), 0)
+        (self.root / "pressure").mkdir()
+        (self.root / "pressure/io").write_text("some avg10=95.50 avg60=2 total=4\n")
+        memory = read_memory(self.root)
+        self.assertEqual(memory.io_pressure_percent, 95.5)
+        self.assertEqual(memory.pressure_percent, 0)
+        self.assertIn("I/O stalls 95.5%", memory.description())
+        with (
+            patch("sys.argv", ["codex-health", "--restore-check", "--enforce-memory-pressure"]),
+            patch("codex_looper.health.read_memory", return_value=memory),
+        ):
+            self.assertEqual(main(), 0)
+        for value in ("nan", "inf", "-1", "101", "bad"):
+            with self.subTest(value=value):
+                (self.root / "pressure/io").write_text(f"some avg10={value}\n")
+                self.assertEqual(read_memory(self.root).io_pressure_percent, 0)
+
+    def test_invalid_direct_memory_readings_are_unknown(self):
+        for memory in (
+            Memory(0, 0, 0),
+            Memory(8192, -1, 0),
+            Memory(8192, 9000, 0),
+            Memory(float("nan"), 2000, 0),
+            Memory(8192, 2000, 0, float("inf")),
+        ):
+            with self.subTest(memory=memory):
+                self.assertEqual(memory.level(Limits()), "unavailable")
+
     def test_missing_or_malformed_memory_is_unknown(self):
         self.assertIsNone(read_memory(self.root))
         (self.root / "meminfo").write_text("MemTotal: oops\n")
+        self.assertIsNone(read_memory(self.root))
+
+    def test_overflowing_memory_counters_are_unknown(self):
+        (self.root / "meminfo").write_text(f"MemTotal: {'9' * 400} kB\nMemAvailable: 4096000 kB\n")
         self.assertIsNone(read_memory(self.root))
 
     def test_whole_tree_includes_test_workers_without_double_counting_panes(self):

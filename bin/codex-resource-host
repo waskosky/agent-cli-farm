@@ -1,0 +1,833 @@
+#!/usr/bin/python3 -I
+"""Standalone, explicitly installed host preferences. Python 3.10+, stdlib only."""
+
+import argparse
+import base64
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import pwd
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+LOW = 1 << 30
+LIMIT = 4096
+SECONDS = 2.0
+MAX_FILE = 1 << 20
+MAX_STATE = 16 << 20
+CODE = "/usr/local/libexec/codexfarm-resource-protection.py"
+CONFIG = "/etc/codexfarm-resource-protection.json"
+STATE = "/var/lib/codexfarm-resource-protection/state.json"
+LOCK = "/var/lib/codexfarm-resource-protection/lock"
+SERVICE = "codexfarm-resource-protection.service"
+TIMER = "codexfarm-resource-protection.timer"
+ENABLE = f"/etc/systemd/system/timers.target.wants/{TIMER}"
+BACKUP = "/var/backups/codexfarm-resource-protection-originals/originals.json"
+DROP = "90-codexfarm-resource-protection.conf"
+ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}
+
+
+class Error(RuntimeError):
+    pass
+
+
+class MutationError(OSError, Error):
+    pass
+
+
+class Paths:
+    """Path injection is an in-process test seam, never a command-line option."""
+
+    def __init__(self, root=Path("/")):
+        self.root = Path(root)
+
+    def at(self, name):
+        return self.root / name.lstrip("/")
+
+
+# This fixed program reads user-controlled paths only after losing root privileges.
+# -I prevents PYTHONPATH, sitecustomize and user site imports.
+MASK_PROBE = """
+import os,pwd,sys
+uid=int(sys.argv[1]); unit=sys.argv[2]
+home=pwd.getpwuid(uid).pw_dir
+roots=[home+'/.config/systemd/user',home+'/.config/systemd/user.control',
+       home+'/.local/share/systemd/user', '/run/user/'+str(uid)+'/systemd/user',
+       '/run/user/'+str(uid)+'/systemd/user.control',
+       '/run/user/'+str(uid)+'/systemd/transient']
+roots.extend(sys.argv[3:])
+print(int(any(os.path.islink(p+'/'+unit) and os.path.realpath(p+'/'+unit)=='/dev/null'
+              for p in roots)))
+"""
+
+
+class Systemd:
+    def __init__(self, uid):
+        self.uid = uid
+
+    @staticmethod
+    def run(argv, **kwargs):
+        try:
+            return subprocess.run(argv, **kwargs)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise Error(f"{argv[0]} failed: {exc}") from exc
+
+    def command(self, user, *args):
+        argv = ["/usr/bin/systemctl"]
+        env = dict(ENV)
+        if user:
+            argv += ["--user"]
+            if os.geteuid() == self.uid:
+                env["XDG_RUNTIME_DIR"] = f"/run/user/{self.uid}"
+                env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{self.uid}/bus"
+            else:
+                argv += [f"--machine={self.uid}@.host"]
+        result = self.run(argv + list(args), env=env, capture_output=True, text=True, timeout=5)
+        if result.returncode:
+            raise Error(f"systemctl {' '.join(args)} failed: {result.stderr.strip()}")
+        return result.stdout.strip()
+
+    def get(self, user, unit, prop):
+        return self.command(user, "show", unit, f"--property={prop}", "--value")
+
+    def active(self, user, unit):
+        return self.get(user, unit, "ActiveState") in {"active", "activating", "reloading"}
+
+    def set(self, user, unit, prop, value):
+        self.command(user, "set-property", "--runtime", unit, f"{prop}={value}")
+
+    def masked(self, user, unit):
+        if self.get(user, unit, "LoadState") == "masked":
+            return True
+        kind = "user" if user else "system"
+        roots = [
+            f"{p}/systemd/{kind}" for p in ("/etc", "/run", "/usr/local/lib", "/usr/lib", "/lib")
+        ]
+        roots += [
+            f"/etc/systemd/{kind}.control",
+            f"/run/systemd/{kind}.control",
+            "/run/systemd/transient",
+        ]
+        if user:
+            # UnitPath also covers customized XDG paths, read as the configured UID.
+            roots += self.command(True, "show", "--property=UnitPath", "--value").split()
+            account = pwd.getpwuid(self.uid)
+            kwargs = {}
+            if os.geteuid() == 0:
+                kwargs = {"user": self.uid, "group": account.pw_gid, "extra_groups": []}
+            result = self.run(
+                ["/usr/bin/python3", "-I", "-c", MASK_PROBE, str(self.uid), unit, *roots],
+                env=ENV,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                **kwargs,
+            )
+            if result.returncode or result.stdout.strip() not in {"0", "1"}:
+                raise Error("cannot safely check user masks")
+            return result.stdout.strip() == "1"
+        return any(
+            (Path(p) / unit).is_symlink() and (Path(p) / unit).resolve() == Path("/dev/null")
+            for p in roots
+        )
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def validate_uid(uid):
+    if type(uid) is not int or not 1 <= uid < 2**32 - 1:
+        raise Error("uid must be a positive non-root numeric UID")
+
+
+def targets_for(uid):
+    return [
+        (False, "user.slice"),
+        (False, f"user-{uid}.slice"),
+        (False, f"user@{uid}.service"),
+        (True, "codexfarm.slice"),
+        (True, "codexfarm-interactive.slice"),
+        (True, "codexfarm-batch.slice"),
+    ]
+
+
+def memory_value(current):
+    if current == "infinity":
+        return current
+    if re.fullmatch(r"[0-9]+", current):
+        return str(max(LOW, int(current)))
+    return None  # Unknown values cannot safely be reduced.
+
+
+def role_for(uid, group):
+    prefix = rf"/user\.slice/user-{uid}\.slice/user@{uid}\.service/codexfarm\.slice/"
+    match = re.fullmatch(
+        prefix
+        + r"codexfarm-(interactive|batch)\.slice/codexfarm-(agent|batch)-[0-9a-f]{32}\.scope(?:/[^/\n]+)*",
+        group,
+    )
+    if match and match.groups() in {("interactive", "agent"), ("batch", "batch")}:
+        if any(part in {".", ".."} for part in group.split("/")):
+            return None
+        return match.group(2)
+    return None
+
+
+class Process:
+    """Hold a proc directory FD, preventing PID reuse from redirecting a write."""
+
+    def __init__(self, paths, pid):
+        self.pid = pid
+        self.fd = os.open(paths.at(f"/proc/{pid}"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+    def close(self):
+        os.close(self.fd)
+
+    def read(self, name):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.fd)
+        with os.fdopen(fd) as stream:
+            return stream.read(65536)
+
+    def identity(self):
+        try:
+            fields = self.read("stat").rsplit(")", 1)[1].split()
+            ticks = int(fields[19])
+        except (IndexError, ValueError) as exc:
+            raise Error("incomplete process identity") from exc
+        uid = re.search(r"^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)", self.read("status"), re.M)
+        if uid is None or len(set(uid.groups())) != 1:
+            raise Error("process identity has mixed credentials")
+        groups = [line[3:] for line in self.read("cgroup").splitlines() if line.startswith("0::")]
+        if len(groups) != 1:
+            raise Error("process identity requires cgroup v2")
+        return int(uid[1]), ticks, groups[0]
+
+    def score(self):
+        return int(self.read("oom_score_adj").strip())
+
+    def write(self, identity, expected, value):
+        fd = os.open("oom_score_adj", os.O_WRONLY | os.O_NOFOLLOW, dir_fd=self.fd)
+        try:
+            if self.identity() != identity or self.score() != expected:
+                raise Error("process identity or OOM preference changed")
+            data = str(value).encode()
+            if os.write(fd, data) != len(data):
+                raise Error("short OOM preference write")
+        finally:
+            os.close(fd)
+
+
+class Host:
+    def __init__(self, paths=None, manager=None, owner=0):
+        self.paths = paths or Paths()
+        self.manager = manager
+        self.owner = owner
+
+    def root(self):
+        if os.geteuid() != 0:
+            raise Error("this action requires explicit root execution")
+
+    def trust(self, name, private=False, missing=False):
+        path = self.paths.at(name)
+        # All privileged destinations are fixed under root-owned non-writable parents.
+        for parent in [*reversed(path.parents), path]:
+            if parent == self.paths.root or self.paths.root not in parent.parents:
+                continue
+            try:
+                info = parent.lstat()
+            except FileNotFoundError:
+                if missing:
+                    continue
+                raise Error(f"trust check: missing {name}") from None
+            if stat.S_ISLNK(info.st_mode) or info.st_uid != self.owner or info.st_mode & 0o022:
+                raise Error(f"trust check failed: {parent}")
+            private_dirs = {self.paths.at(STATE).parent, self.paths.at(BACKUP).parent}
+            if parent in private_dirs and info.st_mode & 0o077:
+                raise Error(f"trust check: private directory permissions: {parent}")
+            if parent == path:
+                if not stat.S_ISREG(info.st_mode) or (private and info.st_mode & 0o077):
+                    raise Error(f"trust check failed: {parent}")
+
+    def read(self, name, private=False):
+        self.trust(name, private=private)
+        with self.paths.at(name).open("rb") as stream:
+            data = stream.read(MAX_STATE + 1)
+        if len(data) > MAX_STATE:
+            raise Error("state/file exceeds size bound")
+        return data
+
+    def ensure_parent(self, path):
+        missing = []
+        parent = path.parent
+        while not parent.exists():
+            missing.append(parent)
+            parent = parent.parent
+        for directory in reversed(missing):
+            directory.mkdir(
+                mode=0o700 if str(directory).startswith(str(self.paths.at("/var/"))) else 0o755
+            )
+
+    def write(self, name, data, mode=0o600):
+        self.trust(name, missing=True)
+        path = self.paths.at(name)
+        self.ensure_parent(path)
+        fd, temporary = tempfile.mkstemp(prefix=".codexfarm-", dir=path.parent)
+        try:
+            os.fchmod(fd, mode)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
+
+    @contextlib.contextmanager
+    def locked(self):
+        self.trust(LOCK, private=True, missing=True)
+        path = self.paths.at(LOCK)
+        self.ensure_parent(path)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "rb") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            yield
+
+    def save(self, state):
+        data = json.dumps(state, sort_keys=True).encode() + b"\n"
+        if len(data) > MAX_STATE:
+            raise Error("journal exceeds bounded size")
+        self.write(STATE, data)
+
+    def load(self, recovering=False):
+        state = json.loads(self.read(STATE, private=True))
+        validate_uid(state["uid"])
+        partial = recovering and state["phase"] in {"applying", "removing"}
+        # An interrupted install may not have reached its code/config writes.
+        # The private root-owned journal still authenticates the bounded undo.
+        for name in (CONFIG, CODE):
+            path = self.paths.at(name)
+            self.trust(name, private=name == CONFIG, missing=partial)
+            if partial and not path.exists():
+                continue
+            data = self.read(name, private=name == CONFIG)
+            expected = {state["files"][name]["expected"]}
+            original = state["files"][name]["original"]
+            if partial and original is not None:
+                expected.add(digest(base64.b64decode(original)))
+            if digest(data) not in expected:
+                raise Error(f"trust check: installed file was changed: {name}")
+            if name == CONFIG and digest(data) == state["files"][name]["expected"]:
+                if json.loads(data) != {
+                    "uid": state["uid"],
+                    "maintenance": state["maintenance"],
+                    "version": 1,
+                }:
+                    raise Error("trust check: config/journal mismatch")
+        if len(state["oom"]) > LIMIT:
+            raise Error("journal process limit exceeded")
+        self.manager = self.manager or Systemd(state["uid"])
+        return state
+
+    def proposal(self, uid, maintenance):
+        validate_uid(uid)
+        self.manager = self.manager or Systemd(uid)
+        files = {}
+        runtime = []
+        for user, unit in targets_for(uid):
+            props = {}
+            if unit != "codexfarm-batch.slice":
+                value = memory_value(self.manager.get(user, unit, "MemoryLow"))
+                if value is not None:
+                    props["MemoryLow"] = value
+            if unit in {"codexfarm-interactive.slice", "codexfarm-batch.slice"}:
+                props.update(
+                    CPUWeight="200" if "interactive" in unit else "25",
+                    IOWeight="200" if "interactive" in unit else "25",
+                )
+            section = "Service" if unit.endswith(".service") else "Slice"
+            name = f"/etc/systemd/{'user' if user else 'system'}/{unit}.d/{DROP}"
+            files[name] = f"# Managed by codex-resource-host\n[{section}]\n" + "".join(
+                f"{key}={value}\n" for key, value in props.items()
+            )
+            for prop, value in props.items():
+                runtime.append({"user": user, "unit": unit, "prop": prop, "value": value})
+        files[CODE] = "<standalone copy of this reviewed helper; mode 0755>"
+        files[CONFIG] = json.dumps({"uid": uid, "maintenance": maintenance, "version": 1}) + "\n"
+        if maintenance:
+            files[f"/etc/systemd/system/{SERVICE}"] = (
+                f"[Unit]\nDescription=Farm OOM preferences for configured UID\n[Service]\nType=oneshot\nExecStart=/usr/bin/python3 -I {CODE} maintain\nEnvironment=PATH=/usr/sbin:/usr/bin:/sbin:/bin\nUMask=0077\nNoNewPrivileges=yes\nProtectHome=yes\n"
+            )
+            files[f"/etc/systemd/system/{TIMER}"] = (
+                f"[Unit]\nDescription=Farm OOM preference maintenance\n[Timer]\nOnBootSec=30s\nOnUnitActiveSec=30s\nUnit={SERVICE}\n[Install]\nWantedBy=timers.target\n"
+            )
+        return files, runtime
+
+    def plan(self, uid, maintenance=False, targets=()):
+        files, runtime = self.proposal(uid, maintenance)
+        selected = self.verified_targets(uid, targets)
+        try:
+            for session in self.sessions(uid, selected):
+                value = memory_value(self.manager.get(False, session, "MemoryLow"))
+                if value is not None:
+                    runtime.append(
+                        {"user": False, "unit": session, "prop": "MemoryLow", "value": value}
+                    )
+        finally:
+            for process, _ in selected:
+                process.close()
+        return {
+            "uid": uid,
+            "files": files,
+            "runtime": runtime,
+            "global_user_scope": "/etc/systemd/user dedicated farm drop-ins apply to all users with these named slices",
+            "oom": {
+                "agent": -250,
+                "batch": 250,
+                "targets": list(targets),
+                "maintenance": maintenance,
+                "scan_pids": LIMIT,
+                "scan_seconds": SECONDS,
+            },
+            "state": STATE,
+            "lock": LOCK,
+            "backups": BACKUP
+            + " (one bounded snapshot, retained on remove; replaced by next apply)",
+            "timer_activation": ENABLE if maintenance else None,
+            "rollback": f"sudo /usr/bin/python3 -I {CODE} remove; restore only expected file hashes/runtime values and matching PID start ticks/current applied scores",
+            "memory": "1 GiB shared hierarchical MemoryLow protects used memory; no free-memory reservation or OOM immunity",
+        }
+
+    def precheck(self, uid, maintenance, sessions=()):
+        units = targets_for(uid) + [(False, s) for s in sessions]
+        if maintenance:
+            units += [(False, SERVICE), (False, TIMER)]
+        for user, unit in units:
+            if self.manager.masked(user, unit):
+                raise Error(f"target unit is masked: {unit}")
+
+    def verified_targets(self, uid, targets):
+        result = []
+        if len(targets) > LIMIT:
+            raise Error("too many one-shot targets")
+        try:
+            for item in dict.fromkeys(targets):
+                if not re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", item):
+                    raise Error("target must be PID:startticks")
+                pid, ticks = map(int, item.split(":"))
+                process = Process(self.paths, pid)
+                result.append((process, None))
+                identity = process.identity()
+                session = re.fullmatch(
+                    rf"/user\.slice/user-{uid}\.slice/(session-[0-9]+\.scope)(?:/[^/\n]+)*",
+                    identity[2],
+                )
+                if identity[:2] != (uid, ticks) or not (
+                    role_for(uid, identity[2]) == "agent" or session
+                ):
+                    raise Error("target process identity/UID/startticks/cgroup mismatch")
+                result[-1] = (process, identity)
+            return result
+        except BaseException:
+            for process, _ in result:
+                process.close()
+            raise
+
+    @staticmethod
+    def sessions(uid, selected):
+        result = set()
+        for _, identity in selected:
+            match = re.match(
+                rf"/user\.slice/user-{uid}\.slice/(session-[0-9]+\.scope)(?:/|$)", identity[2]
+            )
+            if match:
+                result.add(match[1])
+        return result
+
+    def snapshot(self, files):
+        snapshots = {}
+        for name, data in files.items():
+            self.trust(name, missing=True)
+            path = self.paths.at(name)
+            old = None
+            if path.exists():
+                with path.open("rb") as stream:
+                    old = stream.read(MAX_FILE + 1)
+            if old is not None and len(old) > MAX_FILE:
+                raise Error(f"existing file too large: {name}")
+            snapshots[name] = {
+                "original": base64.b64encode(old).decode() if old is not None else None,
+                "mode": path.stat().st_mode & 0o777 if old is not None else None,
+                "expected": digest(data),
+            }
+        return snapshots
+
+    def preference(self, state, process, identity, role):
+        old = process.score()
+        value = min(old, -250) if role == "agent" else max(old, 250)
+        if old == value:
+            return
+        if len(state["oom"]) >= LIMIT:
+            return
+        record = {
+            "pid": process.pid,
+            "uid": identity[0],
+            "ticks": identity[1],
+            "group": identity[2],
+            "original": old,
+            "applied": value,
+            "status": "pending",
+        }
+        state["oom"].append(record)
+        try:
+            self.save(state)  # Journal the undo before touching a process.
+        except (OSError, Error) as exc:
+            raise MutationError(str(exc)) from exc
+        self.finish_preference(process, identity, record)
+
+    @staticmethod
+    def finish_preference(process, identity, record, allow_write=True):
+        # A pending journal entry can represent either side of a crash at write.
+        # Retry only the exact identity at its original score; retain divergent
+        # entries as abandoned so later scans cannot override an operator choice.
+        if identity != (record["uid"], record["ticks"], record["group"]):
+            record["status"] = "abandoned"
+            return
+        current = process.score()
+        if current == record["applied"]:
+            record["status"] = "applied"
+            return
+        if current != record["original"] or not allow_write:
+            record["status"] = "abandoned"
+            return
+        try:
+            process.write(identity, record["original"], record["applied"])
+        except (FileNotFoundError, ProcessLookupError):
+            raise
+        except OSError as exc:
+            raise MutationError(str(exc)) from exc
+        except Error:
+            record["status"] = "abandoned"
+            raise
+        record["status"] = "applied"
+
+    def apply(self, uid, maintenance=False, targets=()):
+        self.root()
+        files_text, runtime = self.proposal(uid, maintenance)
+        selected = self.verified_targets(uid, targets)
+        try:
+            sessions = self.sessions(uid, selected)
+            self.precheck(uid, maintenance, sessions)
+            if maintenance:
+                link = self.paths.at(ENABLE)
+                self.trust(str(Path(ENABLE).parent / ".trust-probe"), missing=True)
+                if link.is_symlink():
+                    if os.readlink(link) != f"/etc/systemd/system/{TIMER}":
+                        raise Error("timer enablement link already belongs to another target")
+                elif link.exists():
+                    raise Error("timer enablement path is not a symlink")
+            # No directories, lock files, or journal writes before ALL prechecks.
+            with self.locked():
+                if self.paths.at(STATE).exists():
+                    state = self.load()
+                    if state["phase"] != "active":
+                        raise Error("incomplete installation; run remove to recover before apply")
+                    if (state["uid"], state["maintenance"], state["targets"]) != (
+                        uid,
+                        maintenance,
+                        sorted(set(targets)),
+                    ):
+                        raise Error(
+                            "already installed; remove before changing configuration/targets"
+                        )
+                    return
+                files = {name: value.encode() for name, value in files_text.items()}
+                files[CODE] = Path(__file__).read_bytes()
+                for session in sessions:
+                    value = memory_value(self.manager.get(False, session, "MemoryLow"))
+                    if value is not None:
+                        runtime.append(
+                            {"user": False, "unit": session, "prop": "MemoryLow", "value": value}
+                        )
+                state = {
+                    "version": 1,
+                    "phase": "applying",
+                    "targets": sorted(set(targets)),
+                    "uid": uid,
+                    "maintenance": maintenance,
+                    "files": self.snapshot(files),
+                    "runtime": [],
+                    "oom": [],
+                    "timer_started": False,
+                    "timer_link_created": False,
+                    "timer_was_active": self.manager.active(False, TIMER) if maintenance else False,
+                }
+                for entry in runtime:
+                    old = self.manager.get(entry["user"], entry["unit"], entry["prop"])
+                    state["runtime"].append({**entry, "original": old})
+                self.write(BACKUP, json.dumps(state, sort_keys=True).encode())
+                self.save(state)
+                try:
+                    for name, data in files.items():
+                        self.write(
+                            name,
+                            data,
+                            0o755 if name == CODE else 0o600 if name == CONFIG else 0o644,
+                        )
+                    self.manager.command(False, "daemon-reload")
+                    self.manager.command(True, "daemon-reload")
+                    for entry in state["runtime"]:
+                        if entry["value"] != entry["original"]:
+                            self.manager.set(
+                                entry["user"], entry["unit"], entry["prop"], entry["value"]
+                            )
+                    for process, identity in selected:
+                        self.preference(state, process, identity, "agent")
+                    if maintenance:
+                        state["timer_started"] = True
+                        self.save(state)
+                        link = self.paths.at(ENABLE)
+                        if not link.is_symlink() and not link.exists():
+                            # Journal intent before the sole enablement symlink is created.
+                            state["timer_link_created"] = True
+                            self.save(state)
+                            link.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+                            link.symlink_to(f"/etc/systemd/system/{TIMER}")
+                        self.manager.command(False, "daemon-reload")
+                        self.manager.command(False, "start", TIMER)
+                    state["phase"] = "active"
+                    self.save(state)
+                except BaseException:
+                    self.restore(state)
+                    raise
+        finally:
+            for process, _ in selected:
+                process.close()
+
+    def file_matches(self, name, state):
+        path = self.paths.at(name)
+        return (
+            not path.is_symlink()
+            and path.is_file()
+            and digest(self.read(name)) == state["files"][name]["expected"]
+        )
+
+    def restore(self, state):
+        failures = []
+        timer_definition = f"/etc/systemd/system/{TIMER}"
+        timer_stop_pending = False
+        try:
+            if (
+                state["timer_started"]
+                and not state["timer_was_active"]
+                and not self.manager.masked(False, TIMER)
+                and self.file_matches(timer_definition, state)
+            ):
+                # Never unmask; stop only this helper's timer.
+                self.manager.command(False, "stop", TIMER)
+        except (Error, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            timer_stop_pending = True
+            failures.append(str(exc))
+        try:
+            if state["timer_link_created"]:
+                link = self.paths.at(ENABLE)
+                if link.is_symlink() and os.readlink(link) == f"/etc/systemd/system/{TIMER}":
+                    link.unlink()
+        except OSError as exc:
+            failures.append(str(exc))
+        for record in reversed(state["oom"]):
+            if record.get("status") == "abandoned":
+                continue
+            try:
+                with contextlib.closing(Process(self.paths, record["pid"])) as process:
+                    identity = process.identity()
+                    if (
+                        identity == (record["uid"], record["ticks"], record["group"])
+                        and process.score() == record["applied"]
+                    ):
+                        process.write(identity, record["applied"], record["original"])
+            except (FileNotFoundError, ProcessLookupError, ValueError, Error):
+                pass  # Dead/reused processes and later operator choices are preserved.
+            except OSError as exc:
+                failures.append(str(exc))
+        for entry in reversed(state["runtime"]):
+            try:
+                user, unit, prop = entry["user"], entry["unit"], entry["prop"]
+                if (
+                    not self.manager.masked(user, unit)
+                    and (
+                        not re.fullmatch(r"session-[0-9]+\.scope", unit)
+                        or self.manager.get(user, unit, "LoadState") != "not-found"
+                    )
+                    and self.manager.get(user, unit, prop) == entry["value"]
+                ):
+                    original = entry["original"]
+                    # systemctl show uses a display marker for an unset weight;
+                    # set-property requires an empty assignment to restore it.
+                    if prop in {"CPUWeight", "IOWeight"} and original == "[not set]":
+                        original = ""
+                    self.manager.set(user, unit, prop, original)
+            except (Error, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                failures.append(str(exc))
+
+        def restore_file(name, entry):
+            path = self.paths.at(name)
+            if path.is_symlink() or not path.exists():
+                return
+            if digest(self.read(name)) != entry["expected"]:
+                return
+            if entry["original"] is None:
+                path.unlink()
+            else:
+                self.write(name, base64.b64decode(entry["original"]), entry["mode"])
+
+        for name, entry in reversed(list(state["files"].items())):
+            if name in {CODE, CONFIG}:
+                continue
+            if timer_stop_pending and name == timer_definition:
+                # A retry needs the installed definition to verify timer ownership.
+                # Other independent undo can proceed, but do not erase that proof.
+                continue
+            try:
+                restore_file(name, entry)
+            except (Error, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                failures.append(str(exc))
+        for user in (False, True):
+            try:
+                self.manager.command(user, "daemon-reload")
+            except (Error, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                failures.append(str(exc))
+        if failures:
+            raise Error("rollback incomplete: " + "; ".join(failures))
+        # Keep trusted installed recovery material until all other undo succeeds.
+        restore_file(CONFIG, state["files"][CONFIG])
+        restore_file(CODE, state["files"][CODE])
+        self.paths.at(STATE).unlink(missing_ok=True)
+
+    def remove(self):
+        self.root()
+        if not self.paths.at(STATE).exists():
+            return
+        with self.locked():
+            state = self.load(recovering=True)
+            state["phase"] = "removing"
+            self.save(state)
+            self.restore(state)
+
+    def maintain(self):
+        self.root()
+        with self.locked():
+            state = self.load()
+            if state["phase"] != "active":
+                raise Error("incomplete installation; maintenance refused")
+            if not state["maintenance"]:
+                raise Error("maintenance was not enabled by explicit apply")
+            deadline = time.monotonic() + SECONDS
+            # Drop only dead/reused identities; unreadable live records remain bounded.
+            kept = []
+            count = 0
+            for record in state["oom"]:
+                count += 1
+                try:
+                    with contextlib.closing(Process(self.paths, record["pid"])) as process:
+                        identity = process.identity()
+                        if identity[:2] == (record["uid"], record["ticks"]):
+                            if record.get("status", "pending") == "pending":
+                                self.finish_preference(
+                                    process,
+                                    identity,
+                                    record,
+                                    allow_write=(
+                                        identity[0] == state["uid"]
+                                        and role_for(state["uid"], identity[2]) is not None
+                                    ),
+                                )
+                            kept.append(record)
+                except MutationError:
+                    # Earlier operator decisions must survive a later retry failure.
+                    self.save(state)
+                    raise
+                except FileNotFoundError:
+                    pass
+                except (OSError, Error, ValueError):
+                    kept.append(record)
+                if time.monotonic() >= deadline:
+                    # Persist reconciliation, retaining unvisited originals as well.
+                    self.save(state)
+                    return
+            state["oom"] = kept
+            recorded = {(record["pid"], record["ticks"]) for record in kept}
+            with os.scandir(self.paths.at("/proc")) as entries:
+                for entry in entries:
+                    if time.monotonic() >= deadline or count >= LIMIT:
+                        break
+                    if not entry.name.isdecimal():
+                        continue
+                    count += 1
+                    try:
+                        with contextlib.closing(Process(self.paths, int(entry.name))) as process:
+                            identity = process.identity()
+                            role = role_for(state["uid"], identity[2])
+                            if (
+                                identity[0] == state["uid"]
+                                and role
+                                and (process.pid, identity[1]) not in recorded
+                            ):
+                                self.preference(state, process, identity, role)
+                    except MutationError:
+                        raise
+                    except (OSError, ValueError, Error):
+                        continue
+            self.save(state)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Explicit standalone host MemoryLow/OOM preferences; never reserves free memory or guarantees OOM immunity."
+    )
+    commands = parser.add_subparsers(dest="action", required=True)
+    for name in ("plan", "apply"):
+        command = commands.add_parser(name)
+        command.add_argument("--uid", required=True, type=int)
+        command.add_argument(
+            "--with-maintenance",
+            action="store_true",
+            help="explicitly install the optional 30-second root OOM maintenance timer",
+        )
+        command.add_argument(
+            "--agent",
+            action="append",
+            default=[],
+            metavar="PID:STARTTICKS",
+            help="verified existing agent: one-shot -250 OOM preference, never moves/restarts the PID",
+        )
+    commands.add_parser("maintain")
+    commands.add_parser("remove")
+    args = parser.parse_args(argv)
+    helper = Host()
+    try:
+        if args.action == "plan":
+            print(json.dumps(helper.plan(args.uid, args.with_maintenance, args.agent), indent=2))
+        elif args.action == "apply":
+            helper.apply(args.uid, args.with_maintenance, args.agent)
+            print(
+                "Host preferences applied; rollback: sudo /usr/bin/python3 -I " + CODE + " remove"
+            )
+        else:
+            getattr(helper, args.action)()
+    except (Error, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        print(f"codex-resource-host: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

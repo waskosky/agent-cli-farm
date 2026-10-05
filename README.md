@@ -579,15 +579,25 @@ Defaults and environment overrides (set before starting the annotator):
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `CODEXFARM_MEMORY_WARN_PERCENT` | `20` | Warn at or below this percentage of RAM available |
-| `CODEXFARM_MEMORY_CRITICAL_PERCENT` | `10` | Critical pressure; restore stops only with explicit enforcement |
+| `CODEXFARM_MEMORY_POLICY` | `headroom` | Use fixed available MiB; `percent` selects percentage thresholds. Explicit legacy percentage variables select `percent` when policy is absent |
+| `CODEXFARM_MEMORY_WARN_MIB` | `1536` | In headroom mode, warn at or below this available RAM |
+| `CODEXFARM_MEMORY_CRITICAL_MIB` | `1024` | In headroom mode, critical at or below this available RAM; restore stops only with explicit enforcement |
+| `CODEXFARM_MEMORY_WARN_PERCENT` | `20` | In percent mode, warn at or below this percentage of RAM available |
+| `CODEXFARM_MEMORY_CRITICAL_PERCENT` | `10` | In percent mode, critical at or below this percentage of RAM available |
 | `CODEXFARM_MEMORY_SESSION_MIB` | `1024` | Warn when a window's process tree exceeds this RSS |
 | `CODEXFARM_HEALTH_ENABLED` | `1` | Set to `0` to disable periodic memory and optional archive checks |
 | `CODEXFARM_BACKUP_HEALTH_ENABLED` | `0` | Set to `1` to require periodic full archives; archive watchers and explicit service archive consent also opt in |
 | `CODEXFARM_HEALTH_STATUS` | `1` | Set to `0` to leave `status-right` formatting alone |
 
+The default 1536/1024 MiB thresholds stay fixed on 4, 8, and 64 GiB hosts.
+Set `CODEXFARM_MEMORY_POLICY=headroom` to use MiB thresholds even when legacy
+percentage variables are present. All thresholds must be positive and finite,
+with critical below warning; percentages must also be below 100. Legacy
+percentage settings remain validated in headroom mode.
+
 Linux memory pressure stalls (`some avg10`) also trigger warning at 10% and
-critical at 25%. Previously used swap alone does not trigger an alert. RSS is
+critical at 25%. I/O stalls are reported separately and do not cause a RAM alert
+or restore refusal. Previously used swap alone does not trigger an alert. RSS is
 an attribution estimate that can count shared pages more than once; host
 pressure uses `MemAvailable`, not summed process RSS. The monitor reports swap
 usage for context. It never kills, pauses, or restarts chats. A 15-second poll
@@ -601,6 +611,235 @@ per-window estimate for custom tmux status formats. The doctor flags a missing
 or older-than-60-second heartbeat once managed sessions have been registered.
 If the annotator itself stops, run the doctor: a dead process cannot issue its
 own live warning. Host pressure checks currently require Linux counters.
+
+### Optional incident investigation
+
+Resource features are independent and default off. Configure only the desired
+options; omitted settings retain their prior values. This writes private JSON
+and never installs or starts services:
+
+```bash
+codex-resource status
+codex-resource report --json
+codex-resource configure --protect-agents --queue-background --investigator codex
+# Separate consent for the narrow batch remedies described below:
+codex-resource configure --automatic-actions
+# Disable each option independently:
+codex-resource configure --no-protect-agents --no-queue-background \
+  --investigator off --no-automatic-actions
+```
+
+The existing health monitor hot-loads these settings after writing its heartbeat.
+When investigation is enabled, 60 seconds of sustained RAM warning/critical
+pressure or I/O stalls at least 10% can launch a detached investigator. Used swap
+alone never triggers it. One private lock covers scheduled and manual workers;
+there is a 15-minute cooldown, and investigation defers below 512 MiB available
+RAM or with unknown memory counters. The monitor never waits for the model.
+Worker processes use nice 10 and OOM adjustment +250. Existing agents are not
+moved, paused or restarted.
+
+`codex-resource investigate` produces diagnosis only. `investigate --actions`
+also requires stored `--automatic-actions` consent; scheduled investigations
+apply remedies only with that same separate consent. Turning the investigator
+off cancels remedies after an in-flight diagnosis. Actions are limited to live,
+registered batch jobs reported to the model: defer future matching launches for
+up to one hour, reduce a declared allowlisted worker count for a bounded TTL,
+or request the one restart explicitly authorized with `codex-job --restartable`.
+The default TTL is five minutes. Reductions and deferrals affect future launches;
+changing a running job requires its separately consented restart. Restart is a
+nonreversible request, not a claim that a restart completed. Identity, ownership,
+actual cgroup and scope generation are rechecked before each action. Agents and
+unregistered processes receive diagnosis/manual suggestions only.
+
+The adapter uses the existing Codex CLI login and the exact bundled model
+`gpt-6.1-sol`. Optional `--investigator-model MODEL` and
+`--investigator-binary /absolute/path/to/codex` overrides are validated and must
+support the same isolation. It creates private HOME, CODEX_HOME and working
+directories, links only the existing owned owner-only authentication cache, and
+permits native credential refresh. It ignores user config/rules, uses ephemeral
+read-only execution, disables tooling features, normalizes model-derived tools,
+and supplies fixed instructions plus a strict output schema. Unsupported CLI,
+model catalog or managed policy fails diagnostically. No unrestricted fallback
+or provider transport override is used. The whole provider invocation, including
+capability probes, has a 120-second budget and bounded output. The worker also
+has a 120-second overall deadline. All post-timeout rollback, metrics, journal
+recovery and report persistence share one absolute five-second cleanup grace.
+It cannot be renewed by nested cleanup or retries, and exhaustion stops further
+I/O while preserving known diagnosis/results in memory. Failed or interrupted writes
+retain honest pending/uncertain action results and preserve validated diagnosis.
+An override whose ID could not be returned stays uncertain until its bounded TTL
+expires; unrelated overrides are never selected for cleanup.
+
+Reports scan at most 4096 PIDs for two seconds, retain at most 20 consumers and
+read PSS only for top candidates. Growth comparisons include start ticks, UID
+and cgroup; PID reuse never becomes growth. Host capacity uses `MemAvailable`;
+RSS/PSS, memory and I/O stalls, swap, and bounded cgroup stats/events provide
+context. Labels are untrusted, sanitized and length-limited. Arguments, working
+directories, arbitrary environment values, conversation text and credentials
+are excluded. A compact projection reserves native framing/schema space within
+a 16 KiB initial model-input budget.
+
+Private reports, trusted local job identities, answers and action journals live
+under `${XDG_STATE_HOME:-~/.local/state}/codexfarm/resources/`, with owner-only
+0700 directories and atomic 0600 JSON files capped at 64 KiB. Reports and journals
+retain 20 files each. Journals record before/after readings, results and TTL
+identifiers. Material deterioration removes only this investigation's reversible
+overrides; expired or already removed overrides are benign. No model-generated
+shell command, project edit, service change or root operation is executed.
+
+### Optional managed jobs
+
+The optional host layer is a separate, standalone administrative helper. Setup
+copies `codex-resource-host` into `~/bin`; it never applies host changes. Review
+its read-only JSON plan, then explicitly apply the same options as root:
+
+```bash
+/usr/bin/python3 -I "$HOME/bin/codex-resource-host" plan --uid "$(id -u)"
+sudo /usr/bin/python3 -I "$HOME/bin/codex-resource-host" apply --uid "$(id -u)"
+
+# Optional: include the dedicated 30-second OOM preference maintenance timer.
+# Use this pair instead of the pair above if maintenance is wanted.
+/usr/bin/python3 -I "$HOME/bin/codex-resource-host" plan --uid "$(id -u)" --with-maintenance
+sudo /usr/bin/python3 -I "$HOME/bin/codex-resource-host" apply --uid "$(id -u)" --with-maintenance
+
+# Undo only this installation's expected files, runtime values and PID scores.
+sudo /usr/bin/python3 -I /usr/local/libexec/codexfarm-resource-protection.py remove
+```
+
+Apply requires an available system manager and the selected UID's user manager;
+connection failures abort. The helper derives `/run/user/UID/bus` for an own-UID
+plan, including shells without user-bus environment variables. Root connects to
+the selected user manager with absolute `systemctl --user --machine=UID@.host`.
+It uses fixed paths and sanitized subprocess environments, with no CLI or
+environment override for root/config paths. Maintenance runs an isolated absolute
+`/usr/bin/python3 -I` and imports only the standard library.
+
+The shared **1 GiB MemoryLow protects memory already in use** through `user.slice`,
+`user-UID.slice`, `user@UID.service`, `codexfarm.slice` and the interactive child.
+It does **not** reserve an empty free gigabyte or guarantee OOM immunity. Existing
+stronger values, including infinity, remain stronger; unknown values are left
+alone. Interactive and batch sibling slices receive relative CPU/IO weights
+200 and 25. This helper adds no resource ceilings.
+
+The plan lists every dedicated drop-in and touched administrative path. Farm
+slice drop-ins under `/etc/systemd/user/` have **global user-unit scope**: they
+also apply to other users who launch those exact named farm slices. OOM updates
+are restricted to the configured UID. The root-owned installed helper is
+`/usr/local/libexec/codexfarm-resource-protection.py` (0755), with private config
+`/etc/codexfarm-resource-protection.json` (0600). The private journal and lock live
+under `/var/lib/codexfarm-resource-protection/` (0700); one bounded original-file
+snapshot is retained under `/var/backups/codexfarm-resource-protection-originals/`
+(0700). A subsequent installation replaces that single snapshot.
+
+For an existing agent, append `--agent PID:STARTTICKS` to both plan and apply.
+For example, obtain start ticks from field 22 of `/proc/PID/stat` (parse after
+its final `)` because process names can contain spaces). The helper validates
+UID, ticks and actual cgroup, applies a one-shot OOM preference of -250, and gives
+an existing matching `session-*.scope` runtime MemoryLow within the same shared
+budget. It never moves or restarts the process: moving a PID would not migrate
+its already charged memory. Without maintenance, future processes get only the
+ordinary user-level preferences available to the launcher.
+
+Optional maintenance adjusts only exact `codexfarm-agent-<32hex>.scope` paths
+under the interactive slice and `codexfarm-batch-<32hex>.scope` paths under the
+batch slice, including their descendants. It uses -250 for agents and +250 for
+batch, preserving stronger role preferences, and inspects at most 4096 PIDs for
+two seconds per run. The private restoration journal is capped at 4096 process
+records and 16 MiB; each original managed file is capped at 1 MiB.
+
+Apply is idempotent for the same configuration. Remove before changing the UID,
+maintenance selection, or one-shot targets. Every target mask is checked before
+mutation, including user local/runtime/global masks. Old host guards, build
+slice masks, autosave masks and unrelated drop-ins remain untouched. Failed
+writes/manager operations trigger best-effort rollback. Remove restores only
+expected hashes/values and matching PID identities whose OOM score is still the
+one applied here; later operator changes survive. Dead sessions are not started.
+If rollback reports an error, correct the reported manager/filesystem issue and
+retry remove; the private journal and trusted recovery helper are retained when
+runtime rollback cannot finish. No farm/provider/session restart is performed.
+
+`codex-job run --role batch -- command argument ...` runs literal argv without
+shell expansion or default resource ceilings. User scopes are optional by default:
+if the user manager or scope launcher is unavailable, it warns before launching
+without a scope. `--scope required` fails before the payload instead. Use
+`--scope off` to avoid user-manager calls entirely.
+
+```bash
+# Advisory admission, lower relative batch priorities, no caps:
+codex-job run --role batch -- make all
+
+# Wait for headroom before new work; declare workers for a future temporary reduction:
+codex-job run --role batch --memory-policy queue --queue-timeout 300 \
+  --worker-env CARGO_BUILD_JOBS --workers 8 -- cargo build
+
+# Explicit batch-only memory enforcement; never falls back without these limits:
+codex-job run --role batch --memory-high 2048 --memory-max 3072 -- make all
+
+# Optional interactive protection, including tmux launches and Looper agents:
+CODEXFARM_RESOURCE_PROTECTION=1 codex-add -d /path/to/project
+```
+
+Batch admission is advisory unless `--memory-policy queue` is explicit or private
+settings enable `queue_background`. Queueing starts when available RAM is at most
+1024 MiB or memory stalls reach 25%. After waiting, admission needs at least
+1536 MiB and stalls below 10% continuously for 30 seconds. Unknown counters and
+hosts too small for the thresholds stay advisory. A queue timeout exits 124
+without starting the payload; `--memory-policy ignore` manually bypasses both
+headroom and temporary recipe deferrals. These checks never stop running work.
+
+Agent jobs bypass admission and retain their terminal and inherited process group.
+They cannot opt into restarts or memory ceilings. Agent scopes request relative
+CPU/I/O preference and memory protection through `codexfarm-interactive.slice`
+and its shared `codexfarm.slice` parent; both ancestors request at least 1024 MiB
+of memory protection while preserving stronger or unknown settings. Interactive
+slice CPU/I/O weights are 200 and batch slice weights are 25, so the relative
+preference applies across the sibling slices as well as their scopes. Batch scopes use
+`codexfarm-batch.slice`, CPU/I/O weights of 25, nice 10, and OOM adjustment +250.
+An agent's negative OOM adjustment needs a separately opted-in privileged helper;
+the unprivileged runner reports that limitation. Runtime slice preferences install
+no unit files and preserve stronger existing parent memory protection. No scope
+sets CPU, swap, task, or time ceilings by default.
+
+Resource settings live in `$XDG_CONFIG_HOME/codexfarm/resource-settings.json`
+(default `~/.config/codexfarm`). `protect_agents`, `queue_background`, and
+`automatic_actions` default false; `investigator` defaults `off`. Settings reject
+unknown fields, invalid types, nonfinite numbers, symlinks, foreign ownership, and
+public settings files. Reading absent settings creates nothing. Explicit settings
+writes use atomic 0600 files and may tighten the owned target directory to 0700;
+ordinary optional agent lookup warns and launches normally if settings or private
+job registration are inaccessible. Use `codex-resource configure` for independent
+opt-ins and `codex-resource status` to inspect the current settings. The Python
+`resource_config.load_settings` / `write_settings(ResourceSettings(...))` APIs
+provide the same validated configuration for integrations.
+
+Job recipes and identity records are private under
+`$XDG_STATE_HOME/codexfarm/resources/jobs`, using 0700 directories and atomic 0600
+files. For compatibility with older setup installations, managed launches migrate
+only the owned, real `codexfarm` state directory to 0700 through a verified
+no-follow file descriptor. HOME and XDG roots retain their permissions; unsafe
+resource leaf directories or files are still rejected. Public `JobStore.public` /
+`list_jobs` reports exclude argv, cwd, and arbitrary environment values. Remedies
+select recorded UID, PID/start ticks,
+cgroup, and scope generation rather than process names. Temporary worker and
+deferral overrides apply only to matching argv, cwd, and declared worker variables;
+they expire and can be rolled back. The worker allowlist is `CARGO_BUILD_JOBS`,
+`CMAKE_BUILD_PARALLEL_LEVEL`, `OMP_NUM_THREADS`, and `UV_THREADPOOL_SIZE`.
+
+`--restartable` grants a batch job permission for at most one externally requested
+restart. Memory thresholds never request a restart on their own. A request must
+revalidate live ownership and consent, sends TERM only to the dedicated batch
+process group, waits up to ten seconds for graceful cleanup, verifies no old batch descendants
+remain, and requires a fresh recovery period
+before relaunch. A recovery timeout leaves the record `queued_timeout` and exits
+124. Worker reductions affect an existing job only through this separately
+consented restart. The `JobStore.identity`, `request_restart`, `reduce_workers`,
+`defer_job`, `delete_override` (also `rollback_override`), and `recipe_overrides`
+APIs enforce the incident controller's identity and consent checks. Temporary overrides last at most one
+hour, records and overrides have bounded retention, and no payload output is copied
+to this store. Cleanup retains records whenever any recorded supervisor, payload,
+or launcher remains alive or its process identity is unreadable. A temporary
+manager query failure disables remedies until validation recovers without making
+the running record permanently stale.
 
 ### Memory labels
 
@@ -635,6 +874,9 @@ Tuning and controls:
 - **`codex-add [session] [directory]`** - Add a new Codex instance, optionally selecting a named farm
 - **`codex-annotator`** - Track RUN/READY/ERR state and notify when windows become READY
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
+- **`codex-job run [options] -- argv ...`** - Run declared jobs with optional scopes, batch admission and explicit restart consent
+- **`codex-resource configure|status|report|investigate`** - Configure independent opt-ins and inspect bounded incident diagnosis
+- **`codex-resource-host plan|apply|maintain|remove`** - Review and explicitly install standalone host memory/OOM preferences
 - **`codex-health`** - Check RAM pressure, the monitor heartbeat and opted-in archive health
 - **`codex-backup [--archive]`** - Save exact farm identities; full conversation archives require `--archive`
 - **`codex-watch`** - Monitor all Codex logs in consolidated view
@@ -655,6 +897,7 @@ Claude and Gemini equivalents use the same tmux workflow and accept the same fla
 ## Environment Variables
 
 Common:
+- **`CODEXFARM_RESOURCE_PROTECTION`** - Set to `1` to opt into optional agent scopes for add scripts and Looper (default off)
 - **`CODEX_SESSION`** - tmux session name (default: `codexfarm`)
 - **`CODEX_NAME`** - window name (default: directory basename)
 - **`CODEX_CMD`** - command to run (default: `codex`)
