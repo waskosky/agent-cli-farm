@@ -72,6 +72,13 @@ class Systemd:
     def __init__(self, uid):
         self.uid = uid
 
+    @staticmethod
+    def run(argv, **kwargs):
+        try:
+            return subprocess.run(argv, **kwargs)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise Error(f"{argv[0]} failed: {exc}") from exc
+
     def command(self, user, *args):
         argv = ["/usr/bin/systemctl"]
         env = dict(ENV)
@@ -82,9 +89,7 @@ class Systemd:
                 env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{self.uid}/bus"
             else:
                 argv += [f"--machine={self.uid}@.host"]
-        result = subprocess.run(
-            argv + list(args), env=env, capture_output=True, text=True, timeout=5
-        )
+        result = self.run(argv + list(args), env=env, capture_output=True, text=True, timeout=5)
         if result.returncode:
             raise Error(f"systemctl {' '.join(args)} failed: {result.stderr.strip()}")
         return result.stdout.strip()
@@ -117,7 +122,7 @@ class Systemd:
             kwargs = {}
             if os.geteuid() == 0:
                 kwargs = {"user": self.uid, "group": account.pw_gid, "extra_groups": []}
-            result = subprocess.run(
+            result = self.run(
                 ["/usr/bin/python3", "-I", "-c", MASK_PROBE, str(self.uid), unit, *roots],
                 env=ENV,
                 capture_output=True,
@@ -479,18 +484,40 @@ class Host:
             "group": identity[2],
             "original": old,
             "applied": value,
+            "status": "pending",
         }
         state["oom"].append(record)
         try:
             self.save(state)  # Journal the undo before touching a process.
         except (OSError, Error) as exc:
             raise MutationError(str(exc)) from exc
+        self.finish_preference(process, identity, record)
+
+    @staticmethod
+    def finish_preference(process, identity, record, allow_write=True):
+        # A pending journal entry can represent either side of a crash at write.
+        # Retry only the exact identity at its original score; retain divergent
+        # entries as abandoned so later scans cannot override an operator choice.
+        if identity != (record["uid"], record["ticks"], record["group"]):
+            record["status"] = "abandoned"
+            return
+        current = process.score()
+        if current == record["applied"]:
+            record["status"] = "applied"
+            return
+        if current != record["original"] or not allow_write:
+            record["status"] = "abandoned"
+            return
         try:
-            process.write(identity, old, value)
+            process.write(identity, record["original"], record["applied"])
         except (FileNotFoundError, ProcessLookupError):
             raise
         except OSError as exc:
             raise MutationError(str(exc)) from exc
+        except Error:
+            record["status"] = "abandoned"
+            raise
+        record["status"] = "applied"
 
     def apply(self, uid, maintenance=False, targets=()):
         self.root()
@@ -595,22 +622,27 @@ class Host:
 
     def restore(self, state):
         failures = []
-        if (
-            state["timer_started"]
-            and not state["timer_was_active"]
-            and not self.manager.masked(False, TIMER)
-            and self.file_matches(f"/etc/systemd/system/{TIMER}", state)
-        ):
-            try:
-                # Never unmask; stop only this helper's timer/service execution.
+        try:
+            if (
+                state["timer_started"]
+                and not state["timer_was_active"]
+                and not self.manager.masked(False, TIMER)
+                and self.file_matches(f"/etc/systemd/system/{TIMER}", state)
+            ):
+                # Never unmask; stop only this helper's timer.
                 self.manager.command(False, "stop", TIMER)
-            except (Error, OSError, RuntimeError) as exc:
-                failures.append(str(exc))
-        if state["timer_link_created"]:
-            link = self.paths.at(ENABLE)
-            if link.is_symlink() and os.readlink(link) == f"/etc/systemd/system/{TIMER}":
-                link.unlink()
+        except (Error, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            failures.append(str(exc))
+        try:
+            if state["timer_link_created"]:
+                link = self.paths.at(ENABLE)
+                if link.is_symlink() and os.readlink(link) == f"/etc/systemd/system/{TIMER}":
+                    link.unlink()
+        except OSError as exc:
+            failures.append(str(exc))
         for record in reversed(state["oom"]):
+            if record.get("status") == "abandoned":
+                continue
             try:
                 with contextlib.closing(Process(self.paths, record["pid"])) as process:
                     identity = process.identity()
@@ -628,7 +660,10 @@ class Host:
                 user, unit, prop = entry["user"], entry["unit"], entry["prop"]
                 if (
                     not self.manager.masked(user, unit)
-                    and self.manager.active(user, unit)
+                    and (
+                        not re.fullmatch(r"session-[0-9]+\.scope", unit)
+                        or self.manager.get(user, unit, "LoadState") != "not-found"
+                    )
                     and self.manager.get(user, unit, prop) == entry["value"]
                 ):
                     original = entry["original"]
@@ -637,7 +672,7 @@ class Host:
                     if prop in {"CPUWeight", "IOWeight"} and original == "[not set]":
                         original = ""
                     self.manager.set(user, unit, prop, original)
-            except (Error, OSError, RuntimeError) as exc:
+            except (Error, OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 failures.append(str(exc))
 
         def restore_file(name, entry):
@@ -656,12 +691,12 @@ class Host:
                 continue
             try:
                 restore_file(name, entry)
-            except (Error, OSError, RuntimeError) as exc:
+            except (Error, OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 failures.append(str(exc))
         for user in (False, True):
             try:
                 self.manager.command(user, "daemon-reload")
-            except (Error, OSError, RuntimeError) as exc:
+            except (Error, OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 failures.append(str(exc))
         if failures:
             raise Error("rollback incomplete: " + "; ".join(failures))
@@ -698,12 +733,28 @@ class Host:
                     with contextlib.closing(Process(self.paths, record["pid"])) as process:
                         identity = process.identity()
                         if identity[:2] == (record["uid"], record["ticks"]):
+                            if record.get("status", "pending") == "pending":
+                                self.finish_preference(
+                                    process,
+                                    identity,
+                                    record,
+                                    allow_write=(
+                                        identity[0] == state["uid"]
+                                        and role_for(state["uid"], identity[2]) is not None
+                                    ),
+                                )
                             kept.append(record)
+                except MutationError:
+                    # Earlier operator decisions must survive a later retry failure.
+                    self.save(state)
+                    raise
                 except FileNotFoundError:
                     pass
                 except (OSError, Error, ValueError):
                     kept.append(record)
                 if time.monotonic() >= deadline:
+                    # Persist reconciliation, retaining unvisited originals as well.
+                    self.save(state)
                     return
             state["oom"] = kept
             recorded = {(record["pid"], record["ticks"]) for record in kept}

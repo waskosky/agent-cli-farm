@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -602,6 +603,208 @@ class HostTests(unittest.TestCase):
                 for call in self.manager.calls
             )
         )
+
+    def test_remove_restores_inactive_persistent_slices_without_starting_them(self):
+        self.helper.apply(1003)
+        for unit in ("codexfarm.slice", "codexfarm-interactive.slice", "codexfarm-batch.slice"):
+            self.manager.values[True, unit, "ActiveState"] = "inactive"
+        self.manager.values[True, "codexfarm-interactive.slice", "IOWeight"] = "700"
+        self.manager.masks.add((True, "codexfarm.slice"))
+        self.manager.calls.clear()
+        self.helper.remove()
+        for prop in ("CPUWeight", "IOWeight"):
+            self.assertEqual(self.manager.get(True, "codexfarm-batch.slice", prop), "[not set]")
+        self.assertEqual(self.manager.get(True, "codexfarm-interactive.slice", "MemoryLow"), "0")
+        self.assertEqual(self.manager.get(True, "codexfarm-interactive.slice", "IOWeight"), "700")
+        self.assertEqual(self.manager.get(True, "codexfarm.slice", "MemoryLow"), str(1 << 30))
+        self.assertFalse(any("start" in call or "restart" in call for call in self.manager.calls))
+
+    def test_remove_skips_disappeared_session_scope(self):
+        self.process(cgroup="/user.slice/user-1003.slice/session-42.scope")
+        self.helper.apply(1003, targets=["123:12345"])
+        self.manager.values[False, "session-42.scope", "ActiveState"] = "inactive"
+        self.manager.values[False, "session-42.scope", "LoadState"] = "not-found"
+        self.manager.calls.clear()
+        self.helper.remove()
+        self.assertFalse(any("session-42.scope" in call for call in self.manager.calls))
+
+    def test_maintenance_retries_pending_write_and_restores_original_score(self):
+        proc = self.process()
+        self.helper.apply(1003, maintenance=True)
+        with patch.object(host.Process, "write", side_effect=PermissionError("retry this")):
+            with self.assertRaisesRegex(OSError, "retry this"):
+                self.helper.maintain()
+        self.assertEqual((proc / "oom_score_adj").read_text(), "0")
+        self.helper.maintain()
+        self.assertEqual((proc / "oom_score_adj").read_text(), "-250")
+        self.helper.remove()
+        self.assertEqual((proc / "oom_score_adj").read_text(), "0")
+
+    def test_pending_write_preserves_operator_score_or_cgroup_change(self):
+        for change in ("score", "cgroup"):
+            with self.subTest(change=change):
+                proc = self.process()
+                self.helper.apply(1003, maintenance=True)
+                with patch.object(host.Process, "write", side_effect=PermissionError("retry")):
+                    with self.assertRaises(OSError):
+                        self.helper.maintain()
+                if change == "score":
+                    (proc / "oom_score_adj").write_text("100")
+                else:
+                    (proc / "cgroup").write_text("0::/user.slice/user-1003.slice/session-5.scope\n")
+                self.helper.maintain()
+                self.assertEqual(
+                    (proc / "oom_score_adj").read_text(), "100" if change == "score" else "0"
+                )
+                # Returning to the original score later must not revive an abandoned write.
+                (proc / "oom_score_adj").write_text("0")
+                (proc / "cgroup").write_text("0::" + self.agent_group() + "\n")
+                self.helper.maintain()
+                self.assertEqual((proc / "oom_score_adj").read_text(), "0")
+                self.helper.remove()
+
+    def test_pending_crash_after_write_reconciles_without_second_write(self):
+        proc = self.process()
+        self.helper.apply(1003, maintenance=True)
+        with patch.object(host.Process, "write", side_effect=PermissionError("pending")):
+            with self.assertRaises(OSError):
+                self.helper.maintain()
+        (proc / "oom_score_adj").write_text("-250")
+        with patch.object(host.Process, "write", side_effect=AssertionError("already applied")):
+            self.helper.maintain()
+        state = json.loads(self.root.joinpath(host.STATE.lstrip("/")).read_text())
+        self.assertEqual(state["oom"][0].get("status"), "applied")
+        self.helper.remove()
+        self.assertEqual((proc / "oom_score_adj").read_text(), "0")
+
+    def test_systemd_normalizes_command_and_mask_probe_timeouts(self):
+        manager = host.Systemd(1003)
+        for exc in (subprocess.TimeoutExpired("systemctl", 5), OSError("cannot execute")):
+            with self.subTest(exc=exc), patch.object(host.subprocess, "run", side_effect=exc):
+                with self.assertRaises(host.Error):
+                    manager.command(False, "daemon-reload")
+        with (
+            patch.object(manager, "get", return_value="loaded"),
+            patch.object(manager, "command", return_value=""),
+            patch.object(
+                host.subprocess, "run", side_effect=subprocess.TimeoutExpired("mask probe", 5)
+            ),
+        ):
+            with self.assertRaises(host.Error):
+                manager.masked(True, "codexfarm.slice")
+
+    def test_timer_query_timeout_continues_independent_undo_and_retains_recovery(self):
+        self.manager.values[False, host.TIMER, "ActiveState"] = "inactive"
+        self.helper.apply(1003, maintenance=True)
+        masked = self.manager.masked
+
+        def fail_timer(user, unit):
+            if unit == host.TIMER:
+                raise subprocess.TimeoutExpired("systemctl", 5)
+            return masked(user, unit)
+
+        with patch.object(self.manager, "masked", side_effect=fail_timer):
+            with self.assertRaisesRegex(host.Error, "rollback incomplete"):
+                self.helper.remove()
+        self.assertEqual(self.manager.get(True, "codexfarm-batch.slice", "CPUWeight"), "[not set]")
+        self.assertFalse(
+            (
+                self.root
+                / "etc/systemd/user/codexfarm-batch.slice.d/90-codexfarm-resource-protection.conf"
+            ).exists()
+        )
+        for name in (host.CODE, host.CONFIG, host.STATE):
+            self.assertTrue(self.root.joinpath(name.lstrip("/")).exists())
+        self.helper.remove()
+
+    def test_runtime_timeout_continues_other_undo_and_can_be_retried(self):
+        self.helper.apply(1003)
+        setter = self.manager.set
+
+        def fail_batch(user, unit, prop, value):
+            if unit == "codexfarm-batch.slice" and prop == "IOWeight":
+                raise subprocess.TimeoutExpired("systemctl", 5)
+            setter(user, unit, prop, value)
+
+        with patch.object(self.manager, "set", side_effect=fail_batch):
+            with self.assertRaisesRegex(host.Error, "rollback incomplete"):
+                self.helper.remove()
+        self.assertEqual(
+            self.manager.get(True, "codexfarm-interactive.slice", "CPUWeight"), "[not set]"
+        )
+        self.assertEqual(self.manager.get(False, "user.slice", "MemoryLow"), "0")
+        self.assertTrue(self.root.joinpath(host.STATE.lstrip("/")).exists())
+        self.helper.remove()
+        self.assertEqual(self.manager.get(True, "codexfarm-batch.slice", "IOWeight"), "[not set]")
+
+    def test_pending_identity_race_keeps_single_abandoned_record(self):
+        self.process()
+        self.helper.apply(1003, maintenance=True)
+        with patch.object(host.Process, "write", side_effect=PermissionError("pending")):
+            with self.assertRaises(OSError):
+                self.helper.maintain()
+        with patch.object(
+            host.Process, "write", side_effect=host.Error("process identity changed")
+        ):
+            self.helper.maintain()
+        state = json.loads(self.root.joinpath(host.STATE.lstrip("/")).read_text())
+        self.assertEqual(len(state["oom"]), 1)
+        self.assertEqual(state["oom"][0]["status"], "abandoned")
+
+    def test_pending_operator_choice_is_saved_at_scan_deadline(self):
+        proc = self.process()
+        self.helper.apply(1003, maintenance=True)
+        with patch.object(host.Process, "write", side_effect=PermissionError("pending")):
+            with self.assertRaises(OSError):
+                self.helper.maintain()
+        (proc / "oom_score_adj").write_text("100")
+        with patch.object(host.time, "monotonic", side_effect=[0, 3]):
+            self.helper.maintain()
+        (proc / "oom_score_adj").write_text("0")
+        self.helper.maintain()
+        self.assertEqual((proc / "oom_score_adj").read_text(), "0")
+
+    def test_legacy_oom_journal_reconciles_and_restores_both_write_outcomes(self):
+        for written in (False, True):
+            with self.subTest(written=written):
+                proc = self.process()
+                self.helper.apply(1003, maintenance=True)
+                with patch.object(host.Process, "write", side_effect=PermissionError("pending")):
+                    with self.assertRaises(OSError):
+                        self.helper.maintain()
+                statepath = self.root.joinpath(host.STATE.lstrip("/"))
+                state = json.loads(statepath.read_text())
+                state["oom"][0].pop("status")
+                statepath.write_text(json.dumps(state))
+                if written:
+                    (proc / "oom_score_adj").write_text("-250")
+                self.helper.maintain()
+                self.assertEqual((proc / "oom_score_adj").read_text(), "-250")
+                self.helper.remove()
+                self.assertEqual((proc / "oom_score_adj").read_text(), "0")
+
+    def test_pending_operator_choice_survives_later_retry_failure(self):
+        first = self.process(pid=123)
+        second = self.process(pid=124)
+        self.helper.apply(1003, maintenance=True)
+        self.helper.maintain()
+        statepath = self.root.joinpath(host.STATE.lstrip("/"))
+        state = json.loads(statepath.read_text())
+        state["oom"].sort(key=lambda record: record["pid"])
+        for record in state["oom"]:
+            record["status"] = "pending"
+        statepath.write_text(json.dumps(state))
+        (first / "oom_score_adj").write_text("100")
+        (second / "oom_score_adj").write_text("0")
+        with patch.object(
+            host.Process, "write", side_effect=PermissionError("second retry failed")
+        ):
+            with self.assertRaises(OSError):
+                self.helper.maintain()
+        (first / "oom_score_adj").write_text("0")
+        self.helper.maintain()
+        self.assertEqual((first / "oom_score_adj").read_text(), "0")
+        self.assertEqual((second / "oom_score_adj").read_text(), "-250")
 
     def test_installed_service_uses_isolated_absolute_interpreter(self):
         self.helper.apply(1003, maintenance=True)
