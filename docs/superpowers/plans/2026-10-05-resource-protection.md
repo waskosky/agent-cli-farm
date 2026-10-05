@@ -122,6 +122,12 @@ self.assertEqual(result.stdout.strip(), "literal $value; `data`")
 
 ## Task 3: Incident reports, remote diagnosis, authorized remedies, and rollout
 
+The Task 3 implementation is committed at `7898d2`; 142 focused/affected tests
+pass. Seven native CLI loopback cases verify final JSON, rejected tools,
+instruction/skill isolation, a positive control, and the actual 16 KiB input
+budget. Tests use synthetic authentication; remote login/model execution and
+production activation remain unverified. Independent review is in progress.
+
 **Files:** Create `bin/codex-resource`,
 `codex_looper/resource_reports.py`, `codex_looper/resource_incidents.py`,
 `codex_looper/resource_investigator.py`, `tests/test_resource_incidents.py`,
@@ -130,19 +136,19 @@ and `tests/test_resource_config.py` as needed;
 modify `codex_looper/health.py`, `codex_looper/resource_jobs.py`, `setup.sh`,
 `tests/test_setup.py`, `README.md`, `AGENTS.md`, `pyproject.toml`.
 
-- [ ] Test strict private configuration and current-report generation before
+- [x] Test strict private configuration and current-report generation before
   implementation. The CLI is `codex-resource configure --protect-agents
   --queue-background --investigator codex --automatic-actions`; each setting has
   a disabling counterpart. `status`, `report --json`, and `investigate` are
   independent read/report commands. Configuration changes never alter services.
-- [ ] Implement bounded proc/cgroup collection: <=4096 scanned PIDs, <=20 reported
+- [x] Implement bounded proc/cgroup collection: <=4096 scanned PIDs, <=20 reported
   consumers, PSS for only top candidates where readable, two-second scan budget,
   and <=16 KiB model input. Include start identity, UID, memory/cgroup counters,
   pressure and swap context; exclude argv, environment values and conversations.
-- [ ] Test sustained 60-second pressure, one-worker locking, 15-minute cooldown,
+- [x] Test sustained 60-second pressure, one-worker locking, 15-minute cooldown,
   low-memory deferral, process timeout/output limits, and bounded report retention.
   Integrate scheduling in the health monitor without blocking annotation.
-- [ ] Test the Codex adapter's required isolation flags and unsupported-version
+- [x] Test the Codex adapter's required isolation flags and unsupported-version
   failure. Implement ephemeral/read-only/schema-constrained diagnosis in a
   private HOME/CODEX_HOME/cwd, ignoring ordinary user config and disabling tool
   features supported by the CLI. Clear model-derived tooling in a private catalog
@@ -154,7 +160,7 @@ modify `codex_looper/health.py`, `codex_looper/resource_jobs.py`, `setup.sh`,
   Use a small fixed model instruction file and verify actual request input size,
   leaving room for native CLI framing within the 16 KiB input budget.
   A fake provider runs all deterministic tests without live authentication.
-- [ ] Test model output type/schema validation, unknown actions, agent targets,
+- [x] Test model output type/schema validation, unknown actions, agent targets,
   stale identities, malicious telemetry labels, and oversized output. Implement
   a deterministic allowlist for job deferral, declared worker reduction, and a
   single restart request on a registered restartable batch job. Automatic
