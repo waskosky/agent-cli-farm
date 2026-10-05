@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import stat
 from dataclasses import asdict, dataclass, fields
@@ -114,6 +115,8 @@ class ResourceSettings:
     recovery_mib: float = 1536
     recovery_seconds: float = 30
     queue_timeout: float = 300
+    investigator_model: str = "gpt-6.1-sol"
+    investigator_binary: str = "codex"
 
     def __post_init__(self) -> None:
         for name in ("protect_agents", "queue_background", "automatic_actions"):
@@ -126,6 +129,19 @@ class ResourceSettings:
             ceiling = 1_000_000_000 if name.endswith("mib") else 86400
             if not finite_number(value) or not 0 <= value <= ceiling:
                 raise ValueError(f"{name} must be finite and within 0..{ceiling}")
+        if not isinstance(self.investigator_model, str) or not re.fullmatch(
+            r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}", self.investigator_model
+        ):
+            raise ValueError("investigator_model must be an exact model slug")
+        binary = self.investigator_binary
+        if (
+            not isinstance(binary, str)
+            or not binary
+            or len(binary) > 4096
+            or any(ord(char) < 32 or ord(char) == 127 for char in binary)
+            or (binary != "codex" and not Path(binary).is_absolute())
+        ):
+            raise ValueError("investigator_binary must be codex or an absolute executable path")
         self.headroom()
 
     def headroom(self) -> HeadroomSettings:

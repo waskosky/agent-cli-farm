@@ -317,10 +317,11 @@ class HealthMonitor:
         self.last_notice = -math.inf
         self.previous: set[str] = set()
         self.active: set[str] = set()
+        self.resource_scheduler = None
 
     def tick(self, window_ids: set[str], tmux, *, now: float | None = None) -> None:
         now = time.time() if now is None else now
-        if now - self.last_sample < 15:
+        if 0 <= now - self.last_sample < 15:
             return
         self.last_sample = now
         memory = read_memory()
@@ -429,6 +430,20 @@ class HealthMonitor:
                 "backup_issues": issues,
             },
         )
+
+        # Persist the existing monitor heartbeat before any optional incident work.
+        # Imports stay lazy to keep health's diagnostic CLI independent of settings.
+        try:
+            from .resource_config import load_settings
+            from .resource_incidents import IncidentScheduler
+
+            settings = load_settings()
+            if settings.investigator == "codex" and self.resource_scheduler is None:
+                self.resource_scheduler = IncidentScheduler(self.state / "resources")
+            if self.resource_scheduler is not None:
+                self.resource_scheduler.sample(memory, self.limits, settings, now=now)
+        except (OSError, ValueError, TypeError):
+            self.resource_scheduler = None
 
 
 def main() -> int:

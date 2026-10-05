@@ -359,6 +359,7 @@ EOF
   echo "  codex-save                   # Snapshot current windows to manifest"
   echo "  codex-farm-reboot            # Save, restart, and restore the default farm"
   echo "  codex-doctor                 # Repair farm health and saved resume coverage"
+  echo "  codex-resource status        # Inspect optional resource settings (all default off)"
   echo "  codex-restore -a             # Restore windows and attach"
   echo "  codex-resume                 # Attach/switch to existing session"
   echo "  codex-resume work --board    # Jump to the board for the 'work' farm"

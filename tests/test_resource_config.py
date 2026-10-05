@@ -113,3 +113,18 @@ class ResourceSettingsTests(unittest.TestCase):
         path.parent.chmod(0o775)
         self.assertFalse(config.load_settings().protect_agents)
         self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o775)
+
+    def test_explicit_investigator_model_binary_validation(self):
+        value = config.ResourceSettings.from_dict(
+            {"investigator_model": "gpt-6.1-sol", "investigator_binary": "/opt/codex"}
+        )
+        self.assertEqual(value.investigator_model, "gpt-6.1-sol")
+        for changes in [
+            {"investigator_model": True},
+            {"investigator_model": "../x"},
+            {"investigator_model": "x\n"},
+            {"investigator_binary": "codex;echo x"},
+            {"investigator_binary": 1},
+        ]:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                config.ResourceSettings.from_dict(changes)

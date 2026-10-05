@@ -612,6 +612,74 @@ or older-than-60-second heartbeat once managed sessions have been registered.
 If the annotator itself stops, run the doctor: a dead process cannot issue its
 own live warning. Host pressure checks currently require Linux counters.
 
+### Optional incident investigation
+
+Resource features are independent and default off. Configure only the desired
+options; omitted settings retain their prior values. This writes private JSON
+and never installs or starts services:
+
+```bash
+codex-resource status
+codex-resource report --json
+codex-resource configure --protect-agents --queue-background --investigator codex
+# Separate consent for the narrow batch remedies described below:
+codex-resource configure --automatic-actions
+# Disable each option independently:
+codex-resource configure --no-protect-agents --no-queue-background \
+  --investigator off --no-automatic-actions
+```
+
+The existing health monitor hot-loads these settings after writing its heartbeat.
+When investigation is enabled, 60 seconds of sustained RAM warning/critical
+pressure or I/O stalls at least 10% can launch a detached investigator. Used swap
+alone never triggers it. One private lock covers scheduled and manual workers;
+there is a 15-minute cooldown, and investigation defers below 512 MiB available
+RAM or with unknown memory counters. The monitor never waits for the model.
+Worker processes use nice 10 and OOM adjustment +250. Existing agents are not
+moved, paused or restarted.
+
+`codex-resource investigate` produces diagnosis only. `investigate --actions`
+also requires stored `--automatic-actions` consent; scheduled investigations
+apply remedies only with that same separate consent. Turning the investigator
+off cancels remedies after an in-flight diagnosis. Actions are limited to live,
+registered batch jobs reported to the model: defer future matching launches for
+up to one hour, reduce a declared allowlisted worker count for a bounded TTL,
+or request the one restart explicitly authorized with `codex-job --restartable`.
+The default TTL is five minutes. Reductions and deferrals affect future launches;
+changing a running job requires its separately consented restart. Restart is a
+nonreversible request, not a claim that a restart completed. Identity, ownership,
+actual cgroup and scope generation are rechecked before each action. Agents and
+unregistered processes receive diagnosis/manual suggestions only.
+
+The adapter uses the existing Codex CLI login and the exact bundled model
+`gpt-6.1-sol`. Optional `--investigator-model MODEL` and
+`--investigator-binary /absolute/path/to/codex` overrides are validated and must
+support the same isolation. It creates private HOME, CODEX_HOME and working
+directories, links only the existing owned owner-only authentication cache, and
+permits native credential refresh. It ignores user config/rules, uses ephemeral
+read-only execution, disables tooling features, normalizes model-derived tools,
+and supplies fixed instructions plus a strict output schema. Unsupported CLI,
+model catalog or managed policy fails diagnostically. No unrestricted fallback
+or provider transport override is used. The whole provider invocation, including
+capability probes, has a 120-second budget and bounded output.
+
+Reports scan at most 4096 PIDs for two seconds, retain at most 20 consumers and
+read PSS only for top candidates. Growth comparisons include start ticks, UID
+and cgroup; PID reuse never becomes growth. Host capacity uses `MemAvailable`;
+RSS/PSS, memory and I/O stalls, swap, and bounded cgroup stats/events provide
+context. Labels are untrusted, sanitized and length-limited. Arguments, working
+directories, arbitrary environment values, conversation text and credentials
+are excluded. A compact projection reserves native framing/schema space within
+a 16 KiB initial model-input budget.
+
+Private reports, trusted local job identities, answers and action journals live
+under `${XDG_STATE_HOME:-~/.local/state}/codexfarm/resources/`, with owner-only
+0700 directories and atomic 0600 JSON files capped at 64 KiB. Reports and journals
+retain 20 files each. Journals record before/after readings, results and TTL
+identifiers. Material deterioration removes only this investigation's reversible
+overrides; expired or already removed overrides are benign. No model-generated
+shell command, project edit, service change or root operation is executed.
+
 ### Optional managed jobs
 
 The optional host layer is a separate, standalone administrative helper. Setup
@@ -732,8 +800,10 @@ unknown fields, invalid types, nonfinite numbers, symlinks, foreign ownership, a
 public settings files. Reading absent settings creates nothing. Explicit settings
 writes use atomic 0600 files and may tighten the owned target directory to 0700;
 ordinary optional agent lookup warns and launches normally if settings or private
-job registration are inaccessible. Use the Python `resource_config.load_settings` /
-`write_settings(ResourceSettings(...))` APIs until the configuration CLI is available.
+job registration are inaccessible. Use `codex-resource configure` for independent
+opt-ins and `codex-resource status` to inspect the current settings. The Python
+`resource_config.load_settings` / `write_settings(ResourceSettings(...))` APIs
+provide the same validated configuration for integrations.
 
 Job recipes and identity records are private under
 `$XDG_STATE_HOME/codexfarm/resources/jobs`, using 0700 directories and atomic 0600
@@ -753,7 +823,7 @@ before relaunch. A recovery timeout leaves the record `queued_timeout` and exits
 124. Worker reductions affect an existing job only through this separately
 consented restart. The `JobStore.identity`, `request_restart`, `reduce_workers`,
 `defer_job`, `delete_override` (also `rollback_override`), and `recipe_overrides`
-APIs support the later incident controller. Temporary overrides last at most one
+APIs enforce the incident controller's identity and consent checks. Temporary overrides last at most one
 hour, records and overrides have bounded retention, and no payload output is copied
 to this store. Cleanup retains records whenever any recorded supervisor, payload,
 or launcher remains alive or its process identity is unreadable. A temporary
@@ -794,6 +864,7 @@ Tuning and controls:
 - **`codex-annotator`** - Track RUN/READY/ERR state and notify when windows become READY
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
 - **`codex-job run [options] -- argv ...`** - Run declared jobs with optional scopes, batch admission and explicit restart consent
+- **`codex-resource configure|status|report|investigate`** - Configure independent opt-ins and inspect bounded incident diagnosis
 - **`codex-resource-host plan|apply|maintain|remove`** - Review and explicitly install standalone host memory/OOM preferences
 - **`codex-health`** - Check RAM pressure, the monitor heartbeat and opted-in archive health
 - **`codex-backup [--archive]`** - Save exact farm identities; full conversation archives require `--archive`

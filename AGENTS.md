@@ -124,3 +124,28 @@ not expose a structured status channel through tmux.
   restoration journal. Preserve later operator changes and reused PID identities.
 - Use `tests/test_resource_host.py` with private roots/proc trees and manager
   doubles. Never install host protection or mutate actual services in tests.
+
+## Optional incident investigation
+
+- `codex-resource` configuration only writes private settings. All four independent
+  options default off; no daemon/timer, host guard or backup changes are implicit.
+- Health status is written before optional scheduling. Sustained pressure needs
+  60 seconds, one global nonblocking lock, 15-minute cooldown and at least 512 MiB
+  MemAvailable. Unknown samples/failures stay advisory; annotation never awaits LLMs.
+- Reports must bound PID scans/time, sanitize labels, omit recipes/argv/cwd/env and
+  conversations, and retain private 64 KiB files with 20-report/journal limits.
+  Keep full trusted identity snapshots local; model projection chooses job IDs only.
+- Codex isolation requires private HOME/CODEX_HOME/cwd, auth-only link, no user
+  config/rules, read-only ephemeral execution, normalized bundled model metadata,
+  disabled tooling and fixed instructions. Bound probes and provider time/output.
+  Never ship fake provider routing, parse credentials or fall back unrestricted.
+- Validate the entire strict output before mutations. Manual actions need explicit
+  CLI intent plus stored consent; scheduled actions need stored consent. Recheck
+  consent after inference and job identity/UID/cgroup/generation before each remedy.
+  Only registered batch deferral, declared worker reduction and one consented
+  restart request are allowed. Restarts are nonreversible requests. TTL rollback
+  removes only this investigation's own reversible overrides.
+- Test with synthetic authentication and loopback SSE; no live model or login calls.
+  `CODEXFARM_TEST_NATIVE_CODEX=/absolute/native/codex python3 -m unittest
+  tests.test_resource_investigator` runs the optional native isolation matrix,
+  checking actual additional_tools, forbidden dispatch and final JSON delivery.

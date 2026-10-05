@@ -150,6 +150,29 @@ class SetupScriptTests(unittest.TestCase):
         self.assertFalse((Path(self.env["HOME"]) / ".gemini/settings.json").exists())
         self.assertIn("Session hook installation skipped", result.stdout)
 
+    def test_resource_helpers_installed_inert_and_import_packaged_modules(self):
+        (self.bin_dir / "python3").unlink()
+        (self.bin_dir / "python3").symlink_to(sys.executable)
+        result = self.run_setup("--without-session-hook")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("codex-resource status", result.stdout)
+        home = Path(self.env["HOME"])
+        for name in ("codex-resource", "codex-job", "codex-resource-host"):
+            installed = home / "bin" / name
+            self.assertEqual(installed.read_bytes(), (REPO_ROOT / "bin" / name).read_bytes())
+            result = subprocess.run(
+                [sys.executable, str(installed), "--help"],
+                env=self.env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(
+            (Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/resource-settings.json").exists()
+        )
+        self.assertFalse((home / ".config/systemd").exists())
+
     def test_sourced_setup_forwards_deep_history_flag(self) -> None:
         (self.bin_dir / "python3").unlink()
         (self.bin_dir / "python3").symlink_to(sys.executable)
