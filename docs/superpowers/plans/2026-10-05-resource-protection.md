@@ -124,8 +124,10 @@ self.assertEqual(result.stdout.strip(), "literal $value; `data`")
 
 Task 3 passed specification and quality review at `0ca5641`. The final integrated
 feature passed review at `fcd5538`, including safe migration of the existing farm
-state directory after setup. All 767 unit tests and required publication checks
-pass. Seven native CLI loopback cases verify final JSON, rejected tools,
+state directory after setup. All 767 local unit tests and required local
+publication checks pass. Host mask-probe fixtures supply a private fake account
+and verify its distinct primary group, avoiding real passwd dependencies on CI
+runners. Seven native CLI loopback cases verify final JSON, rejected tools,
 instruction/skill isolation, a positive control, and the actual 16 KiB input
 budget. Review regressions cover exact cgroup paths, stable process samples,
 truthful interrupted-action journals, and one nonrenewable cleanup deadline.
