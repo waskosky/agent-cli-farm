@@ -423,7 +423,14 @@ class JobTests(unittest.TestCase):
 
     def test_retention_bounded_and_stale_remedies_rejected(self):
         record = self.store.create("batch", ["true"], str(self.root))
-        self.store.write(dict(record, status="finished", updated_at=1))
+        self.store.write(
+            dict(
+                record,
+                status="finished",
+                updated_at=1,
+                supervisor_start_ticks=record["supervisor_start_ticks"] + 1,
+            )
+        )
         self.store.cleanup(now=1000000)
         self.assertFalse(self.store.record_path(record["job_id"]).exists())
         with self.assertRaises(ValueError):
@@ -635,7 +642,9 @@ class JobTests(unittest.TestCase):
 
         with patch.object(jobs, "manager_call", side_effect=manager):
             self.assertTrue(jobs._scope_ready("agent", {}))
-        self.assertFalse(any("set-property" in command for command in calls))
+        self.assertFalse(
+            any(prop.startswith("MemoryLow=") for command in calls for prop in command)
+        )
         self.assertFalse(any("unmask" in command or "enable" in command for command in calls))
 
     def test_missing_scope_launcher_auto_falls_back_before_payload(self):
@@ -662,7 +671,9 @@ class JobTests(unittest.TestCase):
 
         with patch.object(jobs, "manager_call", side_effect=manager):
             self.assertTrue(jobs._scope_ready("agent", {}))
-        self.assertFalse(any("set-property" in command for command in calls))
+        self.assertFalse(
+            any(prop.startswith("MemoryLow=") for command in calls for prop in command)
+        )
 
     def test_batch_nice_is_ten_when_already_nice_ten(self):
         result = self.run_cli(
@@ -894,3 +905,152 @@ class JobTests(unittest.TestCase):
         self.assertIsNone(
             jobs.process_identity(descendant), "late TERM cleanup descendant survived termination"
         )
+
+    def test_memory_low_reaches_both_interactive_ancestors(self):
+        calls = []
+
+        def manager(args, env=None):
+            calls.append(args)
+            return subprocess.CompletedProcess(
+                args, 0, "0" if "--property=MemoryLow" in args else "", ""
+            )
+
+        with patch.object(jobs, "manager_call", side_effect=manager):
+            self.assertTrue(jobs._scope_ready("agent", {}))
+        for unit in ("codexfarm.slice", "codexfarm-interactive.slice"):
+            self.assertIn(["set-property", "--runtime", unit, "MemoryLow=1024M"], calls)
+
+    def test_slice_siblings_apply_cross_role_cpu_io_preferences(self):
+        for role in ("agent", "batch"):
+            calls = []
+
+            def manager(args, env=None, recorded_calls=calls):
+                recorded_calls.append(args)
+                return subprocess.CompletedProcess(
+                    args, 0, "infinity" if "--property=MemoryLow" in args else "", ""
+                )
+
+            with patch.object(jobs, "manager_call", side_effect=manager):
+                self.assertTrue(jobs._scope_ready(role, {}))
+            self.assertIn(
+                [
+                    "set-property",
+                    "--runtime",
+                    "codexfarm-interactive.slice",
+                    "CPUWeight=200",
+                    "IOWeight=200",
+                ],
+                calls,
+            )
+            self.assertIn(
+                [
+                    "set-property",
+                    "--runtime",
+                    "codexfarm-batch.slice",
+                    "CPUWeight=25",
+                    "IOWeight=25",
+                ],
+                calls,
+            )
+            self.assertFalse(
+                any(
+                    prop.startswith(("CPUQuota=", "MemoryMax=", "MemoryHigh=", "TasksMax="))
+                    for command in calls
+                    for prop in command
+                )
+            )
+
+    def test_slice_memory_low_preserves_each_stronger_or_unknown_ancestor(self):
+        for parent, child in [
+            ("infinity", "2147483648"),
+            ("2147483648", "infinity"),
+            ("unknown", "0"),
+        ]:
+            calls = []
+
+            def manager(args, env=None, recorded_calls=calls, parent_low=parent, child_low=child):
+                recorded_calls.append(args)
+                if "--property=MemoryLow" in args:
+                    return subprocess.CompletedProcess(
+                        args, 0, parent_low if args[1] == "codexfarm.slice" else child_low, ""
+                    )
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            with patch.object(jobs, "manager_call", side_effect=manager):
+                self.assertTrue(jobs._scope_ready("agent", {}))
+            low_changes = [
+                command
+                for command in calls
+                if any(prop.startswith("MemoryLow=") for prop in command)
+            ]
+            expected = (
+                [["set-property", "--runtime", "codexfarm-interactive.slice", "MemoryLow=1024M"]]
+                if child == "0"
+                else []
+            )
+            self.assertEqual(low_changes, expected)
+
+    def test_manager_query_outage_does_not_make_live_record_permanently_stale(self):
+        _, record = self.live_record()
+        record.update(scope="codexfarm-batch-" + "a" * 32 + ".scope", invocation_id="generation")
+        self.store.write(record)
+        original = jobs.process_identity
+
+        def scoped(pid):
+            value = original(pid)
+            if value and pid == record["payload_pid"]:
+                value = dict(value, cgroup="0::/" + record["scope"])
+            return value
+
+        record["cgroup"] = "0::/" + record["scope"]
+        self.store.write(record)
+        with (
+            patch.object(jobs, "process_identity", side_effect=scoped),
+            patch.object(jobs, "scope_invocation", return_value=None),
+        ):
+            self.store.cleanup(now=100)
+            self.assertEqual(self.store.read(record["job_id"])["status"], "running")
+            self.store.cleanup(now=100 + 8 * 86400)
+            self.assertTrue(self.store.record_path(record["job_id"]).exists())
+        with (
+            patch.object(jobs, "process_identity", side_effect=scoped),
+            patch.object(jobs, "scope_invocation", return_value="generation"),
+        ):
+            self.assertTrue(
+                self.store.validate(record["job_id"], self.store.identity(record["job_id"]))
+            )
+
+    def test_previously_stale_live_payload_is_never_pruned(self):
+        _, record = self.live_record()
+        record.update(
+            status="stale",
+            updated_at=1,
+            supervisor_start_ticks=record["supervisor_start_ticks"] + 1,
+        )
+        self.store.write(record)
+        self.store.cleanup(now=8 * 86400)
+        self.assertTrue(
+            self.store.record_path(record["job_id"]).exists(), "live payload record was pruned"
+        )
+
+    def test_terminal_record_with_live_launcher_is_never_pruned(self):
+        process, record = self.live_record()
+        record.update(
+            status="finished",
+            updated_at=1,
+            payload_start_ticks=record["payload_start_ticks"] + 1,
+            supervisor_start_ticks=record["supervisor_start_ticks"] + 1,
+            launch_pid=process.pid,
+            launch_start_ticks=jobs.process_identity(process.pid)["start_ticks"],
+        )
+        self.store.write(record)
+        self.store.cleanup(now=8 * 86400)
+        self.assertTrue(self.store.record_path(record["job_id"]).exists())
+
+    def test_unreadable_process_identity_is_retained_conservatively(self):
+        _, record = self.live_record()
+        record.update(status="stale", updated_at=1)
+        self.store.write(record)
+        with patch.object(jobs, "process_identity", return_value=None):
+            self.store.cleanup(now=8 * 86400)
+        self.assertTrue(self.store.record_path(record["job_id"]).exists())

@@ -86,6 +86,31 @@ def process_identity(pid: int, proc_root: Path = Path("/proc")) -> dict | None:
         return None
 
 
+def _recorded_process_state(record: dict, name: str) -> str:
+    """Distinguish definite death/reuse from unreadable Linux identity counters."""
+    pid, ticks, uid = (
+        record.get(f"{name}_pid"),
+        record.get(f"{name}_start_ticks"),
+        record.get("uid"),
+    )
+    if pid is None and ticks is None:
+        return "absent"
+    if type(pid) is not int or pid <= 0 or type(ticks) is not int or type(uid) is not int:
+        return "unknown"
+    identity = process_identity(pid)
+    if identity is not None:
+        return "live" if identity["uid"] == uid and identity["start_ticks"] == ticks else "dead"
+    try:
+        info = (Path("/proc") / str(pid)).stat()
+    except FileNotFoundError:
+        return "dead"
+    except OSError:
+        return "unknown"
+    # A still-existing same-owner PID with unreadable/stat-invalid counters is
+    # conservative unknown, never evidence that a retained job can be deleted.
+    return "unknown" if info.st_uid == uid else "dead"
+
+
 def manager_environment(env: dict[str, str], *, runtime_root: Path | None = None) -> dict[str, str]:
     result = dict(env)
     if "XDG_RUNTIME_DIR" in result and "DBUS_SESSION_BUS_ADDRESS" in result:
@@ -460,25 +485,28 @@ class JobStore:
             terminal = []
             for path in self._records():
                 value = read_private_json(path)
+                states = {
+                    name: _recorded_process_state(value, name)
+                    for name in ("supervisor", "payload", "launch")
+                }
                 if value.get("status") in ("finished", "failed", "queued_timeout", "stale"):
                     terminal.append((value.get("updated_at", 0), path))
-                elif value.get("status") == "queued":
-                    supervisor = process_identity(value.get("supervisor_pid"))
-                    if (
-                        supervisor is None
-                        or supervisor["uid"] != value.get("uid")
-                        or supervisor["start_ticks"] != value.get("supervisor_start_ticks")
-                    ):
-                        value.update(status="stale", updated_at=now)
-                        self.write(value)
-                elif value.get("status") == "running" and not self.validate(
-                    value["job_id"], self.identity(value["job_id"])
-                ):
+                elif value.get("status") in ("queued", "running") and "dead" in states.values():
+                    # Scope/cgroup validation can fail temporarily. Only actual
+                    # PID death, ownership change, or start-tick reuse is stale.
                     value.update(status="stale", updated_at=now)
                     self.write(value)
             terminal.sort(reverse=True)
             for index, (updated_at, path) in enumerate(terminal):
                 if index >= 128 or now - updated_at > 7 * 86400:
+                    value = read_private_json(path)
+                    # Terminal labels, even legacy stale labels, do not prove
+                    # process death. Recheck every recorded identity at deletion.
+                    if any(
+                        _recorded_process_state(value, name) in ("live", "unknown")
+                        for name in ("supervisor", "payload", "launch")
+                    ):
+                        continue
                     for suffix in (".json", ".started.json", ".restart.json"):
                         (self.path / (path.stem + suffix)).unlink(missing_ok=True)
             # Also clean expired overrides without exposing private recipes.
@@ -746,27 +774,46 @@ def _scope_ready(role: str, env: dict[str, str]) -> bool:
     try:
         if manager_call(["show-environment"], env).returncode != 0:
             return False
-        # Runtime-only slice changes. Never write unit files or undo masks.
-        child = f"codexfarm-{'interactive' if role == 'agent' else 'batch'}.slice"
-        if manager_call(["start", "codexfarm.slice", child], env).returncode != 0:
+        # Runtime-only sibling preferences. Leaf weights cannot prioritize
+        # across independently equal-weight parent slices.
+        interactive, batch = "codexfarm-interactive.slice", "codexfarm-batch.slice"
+        if manager_call(["start", "codexfarm.slice", interactive, batch], env).returncode != 0:
             return False
+        for unit, weight in ((interactive, 200), (batch, 25)):
+            if (
+                manager_call(
+                    [
+                        "set-property",
+                        "--runtime",
+                        unit,
+                        f"CPUWeight={weight}",
+                        f"IOWeight={weight}",
+                    ],
+                    env,
+                ).returncode
+                != 0
+            ):
+                warn("cross-role slice priority unavailable; retaining scope preferences")
         if role == "agent":
-            result = manager_call(
-                ["show", "codexfarm.slice", "--property=MemoryLow", "--value"], env
-            )
-            existing = result.stdout.strip()
-            if existing.startswith("MemoryLow="):
-                existing = existing.partition("=")[2]
-            if result.returncode != 0 or (existing != "infinity" and not existing.isdigit()):
-                warn("shared parent memory preference could not be read; preserving it")
-            elif existing != "infinity" and int(existing) < 1024 * 1024 * 1024:
-                if (
-                    manager_call(
-                        ["set-property", "--runtime", "codexfarm.slice", "MemoryLow=1024M"], env
-                    ).returncode
-                    != 0
-                ):
-                    warn("shared agent memory protection unavailable; retaining relative weights")
+            # Every intermediate node needs protection for leaf MemoryLow to
+            # reach the shared parent. Never reduce stronger or unknown values.
+            for unit in ("codexfarm.slice", interactive):
+                result = manager_call(["show", unit, "--property=MemoryLow", "--value"], env)
+                existing = result.stdout.strip()
+                if existing.startswith("MemoryLow="):
+                    existing = existing.partition("=")[2]
+                if result.returncode != 0 or (existing != "infinity" and not existing.isdigit()):
+                    warn(f"{unit} memory preference could not be read; preserving it")
+                elif existing != "infinity" and int(existing) < 1024 * 1024 * 1024:
+                    if (
+                        manager_call(
+                            ["set-property", "--runtime", unit, "MemoryLow=1024M"], env
+                        ).returncode
+                        != 0
+                    ):
+                        warn(
+                            "shared agent memory protection unavailable; retaining relative weights"
+                        )
         return True
     except (OSError, subprocess.TimeoutExpired):
         return False

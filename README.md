@@ -646,7 +646,10 @@ headroom and temporary recipe deferrals. These checks never stop running work.
 Agent jobs bypass admission and retain their terminal and inherited process group.
 They cannot opt into restarts or memory ceilings. Agent scopes request relative
 CPU/I/O preference and memory protection through `codexfarm-interactive.slice`
-and its shared `codexfarm.slice` parent. Batch scopes use
+and its shared `codexfarm.slice` parent; both ancestors request at least 1024 MiB
+of memory protection while preserving stronger or unknown settings. Interactive
+slice CPU/I/O weights are 200 and batch slice weights are 25, so the relative
+preference applies across the sibling slices as well as their scopes. Batch scopes use
 `codexfarm-batch.slice`, CPU/I/O weights of 25, nice 10, and OOM adjustment +250.
 An agent's negative OOM adjustment needs a separately opted-in privileged helper;
 the unprivileged runner reports that limitation. Runtime slice preferences install
@@ -683,7 +686,10 @@ consented restart. The `JobStore.identity`, `request_restart`, `reduce_workers`,
 `defer_job`, `delete_override` (also `rollback_override`), and `recipe_overrides`
 APIs support the later incident controller. Temporary overrides last at most one
 hour, records and overrides have bounded retention, and no payload output is copied
-to this store.
+to this store. Cleanup retains records whenever any recorded supervisor, payload,
+or launcher remains alive or its process identity is unreadable. A temporary
+manager query failure disables remedies until validation recovers without making
+the running record permanently stale.
 
 ### Memory labels
 

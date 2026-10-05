@@ -87,7 +87,8 @@ not expose a structured status channel through tmux.
   handshake; a payload error must never cause a second execution.
 - Scope properties must be scope-supported. Apply batch nice/OOM preferences in
   the payload trampoline. Runtime slice preferences never write/unmask unit files
-  and must preserve stronger existing shared-parent MemoryLow values.
+  and must preserve stronger or unknown MemoryLow values on both shared parent
+  and interactive child. Apply role weights at sibling slices as well as scopes.
 - All remedies require a live recorded UID, PID/start ticks, actual cgroup and
   scope generation. Never select by process name. Restart consent is batch-only,
   explicit, and limited to one request; termination targets only its dedicated
@@ -96,7 +97,9 @@ not expose a structured status channel through tmux.
   bounded TTL reductions and deferrals affect future launches. Existing jobs
   change worker counts only after a separately consented restart. Public metadata
   excludes argv, cwd and arbitrary environment values. Private state stays bounded
-  with 0700 directories, 0600 atomic files, and stale-record cleanup.
+  with 0700 directories, 0600 atomic files, and stale-record cleanup. Never prune
+  records with any live or unreadable recorded process identity; temporary scope
+  query failures must leave running records recoverable.
 - Keep tests in `tests/test_resource_config.py` and `tests/test_resource_jobs.py`,
   plus launcher and Looper regressions. Use private homes and systemd doubles for
   verification; do not install services or change live tmux sessions in tests.
