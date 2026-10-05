@@ -1307,3 +1307,124 @@ class JobTests(unittest.TestCase):
         while jobs.process_identity(process.pid) is not None and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertEqual(jobs._captured_member_state(member, None), "dead")
+
+    def test_live_original_member_changing_uid_and_group_refuses_restart(self):
+        process, record = self.live_record()
+        member = jobs.process_identity(process.pid)
+        transferred = False
+        original = jobs.process_identity
+
+        def identity(pid):
+            value = original(pid)
+            if transferred and pid == process.pid:
+                return dict(
+                    value, uid=member["uid"] + 1, pgid=member["pgid"] + 1, sid=member["sid"] + 1
+                )
+            return value
+
+        def term(_group, _signal):
+            nonlocal transferred
+            transferred = True
+
+        with (
+            patch.object(jobs, "process_identity", side_effect=identity),
+            patch.object(
+                jobs, "_group_members", side_effect=lambda group: [] if transferred else [member]
+            ),
+            patch.object(jobs.os, "killpg", side_effect=term),
+            patch.object(jobs.signal, "pidfd_send_signal") as send,
+        ):
+            with self.assertRaises(ValueError):
+                jobs.terminate_owned_batch(
+                    self.store, record["job_id"], self.store.identity(record["job_id"]), grace=0.01
+                )
+        send.assert_not_called()
+        self.assertIsNone(process.poll())
+
+    def test_cleanup_retains_same_start_ticks_with_changed_uid(self):
+        process, record = self.live_record()
+        record.update(
+            status="stale",
+            updated_at=1,
+            supervisor_start_ticks=record["supervisor_start_ticks"] + 1,
+        )
+        self.store.write(record)
+        original = jobs.process_identity
+
+        def changed_identity(pid):
+            value = original(pid)
+            return dict(value, uid=value["uid"] + 1) if pid == process.pid and value else value
+
+        with patch.object(jobs, "process_identity", side_effect=changed_identity):
+            self.store.cleanup(now=8 * 86400)
+        self.assertTrue(self.store.record_path(record["job_id"]).exists())
+
+    def test_expired_lookup_winning_before_concurrent_rollback_is_benign(self):
+        import concurrent.futures
+        import threading
+
+        _, record = self.live_record()
+        key = self.store.defer_job(record["job_id"], 1, self.store.identity(record["job_id"]))
+        path = self.store.overrides_path / (key + ".json")
+        value = jobs.read_private_json(path)
+        value["expires_at"] = 1
+        jobs.write_private_json(path, value)
+        read_ready, release, rollback_started = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+        original = jobs.read_private_json
+        held = False
+
+        def read(target):
+            nonlocal held
+            result = original(target)
+            if target == path and not held:
+                held = True
+                read_ready.set()
+                release.wait(2)
+            return result
+
+        def rollback():
+            rollback_started.set()
+            self.store.rollback_override(key)
+
+        with (
+            patch.object(jobs, "read_private_json", side_effect=read),
+            concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            reader = pool.submit(self.store.recipe_overrides, record["recipe_fingerprint"])
+            self.assertTrue(read_ready.wait(2))
+            remover = pool.submit(rollback)
+            self.assertTrue(rollback_started.wait(2))
+            release.set()
+            self.assertEqual(reader.result(timeout=3), {})
+            self.assertIsNone(remover.result(timeout=3))
+        self.assertFalse(path.exists())
+
+    def test_missing_rollback_and_disappearance_are_benign_but_existing_unsafe_rejected(self):
+        key = "e" * 32
+        self.assertIsNone(self.store.rollback_override(key))
+        path = self.store.overrides_path / (key + ".json")
+        jobs.write_private_json(path, {"kind": "defer"})
+        original = jobs.read_private_json
+
+        def read_then_remove(target):
+            result = original(target)
+            if target == path:
+                path.unlink()
+            return result
+
+        with patch.object(jobs, "read_private_json", side_effect=read_then_remove):
+            self.assertIsNone(self.store.delete_override(key))
+        path.symlink_to(self.root / "missing-target")
+        with self.assertRaises(ValueError):
+            self.store.rollback_override(key)
+        path.unlink()
+        jobs.write_private_json(path, {"kind": "defer"})
+        path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            self.store.delete_override(key)
+        with self.assertRaises(ValueError):
+            self.store.delete_override("../bad")

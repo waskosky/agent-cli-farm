@@ -100,16 +100,18 @@ def _recorded_process_state(record: dict, name: str) -> str:
         return "unknown"
     identity = process_identity(pid)
     if identity is not None:
-        return "live" if identity["uid"] == uid and identity["start_ticks"] == ticks else "dead"
+        if identity["start_ticks"] != ticks:
+            return "dead"
+        return "live" if identity["uid"] == uid else "unknown"
     try:
-        info = (Path("/proc") / str(pid)).stat()
+        (Path("/proc") / str(pid)).stat()
     except FileNotFoundError:
         return "dead"
     except OSError:
         return "unknown"
-    # A still-existing same-owner PID with unreadable/stat-invalid counters is
-    # conservative unknown, never evidence that a retained job can be deleted.
-    return "unknown" if info.st_uid == uid else "dead"
+    # Existing PIDs with unreadable counters or a changed UID may still be the
+    # original live process. Only disappearance or start-tick reuse proves death.
+    return "unknown"
 
 
 def manager_environment(env: dict[str, str], *, runtime_root: Path | None = None) -> dict[str, str]:
@@ -439,10 +441,16 @@ class JobStore:
         return key
 
     def delete_override(self, override_id: str) -> None:
+        override_id = self._id(override_id)
         with self._locked():
-            path = self.overrides_path / f"{self._id(override_id)}.json"
-            read_private_json(path)
-            path.unlink()
+            path = self.overrides_path / f"{override_id}.json"
+            try:
+                read_private_json(path)
+            except FileNotFoundError:
+                return
+            # Expiration or an operator's prior rollback is already complete.
+            # Existing unsafe files/symlinks still fail the strict read above.
+            path.unlink(missing_ok=True)
 
     rollback_override = delete_override
 
@@ -504,7 +512,8 @@ class JobStore:
                     terminal.append((value.get("updated_at", 0), path))
                 elif value.get("status") in ("queued", "running") and "dead" in states.values():
                     # Scope/cgroup validation can fail temporarily. Only actual
-                    # PID death, ownership change, or start-tick reuse is stale.
+                    # PID death or start-tick reuse is stale; UID changes remain
+                    # ambiguous while the original recorded process is alive.
                     value.update(status="stale", updated_at=now)
                     self.write(value)
             terminal.sort(reverse=True)
@@ -629,8 +638,12 @@ def _group_members(group: int) -> list[dict]:
 def _captured_member_state(member: dict, fd: int | None) -> str:
     current = process_identity(member["pid"])
     if current is not None:
-        if current["uid"] != member["uid"] or current["start_ticks"] != member["start_ticks"]:
+        if current["start_ticks"] != member["start_ticks"]:
             return "dead"
+        # A process can change credentials and leave its group without exiting.
+        # That original instance remains ambiguous and must block restart.
+        if current["uid"] != member["uid"]:
+            return "unknown"
         return "live" if current == member else "unknown"
     if fd is not None:
         try:
