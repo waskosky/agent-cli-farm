@@ -187,7 +187,26 @@ class JobStore:
 
     def _prepare(self) -> None:
         if self.path == state_directory() / "resources/jobs":
-            private_directory(state_directory(), create=True)
+            # Setup historically creates this shared farm directory with the
+            # user's umask. Migrate only that designated outer directory, never
+            # HOME/XDG roots or resource leaves, and chmod a verified stable FD.
+            state = state_directory()
+            state.mkdir(mode=0o700, parents=True, exist_ok=True)
+            info = state.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise ValueError("farm state directory must be owned and not a symlink")
+            fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                opened = os.fstat(fd)
+                if opened.st_uid != os.getuid() or (opened.st_dev, opened.st_ino) != (
+                    info.st_dev,
+                    info.st_ino,
+                ):
+                    raise ValueError("farm state directory identity or owner changed")
+                os.fchmod(fd, 0o700)
+            finally:
+                os.close(fd)
+            private_directory(state)
         private_directory(self.path.parent, create=True)
         private_directory(self.path, create=True)
         private_directory(self.overrides_path, create=True)

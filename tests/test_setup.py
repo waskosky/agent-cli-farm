@@ -173,6 +173,116 @@ class SetupScriptTests(unittest.TestCase):
         )
         self.assertFalse((home / ".config/systemd").exists())
 
+    def test_installed_jobs_register_after_setup_with_ordinary_umasks(self):
+        (self.bin_dir / "python3").unlink()
+        (self.bin_dir / "python3").symlink_to(sys.executable)
+        for umask, role in (("022", "batch"), ("002", "batch"), ("022", "agent"), ("002", "agent")):
+            with self.subTest(umask=umask, role=role):
+                root = self.tmpdir / umask / role
+                home, state, config = root / "home", root / "state", root / "config"
+                for directory in (home, state, config):
+                    directory.mkdir(parents=True, mode=0o755)
+                    directory.chmod(0o755)
+                env = dict(
+                    self.env, HOME=str(home), XDG_STATE_HOME=str(state), XDG_CONFIG_HOME=str(config)
+                )
+                masks = config / "systemd/user"
+                masks.mkdir(parents=True)
+                mask = masks / "codexfarm-autosave.timer"
+                mask.symlink_to("/dev/null")
+                result = subprocess.run(
+                    [
+                        "/bin/bash",
+                        "-c",
+                        'umask "$1"; exec /bin/bash "$2" --without-session-hook',
+                        "setup-test",
+                        umask,
+                        str(REPO_ROOT / "setup.sh"),
+                    ],
+                    cwd=REPO_ROOT,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                farm_state = state / "codexfarm"
+                self.assertEqual(stat.S_IMODE(farm_state.stat().st_mode), 0o777 & ~int(umask, 8))
+                archive = farm_state / "backups/sentinel.tar.gz"
+                archive.parent.mkdir()
+                archive.write_bytes(b"existing archive")
+                count = root / "launches"
+                code = (
+                    "import json,sys; "
+                    f"open({str(count)!r},'a').write('once\\n'); "
+                    "print(json.dumps(sys.argv[1:]))"
+                )
+                literal_args = ["a b", "$value; `data`", "", "\\", '"quoted"']
+                argv = [sys.executable, "-c", code, *literal_args]
+                launch = [
+                    str(home / "bin/codex-job"),
+                    "run",
+                    "--role",
+                    role,
+                    "--scope",
+                    "off",
+                    "--memory-policy",
+                    "ignore",
+                    "--",
+                    *argv,
+                ]
+                if role == "agent":
+                    env["CODEXFARM_RESOURCE_PROTECTION"] = "1"
+                    # Exercise the installed opt-in launcher integration, with
+                    # scope off to avoid any real user-manager interaction.
+                    bootstrap = (
+                        "import os,sys; "
+                        f"sys.path.insert(0,{str(home / 'bin')!r}); "
+                        "from codex_looper.resource_jobs import optional_agent_command; "
+                        "command=optional_agent_command(sys.argv[1:],dict(os.environ)); "
+                        "assert command != sys.argv[1:]; "
+                        "command[command.index('--'):command.index('--')]='--scope off "
+                        "--memory-policy ignore'.split(); "
+                        "os.execvpe(command[0],command,os.environ)"
+                    )
+                    launch = [sys.executable, "-c", bootstrap, *argv]
+                result = subprocess.run(
+                    launch,
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), literal_args)
+                self.assertNotIn("registration unavailable", result.stderr)
+                records = [
+                    json.loads(path.read_text())
+                    for path in (farm_state / "resources/jobs").glob("*.json")
+                    if ".started." not in path.name
+                ]
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["role"], role)
+                self.assertEqual(records[0]["argv"], argv)
+                self.assertTrue(records[0]["managed_launch"])
+                self.assertIsNotNone(records[0]["payload_start_ticks"])
+                self.assertEqual(count.read_text().splitlines(), ["once"])
+                for directory in (
+                    farm_state,
+                    farm_state / "resources",
+                    farm_state / "resources/jobs",
+                    farm_state / "resources/overrides",
+                ):
+                    self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+                for path in (farm_state / "resources").rglob("*"):
+                    if path.is_file():
+                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                for directory in (home, state, config):
+                    self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
+                self.assertEqual(os.readlink(mask), "/dev/null")
+                self.assertEqual(archive.read_bytes(), b"existing archive")
+
     def test_sourced_setup_forwards_deep_history_flag(self) -> None:
         (self.bin_dir / "python3").unlink()
         (self.bin_dir / "python3").symlink_to(sys.executable)

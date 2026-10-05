@@ -272,6 +272,83 @@ class JobTests(unittest.TestCase):
         proc.wait()
         self.assertFalse(self.store.validate(record["job_id"], identity))
 
+    def test_default_state_directory_migrates_only_owned_real_farm_directory(self):
+        state = jobs.state_directory()
+        state.mkdir(parents=True, mode=0o775)
+        state.chmod(0o775)
+        self.store._prepare()
+        self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(self.store.path.stat().st_mode), 0o700)
+
+    def test_default_state_directory_refuses_symlink_nonregular_and_wrong_owner(self):
+        state = jobs.state_directory()
+        state.parent.mkdir(parents=True)
+        destination = self.root / "destination"
+        destination.mkdir(mode=0o755)
+        state.symlink_to(destination, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            self.store._prepare()
+        self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o755)
+        self.assertFalse((destination / "resources").exists())
+        state.unlink()
+        state.write_text("existing file")
+        with self.assertRaises((ValueError, FileExistsError)):
+            self.store._prepare()
+        self.assertEqual(state.read_text(), "existing file")
+        state.unlink()
+        state.mkdir(mode=0o755)
+        with patch.object(jobs.os, "getuid", return_value=os.getuid() + 1):
+            with self.assertRaises(ValueError):
+                self.store._prepare()
+        self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o755)
+        self.assertFalse((state / "resources").exists())
+
+    def test_public_resource_leaves_are_not_migrated(self):
+        for relative in ("resources", "resources/jobs", "resources/overrides"):
+            with self.subTest(relative=relative):
+                target = jobs.state_directory() / relative
+                target.mkdir(parents=True, mode=0o700, exist_ok=True)
+                target.chmod(0o755)
+                with self.assertRaises(ValueError):
+                    self.store._prepare()
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+                target.chmod(0o700)
+
+    def test_state_directory_replacement_before_open_is_not_chmodded(self):
+        state = jobs.state_directory()
+        state.mkdir(parents=True, mode=0o700)
+        original_open = jobs.os.open
+        previous = state.with_name("previous")
+
+        def replace_before_open(path, flags, *args, **kwargs):
+            if Path(path) == state:
+                state.rename(previous)
+                state.mkdir(mode=0o755)
+            return original_open(path, flags, *args, **kwargs)
+
+        with patch.object(jobs.os, "open", side_effect=replace_before_open):
+            with self.assertRaises(ValueError):
+                self.store._prepare()
+        self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(previous.stat().st_mode), 0o700)
+        self.assertFalse((state / "resources").exists())
+
+    def test_state_directory_owner_is_rechecked_on_open_fd(self):
+        state = jobs.state_directory()
+        state.mkdir(parents=True, mode=0o700)
+        original_fstat = jobs.os.fstat
+
+        def changed_owner(fd):
+            values = list(original_fstat(fd))
+            values[4] += 1
+            return os.stat_result(values)
+
+        with patch.object(jobs.os, "fstat", side_effect=changed_owner):
+            with self.assertRaises(ValueError):
+                self.store._prepare()
+        self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o700)
+        self.assertFalse((state / "resources").exists())
+
     def test_scoped_generation_and_actual_cgroup_are_revalidated(self):
         proc, record = self.live_record()
         record.update(scope="codexfarm-batch-" + "a" * 32 + ".scope", invocation_id="generation")

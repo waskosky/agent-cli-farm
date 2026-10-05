@@ -814,8 +814,12 @@ provide the same validated configuration for integrations.
 
 Job recipes and identity records are private under
 `$XDG_STATE_HOME/codexfarm/resources/jobs`, using 0700 directories and atomic 0600
-files. Public `JobStore.public` / `list_jobs` reports exclude argv, cwd, and
-arbitrary environment values. Remedies select recorded UID, PID/start ticks,
+files. For compatibility with older setup installations, managed launches migrate
+only the owned, real `codexfarm` state directory to 0700 through a verified
+no-follow file descriptor. HOME and XDG roots retain their permissions; unsafe
+resource leaf directories or files are still rejected. Public `JobStore.public` /
+`list_jobs` reports exclude argv, cwd, and arbitrary environment values. Remedies
+select recorded UID, PID/start ticks,
 cgroup, and scope generation rather than process names. Temporary worker and
 deferral overrides apply only to matching argv, cwd, and declared worker variables;
 they expire and can be rolled back. The worker allowlist is `CARGO_BUILD_JOBS`,
