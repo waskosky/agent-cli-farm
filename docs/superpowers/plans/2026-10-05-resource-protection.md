@@ -57,10 +57,11 @@ Task 2A passed specification and quality review at `dab04e9`; 67 affected
 tests passed. A short-job smoke check against the actual user manager verified
 argv, live identity, process groups, priorities, hierarchy, and unlimited caps.
 
-Task 2B is implemented at `b3baa61`; all 48 host-helper tests pass. Review fixes
-cover inactive-slice restoration, pending OOM-write recovery and operator edits,
-and independent rollback after subprocess timeouts. Final review is in progress;
-privileged activation has not been run.
+Task 2B passed specification and quality review at `7b94a0f`; all 50 host-helper
+tests pass. Review fixes cover inactive-slice restoration, pending OOM-write
+recovery and operator edits, and independent rollback after subprocess timeouts.
+Unresolved timer stops retain their definition for safe retry. Privileged
+activation has not been run.
 
 **Files:** Create `bin/codex-job`, `codex_looper/resource_jobs.py`,
 `codex_looper/resource_config.py`, `tests/test_resource_config.py`,
@@ -116,7 +117,7 @@ self.assertEqual(result.stdout.strip(), "literal $value; `data`")
   resulting argv. Apply the same optional wrapping to provider commands in the
   looper without altering provider argument construction or recovery identities.
   Normal setup remains privilege-free and creates no services.
-- [ ] Run affected suites and lint, document job/host commands and trust
+- [x] Run affected suites and lint, document job/host commands and trust
   boundaries, commit, then complete both review stages.
 
 ## Task 3: Incident reports, remote diagnosis, authorized remedies, and rollout
