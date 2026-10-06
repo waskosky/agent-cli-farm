@@ -3,12 +3,14 @@ import json
 import os
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_looper.resource_config import ResourceSettings
@@ -102,21 +104,73 @@ else:
                 output_limit=1024,
             )
         marker = self.root / "child.pid"
-        script = (
-            'import subprocess,time,pathlib; p=subprocess.Popen(["'
-            + sys.executable
-            + '","-c","import time; time.sleep(60)"]); pathlib.Path('
+        child_script = (
+            "import os,time,pathlib; p=pathlib.Path("
             + repr(str(marker))
-            + ").write_text(str(p.pid)); time.sleep(60)"
+            + "); ready=p.with_suffix('.ready'); ready.write_text(str(os.getpid())); "
+            "ready.replace(p); time.sleep(60)"
         )
-        with self.assertRaises(ValueError):
+        script = (
+            "import subprocess,time; subprocess.Popen("
+            + repr([sys.executable, "-c", child_script])
+            + "); time.sleep(60)"
+        )
+        real_popen = subprocess.Popen
+
+        def cleanup_group(process):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+
+        unrelated = real_popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            env=dict(os.environ),
+            cwd=self.root,
+            start_new_session=True,
+        )
+        self.addCleanup(cleanup_group, unrelated)
+        self.assertIsNone(unrelated.poll())
+        started = time.monotonic()
+        deadline = started + 0.4
+        fixture_ready = False
+
+        def await_fixture(*args, **kwargs):
+            nonlocal fixture_ready
+            process = real_popen(*args, **kwargs)
+            self.addCleanup(cleanup_group, process)
+            readiness_deadline = time.monotonic() + 5
+            while not marker.exists():
+                self.assertIsNone(process.poll(), "fixture exited before descendant readiness")
+                self.assertLess(
+                    time.monotonic(), readiness_deadline, "descendant fixture did not become ready"
+                )
+                time.sleep(0.01)
+            self.assertEqual(os.getpgid(int(marker.read_text())), process.pid)
+            fixture_ready = True
+            return process
+
+        # Interpreter startup is outside this test's timeout trigger. Keep the
+        # initial deadline check live, then expire only after the child is ready.
+        clock = SimpleNamespace(monotonic=lambda: deadline if fixture_ready else started)
+        with (
+            patch.object(investigator.subprocess, "Popen", side_effect=await_fixture),
+            patch.object(investigator, "time", clock),
+            self.assertRaisesRegex(investigator.InvestigatorError, "time budget exceeded"),
+        ):
             investigator.bounded_run(
                 [sys.executable, "-c", script],
                 env=dict(os.environ),
                 cwd=self.root,
-                deadline=time.monotonic() + 0.4,
+                deadline=deadline,
                 output_limit=1024,
             )
+        self.assertTrue(fixture_ready)
+        self.assertIsNone(unrelated.poll(), "timeout killed an unrelated process group")
         pid = int(marker.read_text())
         for _ in range(50):
             status = Path(f"/proc/{pid}/stat")

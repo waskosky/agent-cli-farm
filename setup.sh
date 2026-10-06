@@ -8,6 +8,8 @@ codexfarm_setup_main() (
 
   local install_deep_history=0
   local install_session_hook=1
+  local with_memory_protection=0
+  local without_memory_protection=0
   local setup_python=""
   while (( "$#" )); do
     case "${1:-}" in
@@ -17,13 +19,26 @@ codexfarm_setup_main() (
       --without-session-hook)
         install_session_hook=0
         ;;
+      --with-memory-protection)
+        with_memory_protection=1
+        ;;
+      --without-memory-protection)
+        without_memory_protection=1
+        ;;
       -h|--help)
         cat <<'EOF'
 Usage: setup.sh [--with-deep-history] [--without-session-hook]
+                [--with-memory-protection | --without-memory-protection]
 
 Install Agent CLI Farm helpers and provider session-identity hooks. The
 --with-deep-history flag also installs the checksum-pinned history backend.
 Use --without-session-hook to leave provider hook settings unchanged.
+Interactive terminals explain and ask about gentle memory protection, then
+separately preview and ask before applying Linux/systemd preferences with sudo.
+Default unattended setup and --without-memory-protection preserve all memory
+settings. --with-memory-protection enables agent protection and batch queueing;
+unattended runs only print manual host commands and never run sudo. AI options
+and existing numeric thresholds are preserved.
 EOF
         exit 0
         ;;
@@ -34,6 +49,10 @@ EOF
     esac
     shift
   done
+  if [ "$with_memory_protection" -eq 1 ] && [ "$without_memory_protection" -eq 1 ]; then
+    echo "Conflicting setup options: --with-memory-protection and --without-memory-protection" >&2
+    exit 2
+  fi
   case "${CODEXFARM_WITH_DEEP_HISTORY:-}" in
     1|true|TRUE|True|yes|YES|Yes|on|ON|On) install_deep_history=1 ;;
   esac
@@ -350,6 +369,17 @@ EOF
   fi
 
   primary_rc="${rc_files[0]:-}"
+  local memory_setup_args=()
+  if [ "$with_memory_protection" -eq 1 ]; then
+    memory_setup_args+=(--with-memory-protection)
+  elif [ "$without_memory_protection" -eq 1 ]; then
+    memory_setup_args+=(--without-memory-protection)
+  fi
+  if [ "${#memory_setup_args[@]}" -gt 0 ]; then
+    "$setup_python" "$HOME/bin/codex-setup-memory.py" "${memory_setup_args[@]}" || return "$?"
+  else
+    "$setup_python" "$HOME/bin/codex-setup-memory.py" || return "$?"
+  fi
   echo ""
   echo "Usage examples (re-run ./setup.sh anytime to update scripts):"
   echo "  codex-add                    # Start Codex in current directory"
@@ -393,6 +423,19 @@ fi
 
 if [ "$codexfarm_setup_is_sourced" -eq 1 ]; then
   CODEXFARM_SETUP_SOURCED=1 codexfarm_setup_main "$@"
+  case "$?" in
+    0) ;;
+    2)
+      unset -f codexfarm_setup_main
+      unset codexfarm_setup_is_sourced
+      return 2
+      ;;
+    *)
+      unset -f codexfarm_setup_main
+      unset codexfarm_setup_is_sourced
+      return 1
+      ;;
+  esac
   case ":$PATH:" in
     *:"$HOME/bin":*) ;;
     *) export PATH="$HOME/bin:$PATH" ;;

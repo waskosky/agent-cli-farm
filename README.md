@@ -60,6 +60,29 @@ command is safe; the installed version can change only when this repository's re
 After updating an existing checkout, include `--with-deep-history` again if you use that backend so
 its compatibility launcher stays in sync with the copied farm commands.
 
+When both input and output are terminals, setup explains gentle memory protection
+and asks whether to enable agent protection and queueing for new managed batch
+jobs. Enter, no, or EOF keeps every existing setting; declining does not uninstall
+previous protection. Enabling preserves custom thresholds, AI investigation,
+automatic actions, and model/binary choices. Setup never invokes a model.
+
+On supported Linux/systemd hosts, enabling offers a separate host step: setup
+shows the complete read-only plan, then asks a second default-no question before
+running `sudo`. This adds ancestor memory preferences and a small 30-second root
+OOM maintenance timer. Named farm unit drop-ins affect those unit names for other
+users too; OOM changes are restricted to your UID. Other workloads may face earlier
+reclaim, and interactive CPU/IO preference can slow competing batch work. The
+shared 1 GiB MemoryLow protects used memory; it reserves no empty RAM and gives
+no OOM immunity. Running agents are never stopped or capped by this policy.
+Agent wrapping applies to future managed launches; setup does not move current
+agents into different scopes or select existing sessions for host protection.
+
+Default unattended, piped, or redirected setup leaves memory settings untouched
+and performs no host preview or apply. `--with-memory-protection` explicitly
+enables the two user options; unattended runs print exact manual host commands
+without running them. `--without-memory-protection` skips both questions and
+preserves all settings. The two flags conflict. Neither flag changes AI options.
+
 Codex requires review for non-managed command hooks. Open `/hooks` in Codex CLI
 after setup and trust the Agent CLI Farm hook. Provider hooks receive the active
 `session_id` on `SessionStart` and `UserPromptSubmit`, then record it as an
@@ -690,8 +713,12 @@ shell command, project edit, service change or root operation is executed.
 ### Optional managed jobs
 
 The optional host layer is a separate, standalone administrative helper. Setup
-copies `codex-resource-host` into `~/bin`; it never applies host changes. Review
-its read-only JSON plan, then explicitly apply the same options as root:
+copies `codex-resource-host` into `~/bin`. Interactive memory setup can show its
+complete read-only plan with maintenance, then apply only after a separate yes to
+the sudo question. Declining or a failed preview leaves system protection unapplied;
+an accepted apply failure returns an error while retaining the saved user options.
+Setup never removes conflicting configuration or unmasks units to recover.
+You can also review the plan and explicitly apply the same options as root:
 
 ```bash
 /usr/bin/python3 -I "$HOME/bin/codex-resource-host" plan --uid "$(id -u)"
@@ -780,10 +807,12 @@ CODEXFARM_RESOURCE_PROTECTION=1 codex-add -d /path/to/project
 ```
 
 Batch admission is advisory unless `--memory-policy queue` is explicit or private
-settings enable `queue_background`. Queueing starts when available RAM is at most
+settings enable `queue_background`, including a yes to the setup memory question.
+With default settings, queueing starts when available RAM is at most
 1024 MiB or memory stalls reach 25%. After waiting, admission needs at least
 1536 MiB and stalls below 10% continuously for 30 seconds. Unknown counters and
-hosts too small for the thresholds stay advisory. A queue timeout exits 124
+hosts too small for the thresholds stay advisory. The default queue timeout is
+five minutes and exits 124
 without starting the payload; `--memory-policy ignore` manually bypasses both
 headroom and temporary recipe deferrals. These checks never stop running work.
 
@@ -876,6 +905,7 @@ Tuning and controls:
 - **`codex-memoryflag [threshold]`** - Flag high-memory tmux windows; default threshold is 200 MiB
 - **`codex-job run [options] -- argv ...`** - Run declared jobs with optional scopes, batch admission and explicit restart consent
 - **`codex-resource configure|status|report|investigate`** - Configure independent opt-ins and inspect bounded incident diagnosis
+- **`setup.sh --with-memory-protection|--without-memory-protection`** - Enable user memory options or skip the choice; interactive host apply requires separate consent
 - **`codex-resource-host plan|apply|maintain|remove`** - Review and explicitly install standalone host memory/OOM preferences
 - **`codex-health`** - Check RAM pressure, the monitor heartbeat and opted-in archive health
 - **`codex-backup [--archive]`** - Save exact farm identities; full conversation archives require `--archive`
@@ -898,6 +928,7 @@ Claude and Gemini equivalents use the same tmux workflow and accept the same fla
 
 Common:
 - **`CODEXFARM_RESOURCE_PROTECTION`** - Set to `1` to opt into optional agent scopes for add scripts and Looper (default off)
+- Setup's memory flags persist `protect_agents` and `queue_background`; no environment variable grants consent to its privileged host step. Existing independent AI options and numeric thresholds are preserved.
 - **`CODEX_SESSION`** - tmux session name (default: `codexfarm`)
 - **`CODEX_NAME`** - window name (default: directory basename)
 - **`CODEX_CMD`** - command to run (default: `codex`)
