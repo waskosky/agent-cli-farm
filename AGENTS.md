@@ -48,8 +48,9 @@ not expose a structured status channel through tmux.
 
 ## Resource and background-service policy
 
-- Normal setup and operation must not install privileged host guards, replace
-  ordinary tools, or impose global CPU, RAM, swap, task, or time ceilings.
+- Normal setup and operation must not implicitly install privileged host guards,
+  replace ordinary tools, or impose global CPU, RAM, swap, task, or time ceilings.
+  Setup may offer the explicitly and separately consented host memory step below.
 - Any explicitly requested resource enforcement must apply only to the requested
   job, with the proposed settings shown to the user before activation.
 - Restore memory checks are advisory by default, with two-second launch spacing.
@@ -109,9 +110,24 @@ not expose a structured status channel through tmux.
 - `bin/codex-resource-host` is standalone Python 3.10+ stdlib administrative code.
   It must never import the user-writable farm package, execute recipes/providers,
   select processes by name, move sessions, or restart workloads.
-- Setup copies the helper only. `plan --uid UID` is read-only; only explicit root
+- Setup copies the helper and offers an informed default-no memory choice only
+  with both stdin/stdout TTYs. Enable only `protect_agents` and `queue_background`
+  via validated settings, preserving numeric thresholds and independent AI options.
+  Enter/no/EOF and `--without-memory-protection` preserve every existing setting.
+  Default unattended setup must not read/write settings, prompt or call host tools.
+  `--with-memory-protection` explicitly enables user settings; unattended runs
+  print manual commands only. Reject conflicting flags before installation writes.
+- `plan --uid UID` is read-only; only explicit root
   `apply --uid UID` installs the root-owned helper/config and dedicated drop-ins.
   `--with-maintenance` explicitly adds its own 30-second root timer.
+- After user enable, supported interactive Linux/non-root setup may run the
+  installed neighbor helper's complete plan using fixed `/usr/bin/python3 -I`,
+  actual positive UID and `--with-maintenance`. Explain ancestor preferences,
+  other users' named farm-unit drop-ins and reclaim costs, then ask a separate
+  default-no question before the exact sudo apply. Never invoke sudo on a failed
+  preview, unsupported host, root account, unattended run, no or EOF. Accepted
+  apply failures return nonzero with saved user settings; never remove differing
+  config, reinstall or unmask to recover. Root paths/interpreter stay fixed.
 - Preserve stronger/unknown MemoryLow values. The 1 GiB shared hierarchy protects
   used memory, never reserves free RAM, and gives no OOM immunity. Interactive
   CPU/IO weights are 200 versus batch 25; never introduce ceilings here.

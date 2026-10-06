@@ -1,11 +1,14 @@
 import json
 import os
+import pty
+import select
 import shlex
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -83,6 +86,224 @@ class SetupScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--with-deep-history", result.stdout)
         self.assertIn("--without-session-hook", result.stdout)
+
+    def real_setup_python(self):
+        (self.bin_dir / "python3").unlink()
+        (self.bin_dir / "python3").symlink_to(sys.executable)
+        # An incompatible env-shebang candidate must not override setup's selection.
+        self.env["CODEXFARM_PYTHON_BIN"] = sys.executable
+
+    def test_memory_protection_flags_and_unattended_help(self):
+        result = self.run_setup("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for phrase in (
+            "--with-memory-protection",
+            "--without-memory-protection",
+            "unattended",
+            "preserve",
+            "sudo",
+        ):
+            self.assertIn(phrase, result.stdout)
+        self.assertFalse((Path(self.env["HOME"]) / "bin").exists())
+
+    def test_conflicting_memory_flags_reject_before_installation_writes(self):
+        for flags in (
+            ("--with-memory-protection", "--without-memory-protection"),
+            ("--without-memory-protection", "--with-memory-protection"),
+        ):
+            with self.subTest(flags=flags):
+                result = self.run_setup(*flags)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("conflict", result.stderr.lower())
+                self.assertFalse((Path(self.env["HOME"]) / "bin").exists())
+                self.assertFalse(Path(self.env["XDG_STATE_HOME"]).exists())
+
+    def test_unattended_memory_choices_preserve_settings_and_never_call_sudo(self):
+        self.real_setup_python()
+        config = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm"
+        config.mkdir(parents=True, mode=0o700)
+        settings = config / "resource-settings.json"
+        # Default/skip must not even validate or repair an existing settings file.
+        settings.write_bytes(b"existing settings left untouched\n")
+        settings.chmod(0o600)
+        make_executable(
+            self.bin_dir / "sudo", f'#!/bin/bash\necho called >> "{self.pkg_log}"\nexit 98\n'
+        )
+        for flags in ((), ("--without-memory-protection",)):
+            with self.subTest(flags=flags):
+                result = self.run_setup("--without-session-hook", *flags)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(settings.read_bytes(), b"existing settings left untouched\n")
+                self.assertNotIn("Enable gentle memory protection", result.stdout)
+                self.assertNotIn("Apply these system preferences", result.stdout)
+                self.assertFalse(self.pkg_log.exists())
+
+    def test_explicit_unattended_memory_enable_uses_selected_python_and_preserves_options(self):
+        self.real_setup_python()
+        # Keep PATH's python fake: the installed entry must use setup_python.
+        (self.bin_dir / "python3").unlink()
+        make_fake_python(self.bin_dir / "python3", 3, 9)
+        config = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm"
+        config.mkdir(parents=True, mode=0o700)
+        settings = config / "resource-settings.json"
+        original = {
+            "protect_agents": False,
+            "queue_background": False,
+            "investigator": "codex",
+            "automatic_actions": True,
+            "investigator_model": "custom-model",
+            "investigator_binary": "/private/codex",
+            "reserve_mib": 1100,
+            "recovery_mib": 1700,
+            "recovery_seconds": 12,
+            "queue_timeout": 42,
+        }
+        settings.write_text(json.dumps(original))
+        settings.chmod(0o600)
+        make_executable(
+            self.bin_dir / "sudo", f'#!/bin/bash\necho called >> "{self.pkg_log}"\nexit 98\n'
+        )
+        result = self.run_setup("--without-session-hook", "--with-memory-protection")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(settings.read_text()),
+            dict(original, protect_agents=True, queue_background=True),
+        )
+        self.assertFalse(self.pkg_log.exists())
+        self.assertIn("system protection not applied", result.stdout.lower())
+        self.assertIn("--with-maintenance", result.stdout)
+        self.assertNotIn("? [y/N]", result.stdout)
+        installed = Path(self.env["HOME"]) / "bin/codex-setup-memory.py"
+        self.assertEqual(
+            installed.read_bytes(), (REPO_ROOT / "bin/codex-setup-memory.py").read_bytes()
+        )
+        self.assertEqual(stat.S_IMODE(settings.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o700)
+
+    def test_sourced_memory_flag_preserves_shell_options_and_existing_functions(self):
+        self.real_setup_python()
+        script = f'''
+set +e +u
+set +o pipefail
+untouched_function() {{ :; }}
+. "{REPO_ROOT / "setup.sh"}" --without-session-hook --with-memory-protection
+setup_status=$?
+case "$-" in *e*|*u*) exit 41;; esac
+if set -o | grep -q '^pipefail[[:space:]]*on'; then exit 42; fi
+declare -F untouched_function >/dev/null || exit 43
+if declare -F codexfarm_setup_main >/dev/null; then exit 44; fi
+exit "$setup_status"
+'''
+        result = subprocess.run(
+            ["/bin/bash", "-c", script], env=self.env, text=True, capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        settings = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/resource-settings.json"
+        self.assertTrue(json.loads(settings.read_text())["protect_agents"])
+
+    def run_setup_pty(self, fixture, answers, *, sourced=False):
+        master, slave = pty.openpty()
+        command = ["/bin/bash", str(fixture / "setup.sh"), "--without-session-hook"]
+        if sourced:
+            source = '. "$1" --without-session-hook; result=$?;'
+            if sourced == "or-list":
+                source = 'result=0; . "$1" --without-session-hook || result=$?;'
+            command = [
+                "/bin/bash",
+                "-c",
+                "set +e +u; set +o pipefail; preserved_function() { :; }; "
+                + source
+                + " if declare -F codexfarm_setup_main >/dev/null; then exit 41; fi;"
+                + ' case "$-" in *e*|*u*) exit 42;; esac;'
+                + ' if set -o | grep -q "^pipefail[[:space:]]*on"; then exit 43; fi;'
+                + ' declare -F preserved_function >/dev/null || exit 44; exit "$result"',
+                "setup-test",
+                str(fixture / "setup.sh"),
+            ]
+        process = subprocess.Popen(
+            command, cwd=fixture, env=self.env, stdin=slave, stdout=slave, stderr=slave
+        )
+        os.close(slave)
+        output = bytearray()
+        deadline = time.monotonic() + 15
+        os.write(master, answers.encode())
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                elif process.poll() is not None:
+                    break
+            return process.wait(timeout=1), output.decode().replace("\r\n", "\n")
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            os.close(master)
+
+    @unittest.skipUnless(
+        os.getuid() > 0 and sys.platform == "linux", "host consent needs Linux non-root UID"
+    )
+    def test_real_pty_explains_choice_and_runs_only_private_preview_and_sudo_doubles(self):
+        self.real_setup_python()
+        fixture = self.tmpdir / "fixture"
+        fixture.mkdir()
+        shutil.copy2(REPO_ROOT / "setup.sh", fixture / "setup.sh")
+        shutil.copytree(REPO_ROOT / "codex_looper", fixture / "codex_looper")
+        (fixture / "bin").mkdir()
+        entry = REPO_ROOT / "bin/codex-setup-memory.py"
+        self.assertTrue(entry.exists(), "memory setup entry point is missing")
+        shutil.copy2(entry, fixture / "bin" / entry.name)
+        host_log = self.tmpdir / "host.log"
+        make_executable(
+            fixture / "bin/codex-resource-host",
+            f"""#!/usr/bin/python3
+import json,sys
+with open({str(host_log)!r}, 'a') as stream:
+    stream.write(json.dumps(sys.argv[1:]) + '\\n')
+print('COMPLETE PRIVATE PLAN: all targets')
+""",
+        )
+        sudo_log = self.tmpdir / "sudo.log"
+        make_executable(
+            self.bin_dir / "sudo",
+            f'''#!/bin/bash
+echo "$*" >> "{sudo_log}"
+exit 0
+''',
+        )
+        for sourced, sudo_status in ((False, 0), (True, 7), ("or-list", 7)):
+            with self.subTest(sourced=sourced, sudo_status=sudo_status):
+                make_executable(
+                    self.bin_dir / "sudo",
+                    f'#!/bin/bash\necho "$*" >> "{sudo_log}"\nexit {sudo_status}\n',
+                )
+                status, output = self.run_setup_pty(fixture, "yes\nyes\n", sourced=sourced)
+                self.assertEqual(status, 0 if sudo_status == 0 else 1, output)
+                self.assertLess(
+                    output.index("1 GiB"), output.index("Enable gentle memory protection")
+                )
+                self.assertLess(
+                    output.index("COMPLETE PRIVATE PLAN"),
+                    output.index("Apply these system preferences"),
+                )
+                self.assertEqual(
+                    json.loads(host_log.read_text().splitlines()[-1]),
+                    ["plan", "--uid", str(os.getuid()), "--with-maintenance"],
+                )
+                self.assertEqual(
+                    sudo_log.read_text().splitlines()[-1],
+                    f"/usr/bin/python3 -I {Path(self.env['HOME']) / 'bin/codex-resource-host'} apply --uid {os.getuid()} --with-maintenance",
+                )
+                settings = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/resource-settings.json"
+                self.assertTrue(json.loads(settings.read_text())["protect_agents"])
+                self.assertFalse((Path(self.env["HOME"]) / ".config/systemd").exists())
 
     def test_installs_session_hook_and_preserves_unrelated_user_hooks(self) -> None:
         (self.bin_dir / "python3").unlink()
