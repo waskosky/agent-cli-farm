@@ -2786,6 +2786,37 @@ esac
         )
         return first_id, second_id
 
+    def test_restore_without_arguments_uses_default_manifest(self):
+        default_manifest = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm" / "manifest.tsv"
+        default_manifest.parent.mkdir(parents=True)
+        default_manifest.write_bytes(self.manifest.read_bytes())
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore"],
+            env={**self.env, "CODEX_SESSION": "codexfarm"},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Restore complete from {default_manifest}", result.stdout)
+        self.assertEqual(
+            self.codex_add_log.read_text().splitlines(),
+            [
+                "proj|codex|-c check_for_update_on_startup=false "
+                f"resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4|-d {self.project_dir}"
+            ],
+        )
+
+    def test_force_restore_into_empty_farm_launches_without_removing_windows(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--force", str(self.manifest)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.codex_add_log.read_text().splitlines()), 1)
+        self.assertFalse(any(cmd[0] == "kill-window" for cmd in self.read_tmux_commands()))
+
     def test_codex_restore_launches_saved_codex_resume_command(self):
         original_manifest = self.manifest.read_bytes()
         subprocess.run(

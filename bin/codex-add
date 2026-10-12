@@ -804,7 +804,8 @@ codex_individual_server_supported() {
   [ "$PANE_PROVIDER" = codex ] || return 1
   # Inspect trusted shell fragments as data only. Preserve remote connections,
   # explicit choices, utility commands and custom shell invocations unchanged.
-  python3 - "$CMD" "$ARGS_ENV" "${tool_args[@]}" <<'PY'
+  # Bash 3.2 treats empty arrays as unset under nounset.
+  python3 - "$CMD" "$ARGS_ENV" ${tool_args[@]+"${tool_args[@]}"} <<'PY'
 import os
 import shlex
 import signal

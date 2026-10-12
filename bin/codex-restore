@@ -21,6 +21,7 @@ HEALTH_BIN="${CODEX_HEALTH_BIN:-$SCRIPT_DIR/codex-health}"
 memory_policy="${CODEXFARM_RESTORE_MEMORY_POLICY-warn}"
 MANIFEST_BIN="$SCRIPT_DIR/codex-manifest.py"
 PANE_IDENTITY_BIN="${CODEX_PANE_IDENTITY_BIN:-$SCRIPT_DIR/codex-save}"
+# Bash 3.2 with nounset requires guarded expansion of possibly empty arrays.
 original_args=("$@")
 
 usage() {
@@ -172,7 +173,7 @@ next_name_occurrence() {
 name_was_seen() {
   local wanted="$1"
   local value
-  for value in "${force_names[@]}"; do
+  for value in ${force_names[@]+"${force_names[@]}"}; do
     [ "$value" = "$wanted" ] && return 0
   done
   return 1
@@ -180,7 +181,7 @@ name_was_seen() {
 
 session_already_present() {
   local wanted="$1"$'\t'"$2" identity
-  for identity in "${existing_identities[@]}"; do
+  for identity in ${existing_identities[@]+"${existing_identities[@]}"}; do
     [ "$identity" = "$wanted" ] && return 0
   done
   return 1
@@ -188,7 +189,7 @@ session_already_present() {
 
 window_will_be_removed() {
   local wanted="$1" target
-  for target in "${force_targets[@]}"; do
+  for target in ${force_targets[@]+"${force_targets[@]}"}; do
     [ "$target" != "$wanted" ] || return 0
   done
   return 1
@@ -375,7 +376,7 @@ fi
 
 if [ "${CODEXFARM_LOCKED_MANIFEST:-}" != "$MANIFEST_PATH" ] \
   || [ "${CODEXFARM_LOCK_PARENT_PID:-}" != "$PPID" ]; then
-  if python3 "$MANIFEST_BIN" lock-run "$MANIFEST_PATH" "$0" "${original_args[@]}"; then
+  if python3 "$MANIFEST_BIN" lock-run "$MANIFEST_PATH" "$0" ${original_args[@]+"${original_args[@]}"}; then
     # The snapshot transaction ends before attaching to an interactive client.
     if [ "$attach" -eq 1 ]; then
       attach_to_session "$SESSION"
@@ -467,7 +468,7 @@ if [ "$force" -eq 1 ]; then
       fi
     done
   } < "$validated_manifest"
-  for existing_target in "${force_targets[@]}"; do
+  for existing_target in ${force_targets[@]+"${force_targets[@]}"}; do
     check_memory || exit 3
     if ! tmux kill-window -t "$existing_target"; then
       echo "Unable to remove existing window '$existing_target' during force restore." >&2
