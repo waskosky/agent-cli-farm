@@ -3,6 +3,28 @@
 # Agent CLI Farm Setup Script
 # Installs helper scripts for managing coding-agent instances in tmux.
 
+# Sourcing from zsh still runs the Bash implementation in Bash. Only the PATH
+# update belongs in the caller; keep installer options and functions isolated.
+if [ -n "${ZSH_VERSION:-}" ]; then
+  case "${ZSH_EVAL_CONTEXT:-}" in
+    *:file)
+      # zsh's source filename expansion; Bash never executes this branch.
+      # shellcheck disable=SC2296
+      if CODEXFARM_SETUP_SOURCED=1 command bash "${(%):-%x}" "$@"; then
+        case ":$PATH:" in
+          *:"$HOME/bin":*) ;;
+          *) export PATH="$HOME/bin:$PATH" ;;
+        esac
+        hash -r 2>/dev/null || true
+        return 0
+      else
+        return "$?"
+      fi
+      ;;
+    *) exec bash "$0" "$@" ;;
+  esac
+fi
+
 codexfarm_setup_main() (
   set -euo pipefail
 

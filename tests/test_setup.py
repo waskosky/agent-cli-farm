@@ -736,6 +736,65 @@ exit 98
         self.assertEqual(wrapper_result.returncode, 0, wrapper_result.stderr)
         self.assertIn("Tiny coding-agent looper", wrapper_result.stdout)
 
+    @unittest.skipUnless(shutil.which("zsh"), "zsh is unavailable")
+    def test_zsh_source_installs_and_preserves_caller_shell(self):
+        (self.bin_dir / "bash").symlink_to("/bin/bash")
+        self.env["SHELL"] = shutil.which("zsh")
+        outside = self.tmpdir / "outside with spaces"
+        outside.mkdir()
+        result = subprocess.run(
+            [
+                shutil.which("zsh"),
+                "-f",
+                "-c",
+                """
+before_flags="$-"
+have_command() { printf preserved; }
+source "$1" --without-session-hook --without-memory-protection || exit $?
+[[ "$-" = "$before_flags" ]] || exit 41
+[[ ! -o pipefail ]] || exit 42
+[[ "$(have_command)" = preserved ]] || exit 43
+(( ! $+functions[codexfarm_setup_main] )) || exit 44
+case ":$PATH:" in *:"$HOME/bin":*) ;; *) exit 45 ;; esac
+""",
+                "setup-test",
+                str(REPO_ROOT / "setup.sh"),
+            ],
+            cwd=outside,
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        installed = Path(self.env["HOME"]) / "bin/codex-save"
+        self.assertEqual(installed.read_bytes(), (REPO_ROOT / "bin/codex-save").read_bytes())
+
+    @unittest.skipUnless(shutil.which("zsh"), "zsh is unavailable")
+    def test_zsh_source_propagates_invalid_option_without_exiting_caller(self):
+        (self.bin_dir / "bash").symlink_to("/bin/bash")
+        result = subprocess.run(
+            [
+                shutil.which("zsh"),
+                "-f",
+                "-c",
+                """
+source "$1" --invalid-option
+setup_result=$?
+[[ "$setup_result" = 2 ]] || exit 41
+(( ! $+functions[codexfarm_setup_main] )) || exit 42
+printf 'caller survived\n'
+""",
+                "setup-test",
+                str(REPO_ROOT / "setup.sh"),
+            ],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("caller survived", result.stdout)
+        self.assertFalse((Path(self.env["HOME"]) / "bin").exists())
+
     def test_can_be_sourced_without_leaking_strict_shell_options(self) -> None:
         make_executable(self.bin_dir / "tmux", "#!/usr/bin/env bash\nexit 0\n")
         make_executable(self.bin_dir / "multitail", "#!/usr/bin/env bash\nexit 0\n")
