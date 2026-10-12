@@ -166,18 +166,23 @@ codex_process_command() {
   local no_daemon=0 remote=0 all=0
   local argv=()
   if [ -r "$proc_root/$pid/cmdline" ]; then
-    mapfile -d '' -t argv < "$proc_root/$pid/cmdline"
+    while IFS= read -r -d '' argument; do
+      argv+=("$argument")
+    done < "$proc_root/$pid/cmdline"
   else
     read -r -a argv <<< "$(ps -p "$pid" -o args= 2>/dev/null || true)"
   fi
   [ "${#argv[@]}" -gt 0 ] || return 1
   executable="${argv[0]##*/}"
-  case "${executable,,}" in
+  case "$(printf '%s' "$executable" | tr '[:upper:]' '[:lower:]')" in
     codex|codex.exe|codex.js) ;;
     bash|sh|dash|zsh|node|nodejs)
       executable="${argv[1]:-}"
       executable="${executable##*/}"
-      case "${executable,,}" in codex|codex.exe|codex.js) index=2 ;; *) return 1 ;; esac
+      case "$(printf '%s' "$executable" | tr '[:upper:]' '[:lower:]')" in
+        codex|codex.exe|codex.js) index=2 ;;
+        *) return 1 ;;
+      esac
       ;;
     *) return 1 ;;
   esac
@@ -228,6 +233,9 @@ descendant_pids() {
   local root="$1"
   local provider="${2:-}"
   local pid child
+  local pgrep_options=()
+  # macOS otherwise hides ancestors, including this pane when an agent saves it.
+  case "${OSTYPE:-}" in darwin*) pgrep_options+=(-a) ;; esac
   if [ "$provider" = codex ] && codex_app_server_pid "$root"; then return 0; fi
   printf '%s\n' "$root" 2>/dev/null || return 0
 
@@ -246,7 +254,7 @@ descendant_pids() {
       # discovery must not eagerly walk every test/build descendant first.
       printf '%s\n' "$child" 2>/dev/null || return 0
       queue+=("$child")
-    done < <(pgrep -P "$pid" 2>/dev/null || true)
+    done < <(pgrep -P "$pid" ${pgrep_options[@]+"${pgrep_options[@]}"} 2>/dev/null || true)
   done
 }
 
@@ -314,7 +322,7 @@ session_id_from_process_files() {
   done < <(descendant_pids "${provider_pid:-$pane_pid}" "$tool")
 
   local candidates=""
-  for pid in "${pids[@]}"; do
+  for pid in ${pids[@]+"${pids[@]}"}; do
     if session_id="$(session_id_from_procfs "$tool" "$pid")"; then
       :
     else
@@ -327,7 +335,7 @@ session_id_from_process_files() {
   done
 
   if [ -z "$candidates" ] && command -v lsof >/dev/null 2>&1; then
-    for pid in "${pids[@]}"; do
+    for pid in ${pids[@]+"${pids[@]}"}; do
       [ -z "$pid" ] && continue
       while IFS= read -r line; do
         case "$line" in
@@ -375,7 +383,7 @@ tool_from_process_argv() {
   local token base
   local tokens=()
   read -r -a tokens <<< "$1"
-  for token in "${tokens[@]}"; do
+  for token in ${tokens[@]+"${tokens[@]}"}; do
     token="${token#\"}"
     token="${token%\"}"
     token="${token#\'}"
@@ -670,7 +678,8 @@ MANIFEST_PATH="${args_pos[0]:-$(default_manifest_path_for_session "$SESSION")}"
 
 if [ "${CODEXFARM_LOCKED_MANIFEST:-}" != "$MANIFEST_PATH" ] \
   || [ "${CODEXFARM_LOCK_PARENT_PID:-}" != "$PPID" ]; then
-  exec python3 "$MANIFEST_BIN" lock-run "$MANIFEST_PATH" "$0" "${original_args[@]}"
+  # Bash 3.2 treats empty arrays as unset under nounset; keep zero arguments empty.
+  exec python3 "$MANIFEST_BIN" lock-run "$MANIFEST_PATH" "$0" ${original_args[@]+"${original_args[@]}"}
 fi
 export CODEXFARM_LOCK_SCRIPT_PID=$$
 
@@ -750,7 +759,7 @@ while IFS=$'\n' read -r idx; do
       shared_panes+=("$pane_target")
       shared_pane_endpoints+=("$shared_endpoint")
       already_captured=0
-      for captured_endpoint in "${shared_endpoints[@]}"; do
+      for captured_endpoint in ${shared_endpoints[@]+"${shared_endpoints[@]}"}; do
         [ "$captured_endpoint" != "$shared_endpoint" ] || already_captured=1
       done
       if [ "$already_captured" -eq 0 ]; then
@@ -760,7 +769,7 @@ while IFS=$'\n' read -r idx; do
         while IFS=$'\t' read -r shared_name shared_dir shared_cmd shared_args; do
           identity="$shared_cmd"$'\t'"${shared_args#resume }"
           duplicate=0
-          for saved_identity in "${saved_identities[@]}"; do
+          for saved_identity in ${saved_identities[@]+"${saved_identities[@]}"}; do
             [ "$saved_identity" != "$identity" ] || duplicate=1
           done
           [ "$duplicate" -eq 0 ] || continue
@@ -785,7 +794,7 @@ while IFS=$'\n' read -r idx; do
           args="$(exact_resume_args "$tool" "$session_id")"
           identity="$tool"$'\t'"$session_id"
           duplicate=0
-          for saved_identity in "${saved_identities[@]}"; do
+          for saved_identity in ${saved_identities[@]+"${saved_identities[@]}"}; do
             [ "$saved_identity" != "$identity" ] || duplicate=1
           done
           if [ "$duplicate" -eq 1 ]; then first_pane=0; continue; fi
@@ -854,7 +863,7 @@ for index in "${!shared_panes[@]}"; do
     exit 1
   fi
 done
-for shared_endpoint in "${shared_endpoints[@]}"; do
+for shared_endpoint in ${shared_endpoints[@]+"${shared_endpoints[@]}"}; do
   "$SHARED_META_BIN" verify "$shared_endpoint" "$tmpfile" || exit 1
 done
-python3 "$MANIFEST_BIN" publish "$tmpfile" "$MANIFEST_PATH" "${publish_args[@]}"
+python3 "$MANIFEST_BIN" publish "$tmpfile" "$MANIFEST_PATH" ${publish_args[@]+"${publish_args[@]}"}

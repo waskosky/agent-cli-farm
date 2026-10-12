@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -28,21 +29,103 @@ UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 MAX_MESSAGE = 4 * 1024 * 1024
 
 
+def macos_process_argv(pid: int) -> list[str]:
+    # KERN_PROCARGS2 supplies exact NUL-delimited argv, avoiding ps word splitting.
+    mib = (ctypes.c_int * 3)(1, 49, pid)
+    buffer = ctypes.create_string_buffer(1024 * 1024)
+    size = ctypes.c_size_t(len(buffer))
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+        raise OSError(ctypes.get_errno(), "process arguments unavailable")
+    data = buffer.raw[: size.value]
+    argc = struct.unpack_from("i", data)[0]
+    if not 0 < argc < 65536:
+        raise ValueError("invalid process argument count")
+    offset = data.index(b"\0", 4) + 1
+    while offset < len(data) and data[offset] == 0:
+        offset += 1
+    return [part.decode() for part in data[offset:].split(b"\0", argc)[:argc]]
+
+
 def server_process(pid: int) -> bool:
     proc = Path(os.environ.get("CODEX_PROC_ROOT", "/proc")) / str(pid)
     try:
-        if proc.stat().st_uid != os.getuid():
-            return False
-        argv = [value.decode() for value in (proc / "cmdline").read_bytes().split(b"\0") if value]
-    except (OSError, UnicodeDecodeError):
+        if sys.platform == "darwin":
+            owner = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "uid="],
+                text=True,
+                capture_output=True,
+                timeout=2,
+                check=False,
+            )
+            if owner.returncode or owner.stdout.strip() != str(os.getuid()):
+                return False
+            argv = macos_process_argv(pid)
+        else:
+            if proc.stat().st_uid != os.getuid():
+                return False
+            argv = [
+                value.decode() for value in (proc / "cmdline").read_bytes().split(b"\0") if value
+            ]
+    except (OSError, ValueError, struct.error, subprocess.SubprocessError):
         return False
     hook = runpy.run_path(str(SCRIPT_DIR / "codex-session-hook.py"))
     arguments = hook["codex_arguments"](["codex", *argv])
     return arguments is not None and hook["is_codex_app_server"](arguments)
 
 
+def macos_shared_endpoint(pid: int) -> str:
+    result = subprocess.run(
+        ["lsof", "-n", "-P", "-a", "-u", str(os.getuid()), "-U", "-F", "pfudn"],
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode or len(result.stdout) > MAX_MESSAGE:
+        raise ValueError("local socket ownership could not be inspected")
+    records = []
+    owner = uid = None
+    record = None
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        field, value = line[0], line[1:]
+        if field in {"p", "f"} and record is not None:
+            records.append(record)
+            record = None
+        if field == "p":
+            owner, uid = int(value), None
+        elif field == "u":
+            uid = int(value)
+        elif field == "f":
+            record = {"pid": owner, "uid": uid}
+        elif record is not None:
+            record[field] = value
+    if record is not None:
+        records.append(record)
+    peers = {
+        row["n"][2:]
+        for row in records
+        if row["pid"] == pid and row["uid"] == os.getuid() and row.get("n", "").startswith("->0x")
+    }
+    endpoints = {
+        row["n"]
+        for row in records
+        if row.get("d") in peers
+        and row["uid"] == os.getuid()
+        and row.get("n", "").startswith("/")
+        and server_process(row["pid"])
+    }
+    if len(endpoints) != 1:
+        raise ValueError("pane has no unique verified local shared-server connection")
+    return endpoints.pop()
+
+
 def shared_endpoint(pid: int) -> str:
     """Match reciprocal kernel socket peers, not inherited argv, cwd or metadata."""
+    if sys.platform == "darwin":
+        return macos_shared_endpoint(pid)
     result = subprocess.run(["ss", "-xnpH"], capture_output=True, text=True, check=False, timeout=5)
     if result.returncode:
         raise ValueError("local socket ownership could not be inspected")
@@ -82,8 +165,15 @@ class Client:
             if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
                 raise ValueError("server socket is not owned by the current user")
             self.socket.connect(endpoint)
-            peer = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-            pid, uid, _gid = struct.unpack("3i", peer)
+            if sys.platform == "darwin":
+                # SOL_LOCAL / LOCAL_PEERPID and LOCAL_PEERCRED (struct xucred).
+                pid = self.socket.getsockopt(0, 2)
+                version, uid = struct.unpack_from("II", self.socket.getsockopt(0, 1, 76))
+                if version != 0:
+                    raise ValueError("unsupported socket peer credentials")
+            else:
+                peer = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+                pid, uid, _gid = struct.unpack("3i", peer)
             if uid != os.getuid() or not server_process(pid):
                 raise ValueError("socket peer is not a local Codex app server")
             key = base64.b64encode(os.urandom(16)).decode()

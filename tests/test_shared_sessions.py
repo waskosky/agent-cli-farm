@@ -44,6 +44,10 @@ class FakeSocket:
         pass
 
     def getsockopt(self, *_args):
+        if _args[:2] == (0, 2):
+            return os.getpid()
+        if _args[:2] == (0, 1):
+            return struct.pack("II", 0, self.peer_uid) + bytes(68)
         return struct.pack("3i", os.getpid(), self.peer_uid, os.getgid())
 
     def recv(self, count):
@@ -193,6 +197,7 @@ class SharedSessionsTests(unittest.TestCase):
         )
         result = subprocess.CompletedProcess([], 0, lines, "")
         with (
+            patch.object(shared.sys, "platform", "linux"),
             patch.dict(os.environ, {"CODEX_PROC_ROOT": str(proc.parent)}),
             patch.object(shared.subprocess, "run", return_value=result),
         ):
@@ -200,3 +205,53 @@ class SharedSessionsTests(unittest.TestCase):
             (proc / "cmdline").write_bytes(b"/usr/bin/codex\0resume\0")
             with self.assertRaisesRegex(ValueError, "no unique verified"):
                 shared.shared_endpoint(101)
+
+    def test_macos_endpoint_matches_client_peer_to_owned_server_descriptor(self):
+        lines = (
+            f"p101\nu{os.getuid()}\nf37\nd0x111\nn->0x222\n"
+            f"p202\nu{os.getuid()}\nf40\nd0x222\nn{self.path}\n"
+        )
+        with (
+            patch.object(shared.sys, "platform", "darwin"),
+            patch.object(shared.subprocess, "run") as run,
+        ):
+            run.return_value = subprocess.CompletedProcess([], 0, lines, "")
+            self.assertEqual(shared.shared_endpoint(101), str(self.path))
+            run.return_value.stdout = lines.replace("d0x222", "d0x333")
+            with self.assertRaisesRegex(ValueError, "no unique verified"):
+                shared.shared_endpoint(101)
+
+    def test_macos_endpoint_rejects_other_user_server(self):
+        lines = (
+            f"p101\nu{os.getuid()}\nf37\nd0x111\nn->0x222\n"
+            f"p202\nu{os.getuid() + 1}\nf40\nd0x222\nn{self.path}\n"
+        )
+        with (
+            patch.object(shared.sys, "platform", "darwin"),
+            patch.object(
+                shared.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, lines, "")
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "no unique verified"):
+                shared.shared_endpoint(101)
+
+    def test_macos_server_requires_owned_process_and_actual_subcommand(self):
+        self.patches[1].stop()
+        with (
+            patch.object(shared.sys, "platform", "darwin"),
+            patch.object(shared, "macos_process_argv") as argv,
+            patch.object(shared.subprocess, "run") as run,
+        ):
+            run.return_value = subprocess.CompletedProcess([], 0, str(os.getuid()), "")
+            for arguments, expected in (
+                (["/usr/bin/codex", "app-server", "--managed-daemon"], True),
+                (["/usr/bin/codex", "--profile", "has spaces", "app-server"], True),
+                (["/usr/bin/codex", "--profile", "app-server", "resume"], False),
+                (["/usr/bin/python3", "helper.py", "codex", "app-server"], False),
+            ):
+                with self.subTest(arguments=arguments):
+                    argv.return_value = arguments
+                    self.assertEqual(shared.server_process(202), expected)
+            argv.return_value = ["/usr/bin/codex", "app-server"]
+            run.return_value.stdout = str(os.getuid() + 1)
+            self.assertFalse(shared.server_process(202))

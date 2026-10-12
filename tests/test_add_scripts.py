@@ -1601,6 +1601,8 @@ exit 0
 class SaveScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="save-script-test-"))
+        # Exercise the system Bash (3.2 on macOS), including the lock-run child.
+        (self.tmpdir / "bash").symlink_to("/bin/bash")
         self.manifest = self.tmpdir / "manifest.tsv"
         self.hook_session_id = "123e4567-e89b-42d3-a456-426614174000"
         self.second_codex_session_id = "123e4567-e89b-42d3-a456-426614174001"
@@ -1912,8 +1914,63 @@ esac
         self.env["PATH"] = f"{self.tmpdir}:{self.env.get('PATH', '')}"
         self.env["HOME"] = str(self.tmpdir)
         self.env["XDG_CONFIG_HOME"] = str(self.tmpdir / "config")
+        self.env["CODEX_HOME"] = str(self.tmpdir / ".codex")
+        self.env["CODEX_PROC_ROOT"] = str(self.tmpdir / "proc")
+
+    def test_save_without_arguments_works_with_system_bash(self):
+        env = {
+            **self.env,
+            "CODEX_SESSION": "codexfarm",
+            "CODEX_HOME": str(self.tmpdir / ".codex"),
+            "CODEX_PROC_ROOT": str(self.tmpdir / "proc"),
+        }
+        manifest = Path(env["XDG_CONFIG_HOME"]) / "codexfarm/manifest.tsv"
+        for script in ("codex-save", "claude-save", "gemini-save"):
+            with self.subTest(script=script):
+                result = subprocess.run(
+                    [REPO_ROOT / "bin" / script],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=60,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(
+                    manifest.read_text(),
+                    "name\tdir\tcmd\targs\n"
+                    "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4\n"
+                    "claude-proj\t/tmp/claude-project\tclaude\t--resume 54f5b65c-a31c-4aa1-b91b-896b35e2a759\n"
+                    "gemini-proj\t/tmp/gemini-project\tgemini\t--resume 27bd36d0-2977-4cce-9d5d-33764d915f1d\n",
+                )
+
+    def test_save_preserves_literal_manifest_path_through_lock_with_system_bash(self):
+        manifest = self.tmpdir / "snapshot with spaces; $literal.tsv"
+        previous = (
+            "name\tdir\tcmd\targs\n"
+            "closed\t/tmp/closed\tcodex\tresume 123e4567-e89b-42d3-a456-426614174009\n"
+        )
+        manifest.write_text(previous)
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-save", "--merge", "--", str(manifest)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("closed\t/tmp/closed\tcodex\tresume ", manifest.read_text())
+        self.assertIn("proj\t/tmp/project\tcodex\tresume ", manifest.read_text())
+        self.assertTrue(
+            any(
+                path.read_text() == previous
+                for path in Path(str(manifest) + ".history").glob("*.tsv")
+            )
+        )
 
     def test_codex_save_records_exact_codex_resume_session_id(self):
+        self.manifest = self.tmpdir / "manifest with spaces.tsv"
         subprocess.run(
             [REPO_ROOT / "bin" / "codex-save", str(self.manifest)],
             check=True,
@@ -2394,23 +2451,29 @@ esac
         self.assertEqual(result.returncode, 2)
         self.assertIn("Unexpected argument", result.stderr)
 
-    def test_codex_save_named_session_uses_named_manifest_by_default(self):
-        env = self.env.copy()
-        env["CODEX_SESSION"] = "work"
+    def test_codex_save_without_arguments_uses_default_manifest(self):
+        for session, relative_path in (
+            ("codexfarm", "manifest.tsv"),
+            ("work", "manifests/work.tsv"),
+        ):
+            with self.subTest(session=session):
+                env = {**self.env, "CODEX_SESSION": session}
+                result = subprocess.run(
+                    [REPO_ROOT / "bin" / "codex-save"],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
 
-        subprocess.run(
-            [REPO_ROOT / "bin" / "codex-save"],
-            check=True,
-            env=env,
-        )
-
-        manifest = Path(env["XDG_CONFIG_HOME"]) / "codexfarm" / "manifests" / "work.tsv"
-        rows = manifest.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(rows[0], "name\tdir\tcmd\targs")
-        self.assertIn(
-            "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
-            rows,
-        )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                manifest = Path(env["XDG_CONFIG_HOME"]) / "codexfarm" / relative_path
+                rows = manifest.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(rows[0], "name\tdir\tcmd\targs")
+                self.assertIn(
+                    "proj\t/tmp/project\tcodex\tresume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4",
+                    rows,
+                )
 
     def test_codex_save_trims_remain_on_exit_wrapper(self):
         env = self.env.copy()
