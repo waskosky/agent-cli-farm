@@ -485,7 +485,7 @@ precheck_autoservice_masks() {
 install_autoservice_units() {
   precheck_autoservice_masks || return 1
   local backup_choice="$conversation_backup_flag"
-  local save_command="$SAVE_BIN --all-registered"
+  local save_command="$SAVE_BIN --all-registered --best-effort"
   if [ -z "$backup_choice" ] && [ -f "$CONVERSATION_BACKUP_CHOICE_FILE" ]; then
     backup_choice=$(cat "$CONVERSATION_BACKUP_CHOICE_FILE") || return 1
   fi
@@ -505,6 +505,7 @@ Type=oneshot
 Environment=XDG_CONFIG_HOME=$CONFIG_HOME
 Environment=XDG_STATE_HOME=${XDG_STATE_HOME:-$HOME/.local/state}
 Environment=CODEX_HOME=${CODEX_HOME:-$HOME/.codex}
+Environment=CODEXFARM_MANIFEST_HISTORY_KEEP=${CODEXFARM_MANIFEST_HISTORY_KEEP:-}
 Environment="PATH=$PATH"
 ExecStart=$save_command
 UMask=0077
@@ -532,12 +533,19 @@ EOF
   cat > "$SYSTEMD_DIR/codex-autorestore.service" <<EOF || return 1
 [Unit]
 Description=Codex autorestore tmux session on login
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
 Environment=XDG_CONFIG_HOME=$CONFIG_HOME
 Environment="PATH=$PATH"
-ExecStart=$RESTORE_BIN --all-registered
+ExecStart=$RESTORE_BIN --all-registered --skip-active
+Restart=on-failure
+RestartSec=15
+# The launcher intentionally leaves a detached user tmux server running, even
+# when another registered farm could not be restored.
+KillMode=process
 
 [Install]
 WantedBy=default.target

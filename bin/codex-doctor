@@ -12,7 +12,7 @@ Repair the installed helpers, session hooks, restore manifest and background hea
 Repairs retain previous saved conversations, snapshot history and replaced helper files.
 Exact provider session IDs are counted but never printed.
 Audit every live pane for verified conversation coverage in that manifest.
-Also check opted-in archive freshness, the memory monitor heartbeat and host RAM pressure.
+Also check opted-in archive freshness, thermal protection, monitor heartbeats and host RAM pressure.
 EOF
 }
 
@@ -91,12 +91,16 @@ check_installed_helpers() {
     "$source_dir"/bin/claude-* \
     "$source_dir"/bin/gemini-* \
     "$source_dir"/bin/add_high_memory_warning.sh \
-    "$source_dir"/codex_looper/*.py
+    "$source_dir"/codex_looper/*.py \
+    "$source_dir"/tools/thermal-windows/*.ps1
   do
     [ -f "$source_file" ] || continue
     case "$source_file" in
       "$source_dir"/codex_looper/*)
         relative="codex_looper/${source_file##*/}"
+        ;;
+      "$source_dir"/tools/thermal-windows/*)
+        relative="codexfarm-thermal-windows/${source_file##*/}"
         ;;
       *)
         relative="${source_file##*/}"
@@ -105,7 +109,7 @@ check_installed_helpers() {
     installed_file="$INSTALL_DIR/$relative"
     checked=$((checked + 1))
     if [ ! -f "$installed_file" ] || ! cmp -s "$source_file" "$installed_file" \
-      || { [[ "$relative" != codex_looper/* ]] && [ ! -x "$installed_file" ]; }; then
+      || { [[ "$relative" != codex_looper/* && "$relative" != codexfarm-thermal-windows/* ]] && [ ! -x "$installed_file" ]; }; then
       mismatched=$((mismatched + 1))
       mismatch_names="${mismatch_names}${mismatch_names:+, }$relative"
     fi
@@ -132,10 +136,16 @@ check_manifest() {
     return
   fi
 
-  modified="$(stat -c '%Y' "$manifest" 2>/dev/null || stat -f '%m' "$manifest" 2>/dev/null || true)"
-  now="$(date +%s)"
-  if [[ "$modified" =~ ^[0-9]+$ ]] && [ "$((now - modified))" -gt 86400 ]; then
-    warning "manifest is older than 24 hours; verify autosave before relying on it"
+  if [ -f "$manifest.capture.json" ]; then
+    if ! python3 "$SCRIPT_DIR/codex-manifest.py" capture-check "$manifest"; then
+      warning "manifest capture freshness or complete pane coverage needs attention"
+    fi
+  else
+    modified="$(stat -c '%Y' "$manifest" 2>/dev/null || stat -f '%m' "$manifest" 2>/dev/null || true)"
+    now="$(date +%s)"
+    if [[ "$modified" =~ ^[0-9]+$ ]] && [ "$((now - modified))" -gt 86400 ]; then
+      warning "manifest is older than 24 hours; verify autosave before relying on it"
+    fi
   fi
 
   IFS= read -r header < "$manifest" || header=""

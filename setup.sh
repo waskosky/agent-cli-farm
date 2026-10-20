@@ -32,6 +32,8 @@ codexfarm_setup_main() (
   local install_session_hook=1
   local with_memory_protection=0
   local without_memory_protection=0
+  local with_thermal_protection=0 without_thermal_protection=0
+  local with_windows_cooling=0 without_windows_cooling=0
   local setup_python=""
   while (( "$#" )); do
     case "${1:-}" in
@@ -47,10 +49,16 @@ codexfarm_setup_main() (
       --without-memory-protection)
         without_memory_protection=1
         ;;
+      --with-thermal-protection) with_thermal_protection=1 ;;
+      --without-thermal-protection) without_thermal_protection=1 ;;
+      --with-windows-cooling) with_windows_cooling=1 ;;
+      --without-windows-cooling) without_windows_cooling=1 ;;
       -h|--help)
         cat <<'EOF'
 Usage: setup.sh [--with-deep-history] [--without-session-hook]
                 [--with-memory-protection | --without-memory-protection]
+                [--with-thermal-protection | --without-thermal-protection]
+                [--with-windows-cooling | --without-windows-cooling]
 
 Install Agent CLI Farm helpers and provider session-identity hooks. The
 --with-deep-history flag also installs the checksum-pinned history backend.
@@ -61,6 +69,14 @@ Default unattended setup and --without-memory-protection preserve all memory
 settings. --with-memory-protection enables agent protection and batch queueing;
 unattended runs only print manual host commands and never run sudo. AI options
 and existing numeric thresholds are preserved.
+On interactive Windows/WSL2 installs, offer CPU sensors and managed batch thermal
+protection. --with-thermal-protection selects this step; signed hardware-driver
+installation needs Windows administrator approval. Whole-machine cooling is a
+separate choice: --with-windows-cooling consents to an 80% maximum processor
+performance profile with boost disabled on AC and battery for ALL Windows/WSL
+work. Your original power plan is preserved. --without-* preserves existing
+safeguards. Unattended thermal/cooling runs print manual commands only; default
+unattended setup never calls Windows, changes power plans, or reads these settings.
 EOF
         exit 0
         ;;
@@ -75,6 +91,11 @@ EOF
     echo "Conflicting setup options: --with-memory-protection and --without-memory-protection" >&2
     exit 2
   fi
+  if { [ "$with_thermal_protection" -eq 1 ] && [ "$without_thermal_protection" -eq 1 ]; } \
+    || { [ "$with_windows_cooling" -eq 1 ] && [ "$without_windows_cooling" -eq 1 ]; }; then
+    echo "Conflicting setup options: choose only one --with/--without option per thermal or cooling feature" >&2
+    exit 2
+  fi
   case "${CODEXFARM_WITH_DEEP_HISTORY:-}" in
     1|true|TRUE|True|yes|YES|Yes|on|ON|On) install_deep_history=1 ;;
   esac
@@ -86,6 +107,17 @@ EOF
 
   have_command() {
     command -v "$1" >/dev/null 2>&1
+  }
+
+  install_file() {
+    local source="$1" destination="$2" mode="$3" temporary
+    temporary=$(mktemp "$(dirname "$destination")/.codexfarm-install.XXXXXX") || return 1
+    if cp -f "$source" "$temporary" && chmod "$mode" "$temporary" \
+      && mv -f "$temporary" "$destination"; then
+      return 0
+    fi
+    rm -f "$temporary"
+    return 1
   }
 
   have_executable() {
@@ -281,15 +313,23 @@ EOF
         continue
         ;;
     esac
-    cp -f "$f" "$HOME/bin/$base"
-    chmod +x "$HOME/bin/$base"
+    install_file "$f" "$HOME/bin/$base" 755
     copied+=("$base")
   done
 
   if [ -d "$script_dir/codex_looper" ]; then
     mkdir -p "$HOME/bin/codex_looper"
-    cp -f "$script_dir"/codex_looper/*.py "$HOME/bin/codex_looper/"
+    for f in "$script_dir"/codex_looper/*.py; do
+      install_file "$f" "$HOME/bin/codex_looper/${f##*/}" 644
+    done
     copied+=("codex_looper/")
+  fi
+  if [ -d "$script_dir/tools/thermal-windows" ]; then
+    mkdir -p "$HOME/bin/codexfarm-thermal-windows"
+    for f in "$script_dir"/tools/thermal-windows/*.ps1; do
+      install_file "$f" "$HOME/bin/codexfarm-thermal-windows/${f##*/}" 644
+    done
+    copied+=("codexfarm-thermal-windows/")
   fi
 
   # Remember the checkout used for this install so codex-doctor can detect
@@ -401,6 +441,24 @@ EOF
     "$setup_python" "$HOME/bin/codex-setup-memory.py" "${memory_setup_args[@]}" || return "$?"
   else
     "$setup_python" "$HOME/bin/codex-setup-memory.py" || return "$?"
+  fi
+  if [ -f "$HOME/bin/codex-setup-thermal.py" ]; then
+    local thermal_setup_args=()
+    if [ "$with_thermal_protection" -eq 1 ]; then
+      thermal_setup_args+=(--with-thermal-protection)
+    elif [ "$without_thermal_protection" -eq 1 ]; then
+      thermal_setup_args+=(--without-thermal-protection)
+    fi
+    if [ "$with_windows_cooling" -eq 1 ]; then
+      thermal_setup_args+=(--with-windows-cooling)
+    elif [ "$without_windows_cooling" -eq 1 ]; then
+      thermal_setup_args+=(--without-windows-cooling)
+    fi
+    if [ "${#thermal_setup_args[@]}" -gt 0 ]; then
+      "$setup_python" "$HOME/bin/codex-setup-thermal.py" "${thermal_setup_args[@]}" || return "$?"
+    else
+      "$setup_python" "$HOME/bin/codex-setup-thermal.py" || return "$?"
+    fi
   fi
   echo ""
   echo "Usage examples (re-run ./setup.sh anytime to update scripts):"

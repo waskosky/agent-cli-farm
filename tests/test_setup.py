@@ -62,6 +62,8 @@ class SetupScriptTests(unittest.TestCase):
             "dirname",
             "grep",
             "mkdir",
+            "mktemp",
+            "mv",
             "rm",
         ]:
             system_path = shutil.which(command)
@@ -86,6 +88,17 @@ class SetupScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--with-deep-history", result.stdout)
         self.assertIn("--without-session-hook", result.stdout)
+
+    def test_upgrade_atomically_replaces_helper_without_truncating_running_generation(self):
+        result = self.run_setup("--without-session-hook")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = Path(self.env["HOME"]) / "bin/codex-thermal"
+        installed.write_bytes(b"previous generation")
+        with installed.open("rb") as running:
+            result = self.run_setup("--without-session-hook")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(running.read(), b"previous generation")
+        self.assertEqual(installed.read_bytes(), (REPO_ROOT / "bin/codex-thermal").read_bytes())
 
     def real_setup_python(self):
         (self.bin_dir / "python3").unlink()
@@ -117,6 +130,56 @@ class SetupScriptTests(unittest.TestCase):
                 self.assertIn("conflict", result.stderr.lower())
                 self.assertFalse((Path(self.env["HOME"]) / "bin").exists())
                 self.assertFalse(Path(self.env["XDG_STATE_HOME"]).exists())
+
+    def test_thermal_choices_documented_and_conflicts_fail_before_writes(self):
+        result = self.run_setup("--help")
+        for flag in (
+            "--with-thermal-protection",
+            "--without-thermal-protection",
+            "--with-windows-cooling",
+            "--without-windows-cooling",
+        ):
+            self.assertIn(flag, result.stdout)
+        self.assertIn("80%", result.stdout)
+        for feature in ("thermal-protection", "windows-cooling"):
+            for flags in (
+                ("--with-" + feature, "--without-" + feature),
+                ("--without-" + feature, "--with-" + feature),
+            ):
+                with self.subTest(flags=flags):
+                    result = self.run_setup(*flags)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertFalse((Path(self.env["HOME"]) / "bin").exists())
+                    self.assertFalse(Path(self.env["XDG_STATE_HOME"]).exists())
+
+    def test_thermal_bundle_installed_and_unattended_choices_never_probe_windows(self):
+        self.real_setup_python()
+        make_executable(
+            self.bin_dir / "powershell.exe",
+            f'#!/bin/bash\necho WINDOWS_CALLED >> "{self.pkg_log}"\nexit 98\n',
+        )
+        settings = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/thermal-settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_bytes(b"untouched thermal settings")
+        for flags in (
+            (),
+            ("--without-thermal-protection", "--without-windows-cooling"),
+            ("--with-thermal-protection", "--with-windows-cooling"),
+        ):
+            with self.subTest(flags=flags):
+                result = self.run_setup(
+                    "--without-session-hook", "--without-memory-protection", *flags
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(settings.read_bytes(), b"untouched thermal settings")
+                self.assertFalse(self.pkg_log.exists())
+                for name in ("install.ps1", "sensor.ps1", "cooling-profile.ps1", "setup.ps1"):
+                    installed = Path(self.env["HOME"]) / "bin/codexfarm-thermal-windows" / name
+                    self.assertEqual(
+                        installed.read_bytes(),
+                        (REPO_ROOT / "tools/thermal-windows" / name).read_bytes(),
+                    )
+        self.assertIn("interactive WSL terminal", result.stdout)
 
     def test_unattended_memory_choices_preserve_settings_and_never_call_sudo(self):
         self.real_setup_python()

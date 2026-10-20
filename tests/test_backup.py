@@ -99,6 +99,70 @@ class BackupTests(unittest.TestCase):
         loader.exec_module(module)
         return module
 
+    def test_enrolled_archive_saves_first_then_executes_one_required_batch_worker(self):
+        module = self.load_backup_module()
+        real_run = subprocess.run
+        for saved in (True, False):
+            with self.subTest(saved=saved):
+                args = SimpleNamespace(
+                    archive=True,
+                    skip_save=False,
+                    destination=self.destination,
+                    keep=1,
+                    max_mib=16,
+                    min_age=0,
+                    copy_to=None,
+                )
+                saved_before_admission = []
+                launched = []
+
+                def save(saved=saved, saved_before_admission=saved_before_admission):
+                    saved_before_admission.append(saved)
+                    return saved
+
+                def launch(
+                    command,
+                    saved=saved,
+                    saved_before_admission=saved_before_admission,
+                    launched=launched,
+                    **kwargs,
+                ):
+                    self.assertEqual(saved_before_admission, [saved])
+                    self.assertEqual(
+                        command[2:8], ["run", "--role", "batch", "--scope", "required", "--"]
+                    )
+                    launched.append(command)
+                    return real_run(
+                        command[8:], **kwargs, env=self.env, capture_output=True, text=True
+                    )
+
+                with (
+                    patch.dict(os.environ, self.env),
+                    patch("codex_looper.thermal.enforcing", return_value=True),
+                    patch.object(module, "save_manifests", side_effect=save),
+                    patch.object(module.subprocess, "run", side_effect=launch),
+                ):
+                    code = module.run_once(
+                        args, self.codex, self.root / "config", self.root / "state/codexfarm"
+                    )
+                self.assertEqual(code, 0 if saved else 1)
+                self.assertEqual(len(launched), 1)
+                self.assertEqual(len(list(self.destination.glob("*.tar.gz"))), 1)
+                status = json.loads((self.root / "state/codexfarm/backup-status.json").read_text())
+                self.assertTrue(status["backup_ok"])
+                self.assertEqual(status["manifest_save_ok"], saved)
+
+    def test_copy_failure_reports_local_success_and_preserves_operator_destination(self):
+        destination = self.root / "operator destination; literal"
+        destination.write_text("operator content")
+        result = self.run_backup("--copy-to", str(destination))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        status = json.loads((self.root / "state/codexfarm/backup-status.json").read_text())
+        self.assertTrue(status["backup_ok"])
+        self.assertFalse(status["copy_ok"])
+        self.assertEqual(destination.read_text(), "operator content")
+        self.assertEqual(len(list(self.destination.glob("*.tar.gz"))), 1)
+
     def test_manifest_only_watcher_never_scans_or_copies_provider_history(self):
         module = self.load_backup_module()
         state = self.root / "state/codexfarm"

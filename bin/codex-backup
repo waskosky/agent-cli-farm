@@ -25,6 +25,16 @@ RESERVE_BYTES = 1024 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 
 
+def recovery_module():
+    for root in (Path(__file__).resolve().parent.parent, Path(__file__).resolve().parent):
+        if (root / "codex_looper").is_dir():
+            sys.path.insert(0, str(root))
+            break
+    from codex_looper import recovery
+
+    return recovery
+
+
 class BackupSpaceError(OSError):
     """Insufficient disk headroom; preserve completed snapshots."""
 
@@ -74,8 +84,17 @@ def atomic_json(path: Path, value: dict) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        sync_directory(path.parent)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def provider_chat_files(home: Path) -> list[tuple[Path, str]]:
@@ -245,6 +264,19 @@ def snapshot(
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         os.replace(temporary, archive)
+        sync_directory(destination)
+        atomic_json(
+            archive.with_name(archive.name + ".integrity.json"),
+            {
+                "schema_version": 1,
+                "archive": archive.name,
+                "sha256": digest.hexdigest(),
+                "bytes": archive.stat().st_size,
+            },
+        )
+        # Verify the complete new archive before moving the restore pointer or
+        # pruning any prior recovery point. Never extract into a provider home.
+        recovery_module().verify_archive(archive, max_bytes=max_bytes)
         atomic_json(
             destination / "latest.json",
             {
@@ -266,6 +298,8 @@ def snapshot(
         )
         for old in owned[:-keep]:
             old.unlink()
+            old.with_name(old.name + ".integrity.json").unlink(missing_ok=True)
+        sync_directory(destination)
         return archive
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -284,7 +318,68 @@ def save_manifests() -> bool:
         return False
 
 
+def managed_archive(args, state: Path) -> int:
+    """Keep exact manifest capture ahead of admission for optional heavy work."""
+    saved = args.skip_save or save_manifests()
+    outcome = "skip" if args.skip_save else "yes" if saved else "no"
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("codex-job")),
+        "run",
+        "--role",
+        "batch",
+        "--scope",
+        "required",
+        "--",
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--archive",
+        "--skip-save",
+        "--_managed-archive",
+        outcome,
+        "--destination",
+        str(args.destination),
+        "--keep",
+        str(args.keep),
+        "--max-mib",
+        str(args.max_mib),
+        "--min-age",
+        str(args.min_age),
+    ]
+    if getattr(args, "copy_to", None) is not None:
+        command.extend(["--copy-to", str(args.copy_to), "--copy-keep", str(args.copy_keep)])
+    started = time.time()
+    result = subprocess.run(command, check=False)
+    status_path = state / "backup-status.json"
+    if result.returncode and (not status_path.exists() or status_path.stat().st_mtime < started):
+        atomic_json(
+            status_path,
+            {
+                "checked_at": time.time(),
+                "manifest_save_ok": saved and outcome != "skip",
+                "backup_ok": False,
+                "error_type": "ManagedArchiveDeferred",
+                "destination": str(args.destination.resolve()),
+            },
+        )
+    return result.returncode if result.returncode else (0 if saved else 1)
+
+
 def run_once(args: argparse.Namespace, codex: Path, config: Path, state: Path) -> int:
+    if args.archive and getattr(args, "_managed_archive", None) is None:
+        recovery_module()
+        from codex_looper.thermal import enforcing
+
+        try:
+            enrolled = enforcing()
+        except (OSError, ValueError, TypeError):
+            if not args.skip_save:
+                save_manifests()
+            raise ValueError(
+                "thermal configuration invalid; archive work was not started"
+            ) from None
+        if enrolled:
+            return managed_archive(args, state)
     if not args.archive:
         print("Full conversation archives are disabled; saving session manifests only.", flush=True)
         if args.skip_save:
@@ -293,7 +388,7 @@ def run_once(args: argparse.Namespace, codex: Path, config: Path, state: Path) -
     private_directory(args.destination)
     status = {
         "checked_at": time.time(),
-        "manifest_save_ok": False,
+        "manifest_save_ok": getattr(args, "_managed_archive", None) == "yes",
         "backup_ok": False,
         "destination": str(args.destination.resolve()),
     }
@@ -344,6 +439,21 @@ def run_once(args: argparse.Namespace, codex: Path, config: Path, state: Path) -
                 status["backup_ok"] = True
                 status["archive"] = archive.name
                 print(f"Conversation backup saved: {archive}", flush=True)
+            if getattr(args, "copy_to", None) is not None:
+                status["copy_requested"] = True
+                status["copy_ok"] = False
+                result = recovery_module().copy_archive(
+                    args.destination / status["archive"],
+                    args.copy_to,
+                    max_bytes=args.max_mib * 1024 * 1024,
+                    keep=args.copy_keep,
+                )
+                status["copy_ok"] = result["copy_verified"]
+                status["copy_different_filesystem"] = result["different_filesystem"]
+                print(
+                    "Verified archive copy completed at the explicitly selected destination.",
+                    flush=True,
+                )
         except (
             OSError,
             ValueError,
@@ -362,7 +472,20 @@ def run_once(args: argparse.Namespace, codex: Path, config: Path, state: Path) -
             print(f"{message}; prior snapshots preserved.", file=sys.stderr)
         status["checked_at"] = time.time()
         atomic_json(state / "backup-status.json", status)
-    return 0 if status["backup_ok"] and (args.skip_save or status["manifest_save_ok"]) else 1
+    manifest_ok = (
+        getattr(args, "_managed_archive", None) != "no"
+        if getattr(args, "_managed_archive", None) is not None
+        else args.skip_save or status["manifest_save_ok"]
+    )
+    return (
+        0
+        if (
+            status["backup_ok"]
+            and manifest_ok
+            and (not status.get("copy_requested") or status.get("copy_ok"))
+        )
+        else 1
+    )
 
 
 def timer_active() -> bool:
@@ -388,6 +511,17 @@ def main() -> int:
         "--archive", action="store_true", help="opt in to a full conversation-history archive"
     )
     parser.add_argument("--destination", type=Path, help="private backup directory")
+    parser.add_argument(
+        "--copy-to",
+        type=Path,
+        help="separate explicit archive-copy destination; requires --archive; no upload or encryption is implicit",
+    )
+    parser.add_argument(
+        "--copy-keep",
+        type=int,
+        default=3,
+        help="retention for this command's verified external copies (default: 3)",
+    )
     parser.add_argument("--keep", type=int, default=os.environ.get("CODEXFARM_BACKUP_KEEP", "1"))
     parser.add_argument(
         "--max-mib", type=int, default=512, help="maximum source/output size in MiB (default: 512)"
@@ -409,7 +543,14 @@ def main() -> int:
         default=300,
         help="watch interval in seconds (minimum 10)",
     )
+    parser.add_argument("--_managed-archive", choices=("yes", "no", "skip"), help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args._managed_archive is not None and (not args.archive or not args.skip_save or args.watch):
+        parser.error("managed archive worker requires --archive --skip-save without --watch")
+    if args.copy_to is not None and not args.archive:
+        parser.error("--copy-to requires explicit --archive")
+    if not 1 <= args.copy_keep <= 100:
+        parser.error("copy-keep must be within 1..100")
     if not 1 <= args.keep <= 100 or args.max_mib < 1 or args.min_age < 0 or args.interval < 10:
         parser.error(
             "keep must be 1..100, max-mib positive, min-age nonnegative, and interval at least 10"
@@ -419,7 +560,8 @@ def main() -> int:
     codex = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
     if args.archive:
         try:
-            os.nice(10)
+            if os.getpriority(os.PRIO_PROCESS, 0) < 10:
+                os.setpriority(os.PRIO_PROCESS, 0, 10)
         except (AttributeError, OSError):
             pass
     if args.archive or args.watch:

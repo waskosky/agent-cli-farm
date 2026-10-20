@@ -97,6 +97,57 @@ class JobTests(unittest.TestCase):
             result = self.run_cli(["--role", "agent", "--scope", "off", *flags], ["true"])
             self.assertEqual(result.returncode, 2, result.stderr)
 
+    def test_explicit_cpu_quota_requires_scope_and_preserves_exact_argv(self):
+        log = self.doubles()
+        result = self.run_cli(
+            ["--cpu-quota", "150"], [sys.executable, "-c", "print('one payload')"]
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("CPUQuota=150%", log.read_text())
+        for options in (
+            ["--scope", "off", "--cpu-quota", "100"],
+            ["--role", "agent", "--cpu-quota", "100"],
+            ["--cpu-quota", "nan"],
+            ["--cpu-quota", "0"],
+        ):
+            result = self.run_cli(options, ["echo", "must-not-run"])
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stdout, "")
+
+    def test_thermal_queue_cannot_be_bypassed_by_a_memory_override(self):
+        with patch("codex_looper.thermal.admission_reason", return_value="CPU hot"):
+            self.assertFalse(jobs.admit("batch", "ignore", ResourceSettings(), 0, self.store, "x"))
+            self.assertTrue(jobs.admit("agent", "queue", ResourceSettings(), 0, self.store, "x"))
+
+    def test_enrolled_batch_cannot_disable_its_enforcing_scope(self):
+        from codex_looper import thermal
+
+        sample = self.root / "sensor.json"
+        sample.write_text(
+            json.dumps(
+                {
+                    "source": "LibreHardwareMonitor",
+                    "checked_at": time.time(),
+                    "cpu_celsius": 50,
+                }
+            )
+        )
+        write_private_json = thermal.write_private_json
+        write_private_json(
+            thermal.settings_path(),
+            thermal.asdict(
+                thermal.ThermalSettings(
+                    enabled=True,
+                    enforce=True,
+                    sensor_file=str(sample),
+                )
+            ),
+        )
+        result = self.run_cli(["--scope", "off"], ["echo", "must-not-run"])
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_queue_timeout_manual_bypass_unknown_and_small_advisory(self):
         with patch.object(jobs, "read_memory", return_value=Memory(4096, 500, 0)):
             with patch("sys.stderr") as err:
@@ -708,8 +759,8 @@ class JobTests(unittest.TestCase):
             ],
             [sys.executable, "-c", "import sys;print(sys.argv[1])", literal],
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, literal + "\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
         args = json.loads(log.read_text().splitlines()[0])
         self.assertIn("MemoryHigh=52428800", args)
         self.assertIn("MemoryMax=78643200", args)
@@ -759,13 +810,14 @@ class JobTests(unittest.TestCase):
         )
 
     def test_batch_nice_is_ten_when_already_nice_ten(self):
+        existing_nice = max(10, os.getpriority(os.PRIO_PROCESS, 0))
         result = self.run_cli(
             ["--scope", "off", "--memory-policy", "ignore"],
             [sys.executable, "-c", "import os;print(os.getpriority(os.PRIO_PROCESS,0))"],
-            preexec_fn=lambda: os.nice(10),
+            preexec_fn=lambda: os.setpriority(os.PRIO_PROCESS, 0, existing_nice),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "10")
+        self.assertEqual(result.stdout.strip(), str(existing_nice))
 
     def test_cleanup_marks_dead_queued_supervisor_stale(self):
         record = self.store.create("batch", ["true"], str(self.root))

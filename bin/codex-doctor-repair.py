@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -29,6 +30,7 @@ class Repair:
         self.backup: Path | None = None
         self.issues = 0
         self.monitor_changed = False
+        self.monitor_args: list[str] = []
 
     def report(self, message: str, *, failed: bool = False) -> None:
         print(f"[{'FAIL' if failed else 'FIXED'}] {message}", flush=True)
@@ -73,18 +75,26 @@ class Repair:
         for pattern in ("codex-*", "claude-*", "gemini-*", "add_high_memory_warning.sh"):
             files.extend(self.source.joinpath("bin").glob(pattern))
         files.extend(self.source.joinpath("codex_looper").glob("*.py"))
+        files.extend(self.source.joinpath("tools/thermal-windows").glob("*.ps1"))
         repaired = 0
         for source in sorted(set(files)):
             if not source.is_file():
                 continue
             module = source.parent.name == "codex_looper"
-            relative = f"codex_looper/{source.name}" if module else source.name
+            asset = source.parent.name == "thermal-windows"
+            relative = (
+                f"codex_looper/{source.name}"
+                if module
+                else f"codexfarm-thermal-windows/{source.name}"
+                if asset
+                else source.name
+            )
             destination = self.install / relative
             content = source.read_bytes()
             if (
                 destination.is_file()
                 and destination.read_bytes() == content
-                and (module or os.access(destination, os.X_OK))
+                and (module or asset or os.access(destination, os.X_OK))
             ):
                 continue
             self.preserve(destination, f"helpers/{relative}")
@@ -97,8 +107,13 @@ class Repair:
                     handle.write(content)
                     handle.flush()
                     os.fsync(handle.fileno())
-                    os.fchmod(handle.fileno(), 0o644 if module else 0o755)
+                    os.fchmod(handle.fileno(), 0o644 if module or asset else 0o755)
                 os.replace(temporary, destination)
+                directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
             finally:
                 Path(temporary).unlink(missing_ok=True)
             repaired += 1
@@ -106,6 +121,12 @@ class Repair:
                 "codex-annotator",
                 "codex-annotator.py",
                 "codex_looper/health.py",
+                "codex_looper/thermal.py",
+                "codex_looper/component_versions.py",
+                "codex_looper/resource_jobs.py",
+                "codex_looper/resource_config.py",
+                "codex_looper/resource_policy.py",
+                "codex_looper/resource_history.py",
                 "codex_looper/pane_status.py",
             }:
                 self.monitor_changed = True
@@ -203,6 +224,25 @@ class Repair:
         try:
             health = json.loads((self.state / "health-status.json").read_text())
             age = time.time() - float(health.get("checked_at", 0))
+            module_root = self.install / "codex_looper"
+            if (module_root / "component_versions.py").is_file():
+                digest = hashlib.sha256()
+                for name in (
+                    "health.py",
+                    "component_versions.py",
+                    "thermal.py",
+                    "resource_jobs.py",
+                    "resource_config.py",
+                    "resource_policy.py",
+                    "resource_history.py",
+                ):
+                    digest.update(name.encode() + b"\0")
+                    try:
+                        digest.update((module_root / name).read_bytes())
+                    except FileNotFoundError:
+                        digest.update(b"<missing>")
+                if health.get("implementation") != digest.hexdigest()[:16]:
+                    self.monitor_changed = True
             if 0 <= age < 60 and not self.monitor_changed:
                 return
         except (OSError, ValueError, TypeError, AttributeError):
@@ -219,7 +259,7 @@ class Repair:
                     "monitor heartbeat is stale while its process holds the lock", failed=True
                 )
                 return
-        if self.run([str(annotator), "--once"], timeout=30).returncode:
+        if self.run([str(annotator), *self.monitor_args, "--once"], timeout=30).returncode:
             self.report(
                 "memory monitor could not start; check annotator configuration", failed=True
             )
@@ -230,7 +270,7 @@ class Repair:
         descriptor = os.open(logfile, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(descriptor, "a") as output:
             subprocess.Popen(
-                [str(annotator)],
+                [str(annotator), *self.monitor_args],
                 stdin=subprocess.DEVNULL,
                 stdout=output,
                 stderr=output,
@@ -262,6 +302,8 @@ class Repair:
             )
             if len(argv) < 2 or not interpreter or Path(argv[1]).resolve() != expected:
                 return
+            if "--once" in argv[2:] or len(argv) > 64 or any(len(arg) > 4096 for arg in argv):
+                return
             held = any(
                 fd.resolve() == lock.resolve()
                 and any(
@@ -272,6 +314,7 @@ class Repair:
             )
             if not held:
                 return
+            self.monitor_args = argv[2:]
             # A pidfd prevents an exited monitor's PID from targeting another process.
             signal.pidfd_send_signal(process_fd, signal.SIGTERM)
             deadline = time.monotonic() + 3

@@ -50,7 +50,8 @@ not expose a structured status channel through tmux.
 
 - Normal setup and operation must not implicitly install privileged host guards,
   replace ordinary tools, or impose global CPU, RAM, swap, task, or time ceilings.
-  Setup may offer the explicitly and separately consented host memory step below.
+  Setup may offer the explicitly and separately consented host memory and
+  Windows/WSL thermal steps below.
 - Any explicitly requested resource enforcement must apply only to the requested
   job, with the proposed settings shown to the user before activation.
 - Restore memory checks are advisory by default, with two-second launch spacing.
@@ -140,6 +141,57 @@ not expose a structured status channel through tmux.
   restoration journal. Preserve later operator changes and reused PID identities.
 - Use `tests/test_resource_host.py` with private roots/proc trees and manager
   doubles. Never install host protection or mutate actual services in tests.
+
+## Opt-in thermal safeguards
+
+- Thermal telemetry and enforcement default off in separate private settings.
+  Windows hardware polling uses only the dedicated, administrator-owned sensor
+  helper; annotation reads bounded local data and never awaits Windows or an LLM.
+- Interactive WSL setup may offer sensors and managed batch protection, then a
+  separate default-no whole-machine cooling choice. Explicit
+  `--with-windows-cooling` or yes after its 80%/boost-off explanation grants the
+  exception to job-only enforcement for that power profile only. Never imply
+  cooling consent from sensors, memory choices or a previous install. Default
+  unattended setup and declined/skipped choices must not probe Windows or change
+  settings. Explicit unattended flags print manual steps only; never elevate.
+- When thermal enforcement is enabled, run CPU-heavy builds, full test suites,
+  browser automation and rendering through `codex-job run --role batch --scope
+  required -- <exact argv>`. Keep interactive providers in the agent role.
+- Missing/stale temperatures queue new managed batch launches. Only registered
+  batch jobs with revalidated UID, start ticks, cgroup and scope generation may
+  receive temporary CPU quotas. Preserve stronger/unknown quotas and later
+  operator changes; persist rollback before applying a remedy. Never cap or pause
+  agents or introduce host-wide limits through the batch guard. Only the separately
+  consented Windows profile may affect whole-machine processor performance.
+- Tests use synthetic sensor files, private homes and manager doubles. Never
+  install drivers, tasks or services or mutate live tmux sessions from tests.
+
+## Reliability and recovery invariants
+
+- Sensor recovery may control only its exact administrator-owned task instance,
+  after checking principal/actions/enabled state. Serialize it with installation;
+  retain bounded retry cooldowns and never reinstall a driver as recovery.
+- Thermal admission requires a compatible live guard heartbeat and fresh sensor,
+  not merely configured enforcement. Keep the 64-job remedy capacity reserved
+  atomically before launch. Manager validation and remedies share a two-second
+  pass budget; incomplete coverage must remain visible.
+- Explicit CPU/concurrency/memory reservations remain batch-only and default off.
+  Reservations retain orphaned/live/unreadable owners; memory overrides never
+  bypass explicit reservations or thermal protection. Never reinterpret argv.
+- Optional aggregate history excludes commands/paths/environment/conversations,
+  has both age and byte caps, and cannot terminate enforcement on history failure.
+- Exact capture receipts, bounded restore outcomes and retry units never imply
+  conversation replay. Keep active writers unique and detached successes alive.
+  History retention is separately selected and preserves operator-modified data.
+- Archives are verified before latest-pointer publication/pruning. External copies
+  and workspace snapshots require explicit destinations/selections. Extraction
+  accepts only a new private tree and rejects unsafe links, paths and budgets;
+  it must never replace a live provider database. Preserve independent archive no.
+- Thermal-enrolled archives save lightweight manifests before waiting for managed
+  batch admission; heavy work cannot postpone that invocation's capture.
+- Verification uses private homes/trees and doubles, plus native Windows file I/O
+  self-tests without hardware/task changes. Do not simulate a host crash or reboot
+  the working farm to prove recovery.
 
 ## Optional incident investigation
 

@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -162,8 +164,209 @@ def manifest_lock(manifest: Path):
         yield
 
 
-def publish(candidate: Path, manifest: Path, autosave: bool, merge: bool = False) -> None:
+def atomic_status(path: Path, value: dict) -> None:
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("unsafe manifest status file; existing path preserved")
+    except FileNotFoundError:
+        pass
+    data = (
+        json.dumps(value, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    if len(data) > 65536:
+        raise ValueError("manifest status exceeds size budget")
+    atomic_write(path, data)
+
+
+def prune_history(manifest: Path, keep: int) -> dict:
+    if type(keep) is not int or not 1 <= keep <= 4096:
+        raise ValueError("history retention must be within 1..4096")
+    history = history_directory(manifest)
+    if not history.exists():
+        return {"kept": 0, "pruned": 0, "operator_files_preserved": 0}
+    info = history.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError("history directory must remain private, owned and not a symlink")
+    candidates = []
+    preserved = 0
+    pattern = re.compile(r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-([a-f0-9]{64})\.tsv\Z")
+    for index, path in enumerate(history.iterdir()):
+        if index >= 4096:
+            raise ValueError("history scan exceeds its bounded budget; no snapshots were pruned")
+        match = pattern.fullmatch(path.name)
+        if not match:
+            preserved += 1
+            continue
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+            or info.st_size > 4194304
+        ):
+            preserved += 1
+            continue
+        content = path.read_bytes()
+        if hashlib.sha256(content).hexdigest() != match[1]:
+            preserved += 1
+            continue
+        candidates.append(
+            (
+                path.name,
+                path,
+                match[1],
+                info.st_dev,
+                info.st_ino,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+                info.st_size,
+            )
+        )
+    current = hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.is_file() else None
+    candidates.sort(reverse=True)
+    pruned = 0
+    for _name, path, digest, device, inode, modified, changed, size in candidates[keep:]:
+        if digest == current:
+            continue
+        info = path.lstat()
+        if (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size) != (
+            device,
+            inode,
+            modified,
+            changed,
+            size,
+        ):
+            preserved += 1
+            continue
+        path.unlink()
+        pruned += 1
+    sync_directory(history)
+    return {
+        "kept": len(candidates) - pruned,
+        "pruned": pruned,
+        "operator_files_preserved": preserved,
+    }
+
+
+def record_capture(manifest: Path, candidate_rows: int, unresolved: int) -> None:
+    content = manifest.read_bytes()
+    atomic_status(
+        manifest.with_name(manifest.name + ".capture.json"),
+        {
+            "schema_version": 1,
+            "checked_at": time.time(),
+            "candidate_rows": candidate_rows,
+            "recovery_rows": len(parse_manifest(content)),
+            "unresolved_panes": unresolved,
+            "complete": unresolved == 0,
+            "manifest_sha256": hashlib.sha256(content).hexdigest(),
+        },
+    )
+    choice = os.environ.get("CODEXFARM_MANIFEST_HISTORY_KEEP", "")
+    if choice:
+        prune_history(manifest, int(choice))
+
+
+def capture_check(manifest: Path) -> None:
+    path = manifest.with_name(manifest.name + ".capture.json")
+    with path.open("rb") as source:
+        data = source.read(65537)
+    if len(data) > 65536:
+        raise ValueError("manifest capture receipt exceeds size budget")
+    value = json.loads(data)
+    checked = value.get("checked_at") if isinstance(value, dict) else None
+    if (
+        not isinstance(checked, int | float)
+        or isinstance(checked, bool)
+        or not -5 <= time.time() - checked <= 900
+    ):
+        raise ValueError("manifest capture heartbeat is missing or older than 15 minutes")
+    if value.get("schema_version") != 1 or value.get("complete") is not True:
+        raise ValueError("manifest capture has unresolved pane coverage")
+    if hashlib.sha256(manifest.read_bytes()).hexdigest() != value.get("manifest_sha256"):
+        raise ValueError("manifest changed since its last verified capture")
+    print("Manifest capture is recent and complete")
+
+
+RESTORE_OUTCOMES = frozenset(
+    {
+        "launched",
+        "already_present",
+        "active_elsewhere",
+        "inspection_failed",
+        "identity_conflict",
+        "writer_conflict",
+        "launch_failed",
+        "memory_pressure",
+    }
+)
+
+
+def record_restore(manifest: Path, normalized: Path, outcomes: Path, exit_code: int) -> None:
+    content = manifest.read_bytes()
+    rows = parse_manifest(normalized.read_bytes())
+    with outcomes.open("rb") as source:
+        raw = source.read(1048577)
+    if len(raw) > 1048576:
+        raise ValueError("restore outcome log exceeds size budget")
+    entries = []
+    seen = set()
+    counts = Counter()
+    for line in raw.decode().splitlines():
+        index, outcome = line.split("\t")
+        number = int(index)
+        if not 1 <= number <= len(rows) or number in seen or outcome not in RESTORE_OUTCOMES:
+            raise ValueError("invalid restore outcome entry")
+        seen.add(number)
+        counts[outcome] += 1
+        if len(entries) < 256:
+            identity = hashlib.sha256("\t".join(rows[number - 1][2:]).encode()).hexdigest()
+            entries.append({"row": number, "identity_sha256": identity, "outcome": outcome})
+    path = manifest.with_name(manifest.name + ".restore.json")
+    digest = hashlib.sha256(content).hexdigest()
+    previous = {}
+    try:
+        with path.open("rb") as source:
+            prior = source.read(65537)
+        if len(prior) > 65536:
+            raise ValueError("previous restore receipt exceeds size budget")
+        previous = json.loads(prior)
+        if not isinstance(previous, dict) or previous.get("manifest_sha256") != digest:
+            previous = {}
+    except FileNotFoundError:
+        pass
+    attempt = previous.get("attempt", 0)
+    if type(attempt) is not int or not 0 <= attempt <= 1000000:
+        raise ValueError("invalid previous restore attempt")
+    stamp = time.time()
+    atomic_status(
+        path,
+        {
+            "schema_version": 1,
+            "checked_at": stamp,
+            "first_attempt_at": previous.get("first_attempt_at", stamp),
+            "attempt": attempt + 1,
+            "manifest_sha256": digest,
+            "exit_code": exit_code,
+            "complete": exit_code == 0 and len(seen) == len(rows),
+            "expected_rows": len(rows),
+            "outcomes_count": len(seen),
+            "counts": dict(counts),
+            "outcomes_truncated": len(seen) > len(entries),
+            "rows": entries,
+        },
+    )
+
+
+def publish(
+    candidate: Path, manifest: Path, autosave: bool, merge: bool = False, unresolved: int = 0
+) -> None:
+    choice = os.environ.get("CODEXFARM_MANIFEST_HISTORY_KEEP", "")
+    if choice and (not choice.isdigit() or not 1 <= int(choice) <= 4096):
+        raise ValueError("CODEXFARM_MANIFEST_HISTORY_KEEP must be within 1..4096")
     rows = parse_manifest(candidate.read_bytes())
+    candidate_rows = len(rows)
     previous = manifest.read_bytes() if manifest.exists() else None
     if merge and previous is not None:
         try:
@@ -180,6 +383,7 @@ def publish(candidate: Path, manifest: Path, autosave: bool, merge: bool = False
         rows = parse_manifest(serialize(rows))
     content = serialize(rows)
     if previous == content:
+        record_capture(manifest, candidate_rows, unresolved)
         print(f"Snapshot unchanged; preserved {manifest}")
         return
     if previous is not None:
@@ -192,8 +396,10 @@ def publish(candidate: Path, manifest: Path, autosave: bool, merge: bool = False
             print(
                 f"Current farm archived at {snapshot}; use a manual save to change the restore point."
             )
+            record_capture(manifest, candidate_rows, unresolved)
             return
     atomic_write(manifest, content)
+    record_capture(manifest, candidate_rows, unresolved)
     print(f"Saved {len(rows)} window(s) to {manifest}")
 
 
@@ -208,16 +414,46 @@ def main() -> int:
     save.add_argument("manifest", type=Path)
     save.add_argument("--autosave", action="store_true")
     save.add_argument("--merge", action="store_true")
+    save.add_argument("--unresolved", type=int, default=0)
+    check = commands.add_parser("capture-check")
+    check.add_argument("manifest", type=Path)
+    restore = commands.add_parser("record-restore")
+    restore.add_argument("manifest", type=Path)
+    restore.add_argument("--normalized", type=Path, required=True)
+    restore.add_argument("--outcomes", type=Path, required=True)
+    restore.add_argument("--exit-code", type=int, required=True)
     history = commands.add_parser("history")
     history.add_argument("manifest", type=Path)
+    prune = commands.add_parser("prune-history")
+    prune.add_argument("manifest", type=Path)
+    prune.add_argument("--keep", type=int, required=True)
     lock = commands.add_parser("lock-run")
     lock.add_argument("manifest")
     lock.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.action == "publish" and args.autosave and args.merge:
         parser.error("--merge cannot be combined with --autosave")
+    if args.action == "publish" and not 0 <= args.unresolved <= 1000000:
+        parser.error("unresolved count must be within 0..1000000")
+    if args.action == "prune-history" and not 1 <= args.keep <= 4096:
+        parser.error("history retention must be within 1..4096")
+    if args.action == "record-restore" and not 0 <= args.exit_code <= 255:
+        parser.error("restore exit code must be within 0..255")
     try:
-        if args.action == "validate":
+        if args.action == "prune-history":
+            with manifest_lock(args.manifest):
+                print(json.dumps(prune_history(args.manifest, args.keep), sort_keys=True))
+        elif args.action == "capture-check":
+            capture_check(args.manifest)
+        elif args.action == "record-restore":
+            if Path(
+                os.environ.get("CODEXFARM_LOCKED_MANIFEST", "")
+            ) == args.manifest and os.environ.get("CODEXFARM_LOCK_SCRIPT_PID") == str(os.getppid()):
+                record_restore(args.manifest, args.normalized, args.outcomes, args.exit_code)
+            else:
+                with manifest_lock(args.manifest):
+                    record_restore(args.manifest, args.normalized, args.outcomes, args.exit_code)
+        elif args.action == "validate":
             rows = parse_manifest(args.manifest.read_bytes())
             if args.resolve_codex:
                 rows = resolve_codex_rows(rows)
@@ -242,10 +478,10 @@ def main() -> int:
         elif Path(
             os.environ.get("CODEXFARM_LOCKED_MANIFEST", "")
         ) == args.manifest and os.environ.get("CODEXFARM_LOCK_SCRIPT_PID") == str(os.getppid()):
-            publish(args.candidate, args.manifest, args.autosave, args.merge)
+            publish(args.candidate, args.manifest, args.autosave, args.merge, args.unresolved)
         else:
             with manifest_lock(args.manifest):
-                publish(args.candidate, args.manifest, args.autosave, args.merge)
+                publish(args.candidate, args.manifest, args.autosave, args.merge, args.unresolved)
     except (OSError, ValueError) as exc:
         print(f"Manifest operation failed: {exc}", file=sys.stderr)
         return 2

@@ -21,6 +21,8 @@ are disabled. All distinct snapshots are retained in <manifest-path>.history/.
 --autosave preserves the restore point when saved conversations would be lost.
 --all-registered always uses this conservative autosave policy.
 --merge retains previously saved conversations while adding current coverage.
+--best-effort merges verified conversations even if another pane is unresolved;
+it retains previous recovery records and returns nonzero for incomplete coverage.
 Local shared-server panes save the server's entire durable live inventory.
 Additional provider panes restore as separate windows; split layouts are not saved.
 EOF
@@ -585,7 +587,9 @@ save_all_registered() {
     if [ -z "${manifest:-}" ]; then
       manifest="$(default_manifest_path_for_session "$session")"
     fi
-    if CODEX_SESSION="$session" "$0" --autosave "$manifest"; then
+    child_options=(--autosave)
+    [ "$best_effort" -eq 0 ] || child_options+=(--best-effort)
+    if CODEX_SESSION="$session" "$0" "${child_options[@]}" "$manifest"; then
       count=$((count + 1))
     else
       status=1
@@ -616,6 +620,7 @@ fi
 all_registered=0
 autosave=0
 merge=0
+best_effort=0
 args_pos=()
 while (( "$#" )); do
   case "${1:-}" in
@@ -629,6 +634,10 @@ while (( "$#" )); do
       ;;
     --autosave)
       autosave=1
+      shift
+      ;;
+    --best-effort)
+      best_effort=1
       shift
       ;;
     --merge)
@@ -764,6 +773,11 @@ while IFS=$'\n' read -r idx; do
       done
       if [ "$already_captured" -eq 0 ]; then
         if ! shared_snapshot="$("$SHARED_META_BIN" snapshot "$shared_endpoint" --manifest "$MANIFEST_PATH")"; then
+          if [ "$best_effort" -eq 1 ]; then
+            unresolved_sessions=$((unresolved_sessions + 1))
+            first_pane=0
+            continue
+          fi
           exit 1
         fi
         while IFS=$'\t' read -r shared_name shared_dir shared_cmd shared_args; do
@@ -813,6 +827,7 @@ while IFS=$'\n' read -r idx; do
           if [ "$identity_status" -eq 4 ]; then
             echo "Static shared-server binding is unverified; check codex-doctor for migration instructions." >&2
           fi
+          if [ "$best_effort" -eq 1 ]; then first_pane=0; continue; fi
         fi
         ;;
       *)
@@ -833,7 +848,7 @@ while IFS=$'\n' read -r idx; do
   done <<< "$panes"
 done <<< "$window_indexes"
 
-if [ "$unresolved_sessions" -ne 0 ]; then
+if [ "$unresolved_sessions" -ne 0 ] && [ "$best_effort" -eq 0 ]; then
   echo "Manifest was not replaced. Exact session identity is required; latest-session guessing is disabled." >&2
   echo "Check codex-doctor and the session hook, then retry after the provider has recorded a conversation." >&2
   exit 1
@@ -854,9 +869,13 @@ if ! final_panes="$(tmux list-panes -s -t "=$SESSION" -F $'#{pane_id}\t#{pane_pi
   echo "Farm panes changed during capture; previous snapshot preserved. Retry save." >&2
   exit 1
 fi
-publish_args=()
-[ "$autosave" -eq 0 ] || publish_args+=(--autosave)
-[ "$merge" -eq 0 ] || publish_args+=(--merge)
+publish_args=(--unresolved "$unresolved_sessions")
+if [ "$best_effort" -eq 1 ]; then
+  publish_args+=(--merge)
+else
+  [ "$autosave" -eq 0 ] || publish_args+=(--autosave)
+  [ "$merge" -eq 0 ] || publish_args+=(--merge)
+fi
 for index in "${!shared_panes[@]}"; do
   if [ "$(inspect_shared "${shared_panes[$index]}")" != "${shared_pane_endpoints[$index]}" ]; then
     echo "Shared-server connection changed during capture; previous snapshot preserved. Retry save." >&2
@@ -867,3 +886,7 @@ for shared_endpoint in ${shared_endpoints[@]+"${shared_endpoints[@]}"}; do
   "$SHARED_META_BIN" verify "$shared_endpoint" "$tmpfile" || exit 1
 done
 python3 "$MANIFEST_BIN" publish "$tmpfile" "$MANIFEST_PATH" ${publish_args[@]+"${publish_args[@]}"}
+if [ "$unresolved_sessions" -ne 0 ]; then
+  echo "Saved verified conversations and retained earlier recovery data; $unresolved_sessions pane(s) remain unresolved." >&2
+  exit 1
+fi
