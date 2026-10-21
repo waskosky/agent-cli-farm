@@ -113,3 +113,6 @@ jobs:
       - name: Exercise atomic publication and watchdog decisions without hardware or tasks
         shell: powershell
         run: ./tools/thermal-windows/sensor.ps1 -SelfTest
+      - name: Check installer ownership and operator choices without applying changes
+        shell: powershell
+        run: ./tools/thermal-windows/install.ps1 -SelfTest

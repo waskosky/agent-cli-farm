@@ -251,6 +251,76 @@ class BackupTests(unittest.TestCase):
         self.assertEqual((self.destination / "latest.json").read_bytes(), latest)
         self.assertFalse(list(self.destination.glob(".snapshot-*")))
 
+    def test_publication_failures_preserve_a_verified_recovery_point_before_pruning(self):
+        self.assertEqual(self.run_backup().returncode, 0)
+        module = self.load_backup_module()
+        prior = next(self.destination.glob("*.tar.gz"))
+        latest_path = self.destination / "latest.json"
+        prior_bytes = prior.read_bytes()
+        real_atomic = module.atomic_json
+        real_sync = module.sync_directory
+        for boundary in ("archive-directory", "receipt", "latest", "published-latest"):
+            with self.subTest(boundary=boundary):
+                before = latest_path.read_bytes()
+
+                def atomic(path, value, selected=boundary):
+                    if selected == "receipt" and path.name.endswith(".integrity.json"):
+                        raise OSError("injected receipt publication failure")
+                    if path.name == "latest.json" and selected == "latest":
+                        raise OSError("injected latest publication failure")
+                    real_atomic(path, value)
+                    if path.name == "latest.json" and selected == "published-latest":
+                        raise OSError("injected failure after latest publication")
+
+                def sync(path, selected=boundary):
+                    if selected == "archive-directory":
+                        raise OSError("injected archive directory flush failure")
+                    real_sync(path)
+
+                with (
+                    patch.dict(os.environ, self.env),
+                    patch.object(module, "atomic_json", side_effect=atomic),
+                    patch.object(module, "sync_directory", side_effect=sync),
+                    self.assertRaises(OSError),
+                ):
+                    module.snapshot(self.codex, self.root / "config", self.destination, 1, True)
+                self.assertEqual(prior.read_bytes(), prior_bytes)
+                if boundary != "published-latest":
+                    self.assertEqual(latest_path.read_bytes(), before)
+                latest = json.loads(latest_path.read_text())
+                self.assertTrue(
+                    module.recovery_module().verify_archive(self.destination / latest["archive"])[
+                        "verified"
+                    ]
+                )
+        # A successful retry may finally prune only after publishing its verified replacement.
+        unreceipted = {
+            path
+            for path in self.destination.glob("*.tar.gz")
+            if not path.with_name(path.name + ".integrity.json").exists()
+        }
+        with patch.dict(os.environ, self.env):
+            result = module.snapshot(self.codex, self.root / "config", self.destination, 1, True)
+        self.assertTrue(module.recovery_module().verify_archive(result)["verified"])
+        self.assertFalse(prior.exists())
+        self.assertEqual(set(self.destination.glob("*.tar.gz")), {result} | unreceipted)
+
+    def test_local_retention_preserves_modified_archives_and_checksum_receipts(self):
+        self.assertEqual(self.run_backup().returncode, 0)
+        first = next(self.destination.glob("*.tar.gz"))
+        first.write_bytes(b"operator replacement")
+        self.assertEqual(self.run_backup().returncode, 0)
+        second = next(path for path in self.destination.glob("*.tar.gz") if path != first)
+        receipt = second.with_name(second.name + ".integrity.json")
+        value = json.loads(receipt.read_text())
+        value["operator_note"] = "preserve this recovery point"
+        receipt.write_text(json.dumps(value))
+        before = receipt.read_bytes()
+        self.assertEqual(self.run_backup().returncode, 0)
+        self.assertEqual(first.read_bytes(), b"operator replacement")
+        self.assertTrue(second.exists())
+        self.assertEqual(receipt.read_bytes(), before)
+
     def test_snapshot_preserves_uncheckpointed_wal_and_excludes_credentials(self):
         connection = sqlite3.connect(self.codex / "state_5.sqlite")
         connection.execute("PRAGMA journal_mode=WAL")

@@ -36,6 +36,8 @@ The two choices are independent. Omitting the cooling flag offers its separate d
 
 Windows setup verifies the pinned download hashes and PawnIO installer signature. Existing disabled tasks/drivers and unexpected task actions are preserved. The administrator-owned sensor task polls every five seconds. Its dedicated watchdog runs each minute and can recover only the held instance of that exact sensor task. It checks task definition, SYSTEM principal, enabled state, driver state, and recent receipts before acting. Retry delays grow from one minute to a maximum of 15 minutes. Fresh readings alone do not hide a task that has exited.
 
+Upgrades also refuse changed task principals, reparse points, non-administrator-owned existing files, and unexpected write permissions. The dedicated CodexFarm parent and Thermal directory grant Users read/execute access only. Existing task and driver choices are rechecked during installation; ownership tests use synthetic ACLs and task objects without installing anything.
+
 A maintenance lock serializes installation and watchdog recovery. Installation waits for the old sensor task to stop before replacing its library. Sample publication retries transient Windows replacement errors without damaging the previous sample; persistent errors back off and remain visible. Diagnostics record operation and error code, separately from the last successful reading.
 
 Explicit thermal refresh checks the installed helper hash as well as fresh data. A running old helper is not treated as an installed upgrade. The Linux unit is published atomically, restarted explicitly, and checked for readiness. It uses a 30-second systemd watchdog, 10-second failure restart, and no core dumps. Successful status/journal publication precedes each watchdog notification. A pass has a combined two-second manager-call budget and rotates jobs so one slow scope does not starve all later jobs.
@@ -132,6 +134,8 @@ codex-add --install-autoservice --with-conversation-backups
 
 The archive budget defaults to 512 MiB of source and compressed output, with a 1 GiB disk reserve. SQLite databases are copied coherently with committed WAL data. Completed archives get a private per-archive SHA-256 receipt. File and directory publication is flushed; the complete new inventory and database contents are verified in a private temporary tree before updating `latest.json` or pruning a prior archive. A checksum receipt provides integrity relative to that trusted receipt, not an independent authenticity signature.
 
+Local retention removes only unchanged archives with matching private receipts. Modified archives/receipts and older archives without receipts are preserved. Pruning has a five-second hashing deadline and a byte budget equal to the selected archive budget, so preservation or a busy disk can retain more than `--keep` recovery points.
+
 Verification rejects traversal, duplicate names, symbolic/hard links, special files, inventory mismatches, corrupt databases, and compressed/uncompressed/member/time-budget violations. Extraction accepts only a new private destination and never replaces a live provider home:
 
 ```bash
@@ -152,6 +156,8 @@ codex-recovery copy /selected/backup/snapshot-example.tar.gz \
 ```
 
 Copies are verified, flushed, privately published without overwriting an operator file, and indexed for retention. Modified or unknown files are preserved. Local and copy success are reported separately; a failed destination does not invalidate the completed local archive. The tool does not select a destination, upload to a cloud service, or manage encryption keys. Choose an encrypted destination/transport for private conversations. `different_filesystem` is informational and does not prove a different physical disk or an off-machine copy.
+
+Modified copy checksum receipts are preserved on both retry and retention. Retention rechecks file size, modification/change times and inode identity immediately before removal. Publication-failure tests cover archive-directory flushing, receipt writes and the latest-pointer boundary, including failure immediately after publishing a valid replacement.
 
 When thermal enforcement is selected, full archive work runs through a required managed batch scope. Lightweight manifest capture happens first, before waiting for admission. Thus a stalled sensor or archive queue does not prevent that invocation from saving exact session identities. Archive choice remains independent of resource settings and memory/thermal setup.
 

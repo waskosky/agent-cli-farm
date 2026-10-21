@@ -105,7 +105,10 @@ def source_stream(path: Path, max_bytes: int):
 
 
 def file_generation(stream) -> tuple:
-    value = os.fstat(stream.fileno())
+    return stat_generation(os.fstat(stream.fileno()))
+
+
+def stat_generation(value) -> tuple:
     return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
 
 
@@ -307,6 +310,15 @@ def copy_archive(
     receipt = target.with_name(target.name + ".integrity.json")
     with source_stream(archive, max_bytes) as source:
         before = file_generation(source)
+        expected_receipt = {
+            "schema_version": 1,
+            "archive": target.name,
+            "sha256": verified["sha256"],
+            "bytes": before[2],
+        }
+        receipt_exists = receipt.exists() or receipt.is_symlink()
+        if receipt_exists and read_private_json(receipt) != expected_receipt:
+            raise ValueError("destination checksum receipt was modified; existing files preserved")
         if target.exists() or target.is_symlink():
             with source_stream(target, max_bytes) as existing:
                 if sha256(existing) != verified["sha256"]:
@@ -329,15 +341,8 @@ def copy_archive(
                 sync_directory(destination)
             finally:
                 Path(temporary).unlink(missing_ok=True)
-        write_private_json(
-            receipt,
-            {
-                "schema_version": 1,
-                "archive": target.name,
-                "sha256": verified["sha256"],
-                "bytes": target.stat().st_size,
-            },
-        )
+        if not receipt_exists:
+            write_private_json(receipt, expected_receipt)
     copies = [entry for entry in copies if entry["archive"] != target.name]
     copies.append({"archive": target.name, "sha256": verified["sha256"], "created_at": time.time()})
     write_private_json(index_path, {"schema_version": 1, "copies": copies})
@@ -345,6 +350,7 @@ def copy_archive(
     preserved = 0
     for entry in copies[:-keep]:
         old = destination / entry["archive"]
+        old_receipt = old.with_name(old.name + ".integrity.json")
         try:
             with source_stream(old, max_bytes) as stream:
                 generation = file_generation(stream)
@@ -352,14 +358,30 @@ def copy_archive(
                     retained.append(entry)
                     preserved += 1
                     continue
+                receipt_generation = stat_generation(old_receipt.lstat())
+                if read_private_json(old_receipt) != {
+                    "schema_version": 1,
+                    "archive": old.name,
+                    "sha256": entry["sha256"],
+                    "bytes": generation[2],
+                }:
+                    retained.append(entry)
+                    preserved += 1
+                    continue
                 current = old.lstat()
-                if (current.st_dev, current.st_ino) != generation[:2]:
+                if (
+                    stat_generation(current) != generation
+                    or stat_generation(old_receipt.lstat()) != receipt_generation
+                ):
                     retained.append(entry)
                     preserved += 1
                     continue
                 old.unlink()
-            old.with_name(old.name + ".integrity.json").unlink(missing_ok=True)
+            old_receipt.unlink(missing_ok=True)
         except FileNotFoundError:
+            if old.exists() or old.is_symlink():
+                retained.append(entry)
+                preserved += 1
             continue
         except (OSError, ValueError):
             retained.append(entry)

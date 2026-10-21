@@ -296,13 +296,51 @@ def snapshot(
             and p.is_file()
             and not p.is_symlink()
         )
-        for old in owned[:-keep]:
-            old.unlink()
-            old.with_name(old.name + ".integrity.json").unlink(missing_ok=True)
+        prune_unchanged_archives(owned[:-keep], max_bytes)
         sync_directory(destination)
         return archive
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def prune_unchanged_archives(archives: list[Path], max_bytes: int) -> None:
+    """Retain unknown/modified data; bound hashing older owned snapshots."""
+    from codex_looper.resource_config import read_private_json
+
+    recovery = recovery_module()
+    deadline, remaining = time.monotonic() + 5, max_bytes
+    for old in archives:
+        if time.monotonic() > deadline:
+            return
+        receipt = old.with_name(old.name + ".integrity.json")
+        try:
+            receipt_generation = recovery.stat_generation(receipt.lstat())
+            metadata = read_private_json(receipt)
+            with recovery.source_stream(old, remaining) as stream:
+                generation = recovery.file_generation(stream)
+                remaining -= generation[2]
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    if time.monotonic() > deadline:
+                        return
+                    digest.update(chunk)
+                if metadata != {
+                    "schema_version": 1,
+                    "archive": old.name,
+                    "sha256": digest.hexdigest(),
+                    "bytes": generation[2],
+                }:
+                    continue
+                if (
+                    recovery.file_generation(stream) != generation
+                    or recovery.stat_generation(old.lstat()) != generation
+                    or recovery.stat_generation(receipt.lstat()) != receipt_generation
+                ):
+                    continue
+                old.unlink()
+            receipt.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            continue
 
 
 def save_manifests() -> bool:

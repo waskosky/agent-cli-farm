@@ -179,6 +179,49 @@ class RecoveryTests(unittest.TestCase):
             recovery.copy_archive(self.archive, self.root / "external-copy")
         self.assertFalse((self.root / "external-copy").exists())
 
+    def test_modified_copy_receipt_is_preserved_on_retry_and_retention(self):
+        self.make_archive()
+        destination = self.root / "copies"
+        recovery.copy_archive(self.archive, destination)
+        old = destination / self.archive.name
+        receipt = old.with_name(old.name + ".integrity.json")
+        value = json.loads(receipt.read_text())
+        value["operator_note"] = "keep this recovery point"
+        write_private_json(receipt, value)
+        before = receipt.read_bytes()
+        with self.assertRaisesRegex(ValueError, "receipt was modified"):
+            recovery.copy_archive(self.archive, destination)
+        self.archive = self.root / "snapshot-next.tar.gz"
+        self.make_archive()
+        result = recovery.copy_archive(self.archive, destination, keep=1)
+        self.assertEqual(result["preserved_operator_files"], 1)
+        self.assertTrue(old.exists())
+        self.assertEqual(receipt.read_bytes(), before)
+
+    def test_retention_revalidates_in_place_changes_immediately_before_unlink(self):
+        self.make_archive()
+        destination = self.root / "copies"
+        recovery.copy_archive(self.archive, destination)
+        old = destination / self.archive.name
+        old_inode = old.stat().st_ino
+        original_generation = recovery.file_generation
+        observations = []
+
+        def generation(stream):
+            value = original_generation(stream)
+            if value[1] == old_inode:
+                observations.append(value)
+                if len(observations) == 2:
+                    old.write_bytes(b"operator changed the file after hashing")
+            return value
+
+        self.archive = self.root / "snapshot-next.tar.gz"
+        self.make_archive()
+        with patch.object(recovery, "file_generation", side_effect=generation):
+            result = recovery.copy_archive(self.archive, destination, keep=1)
+        self.assertEqual(old.read_bytes(), b"operator changed the file after hashing")
+        self.assertEqual(result["preserved_operator_files"], 1)
+
     def test_copy_retention_prunes_only_unchanged_indexed_archives(self):
         destination = self.root / "copies"
         for number in range(4):
