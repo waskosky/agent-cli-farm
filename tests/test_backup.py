@@ -99,6 +99,70 @@ class BackupTests(unittest.TestCase):
         loader.exec_module(module)
         return module
 
+    def test_enrolled_archive_saves_first_then_executes_one_required_batch_worker(self):
+        module = self.load_backup_module()
+        real_run = subprocess.run
+        for saved in (True, False):
+            with self.subTest(saved=saved):
+                args = SimpleNamespace(
+                    archive=True,
+                    skip_save=False,
+                    destination=self.destination,
+                    keep=1,
+                    max_mib=16,
+                    min_age=0,
+                    copy_to=None,
+                )
+                saved_before_admission = []
+                launched = []
+
+                def save(saved=saved, saved_before_admission=saved_before_admission):
+                    saved_before_admission.append(saved)
+                    return saved
+
+                def launch(
+                    command,
+                    saved=saved,
+                    saved_before_admission=saved_before_admission,
+                    launched=launched,
+                    **kwargs,
+                ):
+                    self.assertEqual(saved_before_admission, [saved])
+                    self.assertEqual(
+                        command[2:8], ["run", "--role", "batch", "--scope", "required", "--"]
+                    )
+                    launched.append(command)
+                    return real_run(
+                        command[8:], **kwargs, env=self.env, capture_output=True, text=True
+                    )
+
+                with (
+                    patch.dict(os.environ, self.env),
+                    patch("codex_looper.thermal.enforcing", return_value=True),
+                    patch.object(module, "save_manifests", side_effect=save),
+                    patch.object(module.subprocess, "run", side_effect=launch),
+                ):
+                    code = module.run_once(
+                        args, self.codex, self.root / "config", self.root / "state/codexfarm"
+                    )
+                self.assertEqual(code, 0 if saved else 1)
+                self.assertEqual(len(launched), 1)
+                self.assertEqual(len(list(self.destination.glob("*.tar.gz"))), 1)
+                status = json.loads((self.root / "state/codexfarm/backup-status.json").read_text())
+                self.assertTrue(status["backup_ok"])
+                self.assertEqual(status["manifest_save_ok"], saved)
+
+    def test_copy_failure_reports_local_success_and_preserves_operator_destination(self):
+        destination = self.root / "operator destination; literal"
+        destination.write_text("operator content")
+        result = self.run_backup("--copy-to", str(destination))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        status = json.loads((self.root / "state/codexfarm/backup-status.json").read_text())
+        self.assertTrue(status["backup_ok"])
+        self.assertFalse(status["copy_ok"])
+        self.assertEqual(destination.read_text(), "operator content")
+        self.assertEqual(len(list(self.destination.glob("*.tar.gz"))), 1)
+
     def test_manifest_only_watcher_never_scans_or_copies_provider_history(self):
         module = self.load_backup_module()
         state = self.root / "state/codexfarm"
@@ -186,6 +250,76 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(list(self.destination.glob("*.tar.gz")), previous)
         self.assertEqual((self.destination / "latest.json").read_bytes(), latest)
         self.assertFalse(list(self.destination.glob(".snapshot-*")))
+
+    def test_publication_failures_preserve_a_verified_recovery_point_before_pruning(self):
+        self.assertEqual(self.run_backup().returncode, 0)
+        module = self.load_backup_module()
+        prior = next(self.destination.glob("*.tar.gz"))
+        latest_path = self.destination / "latest.json"
+        prior_bytes = prior.read_bytes()
+        real_atomic = module.atomic_json
+        real_sync = module.sync_directory
+        for boundary in ("archive-directory", "receipt", "latest", "published-latest"):
+            with self.subTest(boundary=boundary):
+                before = latest_path.read_bytes()
+
+                def atomic(path, value, selected=boundary):
+                    if selected == "receipt" and path.name.endswith(".integrity.json"):
+                        raise OSError("injected receipt publication failure")
+                    if path.name == "latest.json" and selected == "latest":
+                        raise OSError("injected latest publication failure")
+                    real_atomic(path, value)
+                    if path.name == "latest.json" and selected == "published-latest":
+                        raise OSError("injected failure after latest publication")
+
+                def sync(path, selected=boundary):
+                    if selected == "archive-directory":
+                        raise OSError("injected archive directory flush failure")
+                    real_sync(path)
+
+                with (
+                    patch.dict(os.environ, self.env),
+                    patch.object(module, "atomic_json", side_effect=atomic),
+                    patch.object(module, "sync_directory", side_effect=sync),
+                    self.assertRaises(OSError),
+                ):
+                    module.snapshot(self.codex, self.root / "config", self.destination, 1, True)
+                self.assertEqual(prior.read_bytes(), prior_bytes)
+                if boundary != "published-latest":
+                    self.assertEqual(latest_path.read_bytes(), before)
+                latest = json.loads(latest_path.read_text())
+                self.assertTrue(
+                    module.recovery_module().verify_archive(self.destination / latest["archive"])[
+                        "verified"
+                    ]
+                )
+        # A successful retry may finally prune only after publishing its verified replacement.
+        unreceipted = {
+            path
+            for path in self.destination.glob("*.tar.gz")
+            if not path.with_name(path.name + ".integrity.json").exists()
+        }
+        with patch.dict(os.environ, self.env):
+            result = module.snapshot(self.codex, self.root / "config", self.destination, 1, True)
+        self.assertTrue(module.recovery_module().verify_archive(result)["verified"])
+        self.assertFalse(prior.exists())
+        self.assertEqual(set(self.destination.glob("*.tar.gz")), {result} | unreceipted)
+
+    def test_local_retention_preserves_modified_archives_and_checksum_receipts(self):
+        self.assertEqual(self.run_backup().returncode, 0)
+        first = next(self.destination.glob("*.tar.gz"))
+        first.write_bytes(b"operator replacement")
+        self.assertEqual(self.run_backup().returncode, 0)
+        second = next(path for path in self.destination.glob("*.tar.gz") if path != first)
+        receipt = second.with_name(second.name + ".integrity.json")
+        value = json.loads(receipt.read_text())
+        value["operator_note"] = "preserve this recovery point"
+        receipt.write_text(json.dumps(value))
+        before = receipt.read_bytes()
+        self.assertEqual(self.run_backup().returncode, 0)
+        self.assertEqual(first.read_bytes(), b"operator replacement")
+        self.assertTrue(second.exists())
+        self.assertEqual(receipt.read_bytes(), before)
 
     def test_snapshot_preserves_uncheckpointed_wal_and_excludes_credentials(self):
         connection = sqlite3.connect(self.codex / "state_5.sqlite")

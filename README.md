@@ -29,10 +29,16 @@ backward compatibility.
 - Optional `lsof` improves exact-session discovery for Claude, Gemini, and
   Codex panes whose lifecycle hook has not run.
 - Git only for looper backup branches and git-progress circuit breakers.
-- Systemd user services only for autosave/autorestore.
+- Systemd user services for autosave/autorestore and optional WSL thermal protection.
 - Optional network access during `setup.sh --with-deep-history` to download the checksum-pinned plugin release.
+- Optional Windows thermal setup needs WSL2, working Windows interop, network
+  access for pinned sensor packages, and Windows administrator approval.
 
-`setup.sh` reports missing operating-system dependencies; it does not install packages. Source it when you want the current shell's `PATH` refreshed. The script keeps strict shell options inside helper scopes, so sourcing it should not leak options or functions into your shell.
+`setup.sh` reports missing package-manager dependencies without installing them.
+Its optional Windows thermal step can install the separately approved hardware
+driver described below. Source setup when you want the current shell's `PATH`
+refreshed. Strict shell options stay inside helper scopes, so sourcing it should
+not leak options or functions into your shell.
 
 ## Quick Start
 
@@ -82,6 +88,37 @@ and performs no host preview or apply. `--with-memory-protection` explicitly
 enables the two user options; unattended runs print exact manual host commands
 without running them. `--without-memory-protection` skips both questions and
 preserves all settings. The two flags conflict. Neither flag changes AI options.
+
+On Windows, run the farm inside **WSL2**, rather than native PowerShell or Git
+Bash. An interactive first-time setup also offers CPU temperature monitoring and
+managed batch protection, followed by a separate default-no whole-machine
+cooling choice. To select both explicitly:
+
+```bash
+./setup.sh --with-thermal-protection --with-windows-cooling
+```
+
+This downloads and checks pinned Windows sensor packages when needed, opens the
+Windows administrator prompt, verifies fresh CPU readings, and enables the WSL
+thermal service. Whole-machine cooling disables boost and sets maximum processor
+performance to 80% on AC and battery for all Windows/WSL work; the original power
+plan is preserved. Omit `--with-windows-cooling` to decide separately at the prompt,
+or use `--without-windows-cooling` to skip that choice. Existing thermal settings
+skip the normal first-time offer; explicit `--with-thermal-protection` refreshes
+the integration while preserving numeric thresholds. Healthy existing sensors
+and a verified active cooling profile are reused without Windows elevation.
+
+Unattended thermal/cooling setup only prints the command to run from a terminal,
+even with explicit enable flags. Default unattended setup never probes Windows
+or reads thermal settings. `--without-thermal-protection` and
+`--without-windows-cooling` preserve existing safeguards and power choices.
+Disabled Windows tasks/drivers, masked Linux services and conflicting or modified
+cooling profiles are preserved. See [temperature safeguards](#optional-cpu-temperature-safeguards)
+for thresholds, scope and manual controls.
+
+Session recovery keeps its independent farm opt-in. Run
+`codex-add --install-autoservice` to install or refresh the five-minute manifest
+autosave and automatic restore. Thermal choices do not enable conversation archives.
 
 Codex requires review for non-managed command hooks. Open `/hooks` in Codex CLI
 after setup and trust the Agent CLI Farm hook. Provider hooks receive the active
@@ -479,9 +516,9 @@ codex-add --session work --install-autoservice
 codex-add --session personal --install-autoservice
 ```
 
-Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session. Autosave uses the conservative policy above and runs after autorestore when both services start together. Re-run `codex-add --install-autoservice` to refresh existing service definitions. Older units that already invoke `codex-save --all-registered` also receive the conservative policy automatically.
+Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session. New service definitions use `--best-effort`: verified conversations are merged into the recovery set even when another pane is unresolved, earlier conversations remain recoverable, and incomplete coverage still returns nonzero. A manual `codex-save` deliberately selects a smaller restore set. Standalone `--autosave` retains its conservative replacement policy. Saves run after autorestore when both services start together. Re-run `codex-add --install-autoservice` to refresh existing service definitions. The detached tmux server intentionally survives the short-lived restore launcher's exit, including partial restore failures.
 
-Autosave defaults to `codex-save --all-registered` every five minutes at low CPU
+Autosave defaults to `codex-save --all-registered --best-effort` every five minutes at low CPU
 and idle I/O priority, with a three-minute helper timeout. It saves small
 manifests of exact session identities. To explicitly schedule conversation
 archives, use `codex-add --install-autoservice --with-conversation-backups`;
@@ -580,6 +617,95 @@ For history still in the current Codex home, `codex resume --all` shows chats
 from every working directory, and `codex -C /path/to/repo resume UUID` opens an
 exact conversation. A saved tmux manifest is a window index, not the chat
 transcript itself. Restoring windows does not submit a continuation prompt.
+
+### Resource reliability and verified recovery
+
+See the [resource reliability guide](docs/resource-reliability.md) for guard/sensor
+heartbeats, recovery watchdogs, explicit per-batch CPU/RAM/concurrency profiles,
+private aggregate history, exact-session capture receipts and bounded restore
+retries. `codex-doctor` reports unavailable or stale thermal protection even when
+memory and autosave are healthy. Installed/running helper generations are checked.
+
+`codex-recovery verify|extract|copy|workspace` provides checksum/inventory/database
+verification, extraction into a new private tree, optional verified copies and
+explicit workspace snapshots. `codex-backup --archive --copy-to DIRECTORY` adds a
+separately selected copy destination; full archives and external copies stay off
+until chosen. Completed archives are verified before replacing the recovery
+pointer or pruning prior snapshots. On thermally protected installations,
+manifest capture precedes admission of heavy archive work into its batch scope.
+
+### Optional CPU temperature safeguards
+
+Temperature monitoring and enforcement default off and have separate private
+settings in `~/.config/codexfarm/thermal-settings.json`. Interactive WSL setup can
+install and enable the bridge automatically after opt-in using the command above.
+The installed `~/bin/codex-setup-thermal.py --with-thermal-protection` also runs
+this step without reinstalling the other helpers. Linux monitoring reads
+a small timestamped sensor file; it never launches Windows or a model from the
+annotator. On WSL, `tools/thermal-windows/sensor.ps1` reads real CPU sensors
+through LibreHardwareMonitor. Its installer requires the checksum-pinned release
+ZIP and signed PawnIO installer alongside it, previews without `-Apply`, and
+requires explicit administrator approval for `-Apply`. It installs under
+`C:\ProgramData\CodexFarm\Thermal` with administrator/SYSTEM write permissions
+and a dedicated Windows startup task. It changes no fan or Windows power settings.
+
+After the Windows helper produces consecutive fresh readings, explicitly enable:
+
+```bash
+codex-thermal configure --sensor-file /mnt/c/ProgramData/CodexFarm/Thermal/temperature.json --enforce
+codex-thermal install-service
+codex-thermal status
+```
+
+The per-user service checks every five seconds. Its heartbeat, process identity,
+source/settings generation and actual enforcement outcomes are checked separately
+from sensor freshness; a configured enable flag alone is not healthy protection.
+The Windows sensor has bounded file-replacement retries, a dedicated recovery
+watchdog and cached read-only cooling-profile checks. Disabled/changed operator
+tasks and power choices are preserved. The Linux guard uses a 30-second watchdog
+and bounded restart, with a combined two-second manager budget per pass.
+
+The default profile warns at
+80 C, queues new registered batch jobs at 85 C, and at 90 C shares a combined
+200% CPU budget (two CPUs of CPU time) across identity-verified running batch
+scopes. Existing stronger or unknown CPU quotas and later operator changes are
+preserved. Cooling must remain below 75 C for 60 seconds before this monitor's
+own reversible limits are released. The bounded private rollback journal also
+survives monitor restarts. These settings are intended as a configurable example,
+not universal hardware limits.
+
+Run heavy work through the managed launcher:
+
+```bash
+codex-job run --role batch --scope required -- python3 -m pytest
+```
+
+When thermal enforcement is enabled, batch jobs require enforcing scopes and
+wait on hot, stale or unavailable readings. The existing queue timeout still
+applies. Memory overrides do not bypass the thermal gate. Interactive agent
+admission stays immediate; agents are never capped, paused or restarted. Jobs
+launched outside `codex-job`, Windows applications and GPU load are outside
+this CPU enforcement policy. No host-wide CPU limits are installed.
+
+The tmux health display includes the CPU temperature or an unavailable warning.
+To disable enforcement, configure without `--enforce`; the running monitor
+releases only its own unchanged limits. Disable monitoring with
+`codex-thermal configure --sensor-file /absolute/sensor/path --disable`.
+Explicit service installation respects masks and never unmasks a unit.
+
+For a separately approved whole-machine cooling policy on Windows, setup offers
+or accepts `--with-windows-cooling`. For manual use,
+`tools/thermal-windows/cooling-profile.ps1 -Action plan -OriginalScheme GUID`
+previews a dedicated “CodexFarm Cool” copy of the chosen original power plan.
+Administrator-approved `-Action apply -OriginalScheme GUID`
+disables CPU boost and sets maximum processor performance to 80% on AC and
+battery, affecting all Windows and WSL work. This requires an explicit exception
+to the normal job-only policy and is never implied by sensor installation.
+The original power plan is exported and preserved. Setup prints the exact undo
+command and saves its GUID in private `thermal-setup.json` state;
+`-Action restore -OriginalScheme GUID` switches back only while the cooling
+profile is still active. Manual commands default to the standard Balanced GUID
+when `-OriginalScheme` is omitted.
 
 ## Status Updates (RUN/READY/ERR)
 
@@ -906,6 +1032,8 @@ Tuning and controls:
 - **`codex-job run [options] -- argv ...`** - Run declared jobs with optional scopes, batch admission and explicit restart consent
 - **`codex-resource configure|status|report|investigate`** - Configure independent opt-ins and inspect bounded incident diagnosis
 - **`setup.sh --with-memory-protection|--without-memory-protection`** - Enable user memory options or skip the choice; interactive host apply requires separate consent
+- **`setup.sh --with-thermal-protection [--with-windows-cooling]`** - Set up Windows/WSL sensors and batch thermal protection; whole-machine cooling requires its separate opt-in
+- **`codex-thermal status|configure|install-service`** - Inspect or explicitly enable the optional thermal guard
 - **`codex-resource-host plan|apply|maintain|remove`** - Review and explicitly install standalone host memory/OOM preferences
 - **`codex-health`** - Check RAM pressure, the monitor heartbeat and opted-in archive health
 - **`codex-backup [--archive]`** - Save exact farm identities; full conversation archives require `--archive`

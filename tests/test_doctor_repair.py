@@ -90,6 +90,19 @@ class DoctorRepairTests(unittest.TestCase):
         self.assertFalse(any("enable" in call or "unmask" in call for call in self.calls))
         self.assertFalse((self.repair.state / "conversation_backup_choice").exists())
 
+    def test_windows_setup_assets_are_repaired_without_executing_windows(self):
+        source = self.root / "source"
+        bundle = source / "tools/thermal-windows"
+        bundle.mkdir(parents=True)
+        asset = bundle / "setup.ps1"
+        asset.write_text("# private PowerShell fixture\n")
+        self.repair.source = source
+        self.repair.helpers()
+        installed = self.repair.install / "codexfarm-thermal-windows/setup.ps1"
+        self.assertEqual(installed.read_bytes(), asset.read_bytes())
+        self.assertEqual(installed.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.calls, [])
+
     def test_failed_capture_does_not_clear_failure_or_retry_service(self):
         self.repair.services(captured=False)
         self.assertTrue(self.failed)

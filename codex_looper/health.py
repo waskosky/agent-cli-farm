@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import re
+import stat
 import subprocess
 import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from codex_looper.component_versions import HEALTH_FILES, fingerprint
 from codex_looper.resource_policy import finite_number, valid_memory_reading
+
+IMPLEMENTATION = fingerprint(HEALTH_FILES)
 
 MEMORY_FLAG_PATTERN = r"\*[0-9]+(?:\.[0-9]+)?\+?MB\*\*"
 
@@ -239,12 +244,68 @@ def shared_codex_servers(processes: str) -> set[int]:
     return servers
 
 
+def read_bounded(path: Path, limit: int = 65536) -> bytes:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("health input must be a regular file")
+        value = stream.read(limit + 1)
+    if len(value) > limit:
+        raise ValueError("health input exceeds its size budget")
+    return value
+
+
 def read_json(path: Path) -> dict:
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(read_bounded(path))
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def capture_issues(state: Path, now: float) -> list[str]:
+    """Check bounded save receipts independently of full-archive consent."""
+    try:
+        if read_bounded(state / "autoservice_choice", 128).strip() != b"yes":
+            return []
+        registry = read_bounded(config_directory() / "farms.tsv").decode().splitlines()
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        return ["manifest save registry is inaccessible or invalid"]
+    issues = []
+    seen = set()
+    for index, row in enumerate(registry):
+        if row == "session\tmanifest" or not row.strip():
+            continue
+        if index >= 128:
+            issues.append("manifest save health coverage exceeds the bounded registry scan")
+            break
+        fields = row.split("\t")
+        if len(fields) != 2 or not Path(fields[1]).is_absolute():
+            issues.append("manifest save registry contains an invalid row")
+            continue
+        path = Path(fields[1])
+        if path in seen:
+            continue
+        seen.add(path)
+        receipt = path.with_name(path.name + ".capture.json")
+        if not receipt.exists():
+            # Compatibility for old services until their first upgraded save.
+            continue
+        value = read_json(receipt)
+        if value.get("schema_version") != 1 or age(value.get("checked_at"), now) > 900:
+            issues.append("manifest save heartbeat is invalid or older than 15 minutes")
+        if value.get("complete") is not True:
+            issues.append("latest manifest capture has unresolved provider panes")
+        try:
+            if hashlib.sha256(read_bounded(path, 1048576)).hexdigest() != value.get(
+                "manifest_sha256"
+            ):
+                issues.append("manifest changed since its last verified capture")
+        except (OSError, ValueError):
+            issues.append("saved manifest is inaccessible to bounded health checks")
+    return sorted(set(issues))
 
 
 def age(value: object, now: float) -> float:
@@ -263,8 +324,8 @@ def backups_expected(state: Path) -> bool:
     choices = []
     for name in ("autoservice_choice", "conversation_backup_choice"):
         try:
-            choices.append((state / name).read_text().strip().lower())
-        except OSError:
+            choices.append(read_bounded(state / name, 128).decode().strip().lower())
+        except (OSError, ValueError):
             choices.append("")
     if "no" in choices:
         return False
@@ -286,6 +347,10 @@ def backup_issues(state: Path, now: float, *, expected: bool) -> list[str]:
         issues.append("latest exact session manifest save failed or was skipped")
     if status.get("backup_ok") is not True:
         issues.append("latest conversation backup failed")
+    if status.get("copy_requested") is True and status.get("copy_ok") is not True:
+        issues.append(
+            "latest explicitly selected archive copy failed; local archive may remain healthy"
+        )
     destination = Path(str(status.get("destination", state / "backups")))
     latest = read_json(destination / "latest.json")
     archive = destination / Path(str(latest.get("archive", "missing"))).name
@@ -303,7 +368,14 @@ def write_status(path: Path, value: dict) -> None:
         with os.fdopen(descriptor, "w") as handle:
             json.dump(value, handle)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -389,8 +461,41 @@ class HealthMonitor:
             )
         if issues:
             labels.append("BACKUP WARNING")
+        save_issues = capture_issues(self.state, now)
+        if save_issues:
+            labels.append("SAVE WARNING")
+            active.add("save")
+        # The independent thermal service does hardware polling/remedies. The
+        # annotator only reads a bounded local sample and never awaits Windows.
+        thermal = None
+        try:
+            from .thermal import protection_status
+
+            thermal = protection_status(now=now, monotonic_now=time.monotonic())
+            if thermal["cpu_celsius"] is not None:
+                labels.append(f"CPU {thermal['cpu_celsius']:.0f}C")
+            elif thermal["level"] == "unavailable":
+                labels.append("CPU TEMP UNAVAILABLE")
+            if thermal["configured_enforcement"] and not thermal["guard_ready"]:
+                labels.append("THERMAL GUARD UNAVAILABLE")
+            if thermal.get("cooling", {}).get("health") in {"degraded", "unavailable"}:
+                labels.append("COOLING PROFILE WARNING")
+            if "sensor_upgrade_needed" in thermal["issue_codes"]:
+                labels.append("SENSOR UPDATE NEEDED")
+            if "sensor_recovery_unavailable" in thermal["issue_codes"]:
+                labels.append("SENSOR RECOVERY WARNING")
+            if "history_unavailable" in thermal["issue_codes"]:
+                labels.append("RESOURCE HISTORY WARNING")
+            if thermal["health"] not in {"healthy", "disabled"}:
+                active.add("thermal")
+        except (OSError, ValueError, TypeError):
+            labels.append("CPU TEMP CONFIG ERROR")
+            active.add("thermal")
         label = " | ".join(labels)
         signature = active | ({"critical"} if level == "critical" else set())
+        if thermal and "thermal" in active:
+            signature.add("thermal:" + thermal["level"])
+            signature.update(thermal["issue_codes"])
         notify = bool(active) and (signature != self.active or now - self.last_notice >= 300)
         for session in sessions:
             tmux(["tmux", "set-option", "-t", session, "@codexfarm_health", label])
@@ -420,6 +525,8 @@ class HealthMonitor:
         write_status(
             self.state / "health-status.json",
             {
+                "schema_version": 1,
+                "implementation": IMPLEMENTATION,
                 "checked_at": now,
                 "pid": os.getpid(),
                 "memory": asdict(memory) if memory else None,
@@ -428,6 +535,8 @@ class HealthMonitor:
                 "shared_servers_mib": shared_mib,
                 "warnings": labels,
                 "backup_issues": issues,
+                "save_issues": save_issues,
+                "thermal": thermal,
             },
         )
 
@@ -448,7 +557,7 @@ class HealthMonitor:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Report farm memory, backup and monitor health.",
+        description="Report farm memory, backup, thermal and monitor health.",
         epilog=(
             "RAM defaults: warning <=1536 MiB available, critical <=1024 MiB. "
             "CODEXFARM_MEMORY_POLICY=headroom|percent; CODEXFARM_MEMORY_WARN_MIB "
@@ -486,11 +595,24 @@ def main() -> int:
     )
     state, now = state_directory(), time.time()
     issues = backup_issues(state, now, expected=backups_expected(state))
+    issues.extend(capture_issues(state, now))
+    try:
+        from .thermal import protection_status
+
+        thermal = protection_status()
+        issues.extend(thermal["issues"])
+        if thermal["health"] == "healthy":
+            mode = "verified guard" if thermal["effective_enforcement"] else "monitoring"
+            print(f"Thermal healthy: CPU {thermal['cpu_celsius']:.0f}C; {mode}")
+    except (OSError, ValueError, TypeError):
+        issues.append("thermal settings or protection status are invalid")
     health = read_json(state / "health-status.json")
     if (state / "managed_sessions").exists() or health:
         if age(health.get("checked_at"), now) > 60:
             issues.append("memory monitor heartbeat missing or older than 60 seconds")
         else:
+            if health.get("implementation") != IMPLEMENTATION:
+                issues.append("memory/status monitor is running older code; run codex-doctor --fix")
             shared_mib = health.get("shared_servers_mib", 0)
             if isinstance(shared_mib, int | float) and math.isfinite(shared_mib) and shared_mib > 0:
                 print(

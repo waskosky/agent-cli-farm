@@ -34,6 +34,7 @@ Provider conversations require exact IDs; latest/continue resumes are disabled.
 Use --list-snapshots to find retained snapshots, then pass the chosen path here.
 Launches are spaced by 2 seconds (0..300, also CODEXFARM_RESTORE_DELAY_SECONDS).
 Memory pressure is advisory by default: warnings do not block restoration.
+--skip-active leaves externally owned Codex conversations alone (scheduled recovery).
 --enforce-memory-pressure stops at critical pressure; --ignore-memory-pressure skips checks.
 An enforced refusal exits 3 for one farm; --all-registered aggregates child failures as exit 1.
 CODEXFARM_RESTORE_MEMORY_POLICY=warn|enforce|ignore sets the default; CLI flags override it.
@@ -282,6 +283,7 @@ restore_all_registered() {
     if [ "$force_requested" -eq 1 ]; then
       restore_args+=("--force")
     fi
+    [ "$skip_active" -eq 0 ] || restore_args+=(--skip-active)
     restore_args+=("$manifest")
     if [ "$count" -gt 0 ]; then
       sleep "$RESTORE_DELAY"
@@ -303,6 +305,7 @@ restore_all_registered() {
 
 attach=0
 force=0
+skip_active=0
 all_registered=0
 list_snapshots=0
 args_pos=()
@@ -310,6 +313,7 @@ while (( "$#" )); do
   case "${1:-}" in
     -a|--attach) attach=1; shift ;;
     -f|--force) force=1; shift ;;
+    --skip-active) skip_active=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --all-registered) all_registered=1; shift ;;
     --ignore-memory-pressure) memory_policy=ignore; shift ;;
@@ -323,6 +327,11 @@ while (( "$#" )); do
     *) args_pos+=("$1"); shift ;;
   esac
 done
+
+if [ "$skip_active" -eq 1 ] && [ "$force" -eq 1 ]; then
+  echo "--skip-active cannot be combined with --force" >&2
+  exit 2
+fi
 
 case "$memory_policy" in
   warn|enforce|ignore) ;;
@@ -389,9 +398,29 @@ fi
 
 # Validate the entire manifest before touching tmux, including --force. Use one
 # stable, normalized copy throughout restore even if the source is replaced.
+export CODEXFARM_LOCK_SCRIPT_PID=$$
 validated_manifest=$(mktemp)
-trap 'rm -f "$validated_manifest"' EXIT
+restore_outcomes=""
+finish_restore() {
+  local result=$?
+  trap - EXIT
+  if [ -n "$restore_outcomes" ] && [ -s "$validated_manifest" ]; then
+    if ! python3 "$MANIFEST_BIN" record-restore "$MANIFEST_PATH" \
+      --normalized "$validated_manifest" --outcomes "$restore_outcomes" --exit-code "$result"; then
+      echo "Warning: unable to persist restore outcomes; existing recovery data preserved." >&2
+      [ "$result" -ne 0 ] || result=2
+    fi
+  fi
+  rm -f "$validated_manifest"
+  [ -z "$restore_outcomes" ] || rm -f "$restore_outcomes"
+  exit "$result"
+}
+trap finish_restore EXIT
 python3 "$MANIFEST_BIN" validate --resolve-codex "$MANIFEST_PATH" > "$validated_manifest" || exit 2
+restore_outcomes=$(mktemp)
+record_restore_outcome() {
+  printf '%s\t%s\n' "$restore_row" "$1" >> "$restore_outcomes"
+}
 
 if ! command -v tmux >/dev/null; then
   echo "tmux not found" >&2
@@ -482,9 +511,11 @@ seen_names=()
 seen_counts=()
 restore_failures=0
 restored=0
+restore_row=0
 {
   IFS= read -r _header || true
   while IFS= read -r row; do
+    restore_row=$((restore_row + 1))
     parse_manifest_row "$row"
     next_name_occurrence "$name"
     restore_dir="${dir:-$HOME}"
@@ -507,9 +538,11 @@ restored=0
       conversation_active_in_other_farm "$RESTORE_CMD" "$exact_session_id" || other_farm_status=$?
       if [ "$other_farm_status" -eq 0 ]; then
         echo "Skipping existing conversation in another farm: $name"
+        record_restore_outcome active_elsewhere
         continue
       elif [ "$other_farm_status" -ne 1 ]; then
         echo "Unable to inspect other tmux farms before restoring '$name'." >&2
+        record_restore_outcome inspection_failed
         restore_failures=$((restore_failures + 1))
         continue
       fi
@@ -517,6 +550,7 @@ restored=0
     if [ "$force" -eq 0 ]; then
       if [ -n "$exact_session_id" ] && session_already_present "$RESTORE_CMD" "$exact_session_id"; then
         echo "Skipping existing conversation: $name"
+        record_restore_outcome already_present
         continue
       fi
       existing_target="$(
@@ -526,16 +560,24 @@ restored=0
         if [ -n "$exact_session_id" ]; then
           echo "Existing window '$name' has a different or unverified conversation; use --force to replace it or restore into another farm." >&2
           restore_failures=$((restore_failures + 1))
+          record_restore_outcome identity_conflict
         else
           echo "Skipping existing window: $name"
+          record_restore_outcome already_present
         fi
         continue
       fi
     fi
     if [ "$RESTORE_CMD" = "codex" ] && [ -n "$exact_session_id" ]; then
       if ! codex_session_is_writable "$exact_session_id"; then
+        if [ "$skip_active" -eq 1 ]; then
+          echo "Leaving already active Codex conversation outside this farm: $name"
+          record_restore_outcome active_elsewhere
+          continue
+        fi
         echo "Unable to restore Codex window '$name': its conversation is active in another Codex process." >&2
         echo "Switch to it with /resume in the owning TUI, or exit that Codex process and rerun codex-restore." >&2
+        record_restore_outcome writer_conflict
         restore_failures=$((restore_failures + 1))
         continue
       fi
@@ -547,7 +589,10 @@ restored=0
     if [ "$restored" -gt 0 ]; then
       sleep "$RESTORE_DELAY"
     fi
-    check_memory || exit 3
+    if ! check_memory; then
+      record_restore_outcome memory_pressure
+      exit 3
+    fi
     if ! CODEXFARM_RESTORE_PID="$$" \
       CODEX_TOOL_NAME="$restore_provider" \
       CODEX_SESSION="$SESSION" \
@@ -556,10 +601,12 @@ restored=0
       CODEX_ARGS="$RESTORE_ARGS" \
       "$ADD_BIN" -d "$restore_dir"; then
       echo "Unable to launch saved window: $name" >&2
+      record_restore_outcome launch_failed
       restore_failures=$((restore_failures + 1))
       continue
     fi
     restored=$((restored + 1))
+    record_restore_outcome launched
     if [ "$force" -eq 0 ] && [ -n "$exact_session_id" ]; then
       existing_identities+=("$RESTORE_CMD"$'\t'"$exact_session_id")
     fi

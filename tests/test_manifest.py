@@ -1,7 +1,9 @@
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -21,6 +23,105 @@ class ManifestTests(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(HELPER), *map(str, args)], text=True, capture_output=True
         )
+
+    def test_unchanged_manifest_refreshes_capture_without_rewriting_recovery_bytes(self):
+        content = HEADER + "shell\t/tmp\tbash\t\n"
+        self.manifest.write_text(content)
+        os.utime(self.manifest, (1000, 1000))
+        candidate = self.root / "candidate.tsv"
+        candidate.write_text(content)
+        result = self.run_helper("publish", candidate, self.manifest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.manifest.stat().st_mtime, 1000)
+        receipt = self.manifest.with_name(self.manifest.name + ".capture.json")
+        value = json.loads(receipt.read_text())
+        self.assertTrue(value["complete"])
+        self.assertLess(time.time() - value["checked_at"], 5)
+        self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.run_helper("capture-check", self.manifest).returncode, 0)
+        self.manifest.write_text(content.replace("shell", "changed"))
+        self.assertNotEqual(self.run_helper("capture-check", self.manifest).returncode, 0)
+
+    def test_partial_capture_keeps_coverage_failure_visible(self):
+        candidate = self.root / "candidate.tsv"
+        candidate.write_text(HEADER + "shell\t/tmp\tbash\t\n")
+        result = self.run_helper(
+            "publish", candidate, self.manifest, "--merge", "--unresolved", "2"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(
+            self.manifest.with_name(self.manifest.name + ".capture.json").read_text()
+        )
+        self.assertFalse(receipt["complete"])
+        self.assertEqual(receipt["unresolved_panes"], 2)
+        self.assertNotEqual(self.run_helper("capture-check", self.manifest).returncode, 0)
+
+    def test_restore_outcomes_are_bounded_private_and_attempts_are_per_manifest(self):
+        self.manifest.write_text(
+            HEADER + f"private-name\t/private/path\tcodex\tresume {SESSION_ID}\n"
+        )
+        outcomes = self.root / "outcomes.tsv"
+        outcomes.write_text("1\tlaunch_failed\n")
+        args = (
+            "record-restore",
+            self.manifest,
+            "--normalized",
+            self.manifest,
+            "--outcomes",
+            outcomes,
+            "--exit-code",
+            "1",
+        )
+        self.assertEqual(self.run_helper(*args).returncode, 0)
+        path = self.manifest.with_name(self.manifest.name + ".restore.json")
+        value = json.loads(path.read_text())
+        self.assertFalse(value["complete"])
+        self.assertEqual(value["attempt"], 1)
+        for private in ("private-name", "/private/path", SESSION_ID):
+            self.assertNotIn(private, path.read_text())
+        outcomes.write_text("1\talready_present\n")
+        self.assertEqual(self.run_helper(*args[:-1], "0").returncode, 0)
+        value = json.loads(path.read_text())
+        self.assertTrue(value["complete"])
+        self.assertEqual(value["attempt"], 2)
+        self.assertEqual(value["counts"], {"already_present": 1})
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        outcomes.write_text("1\talready_present\n1\tlaunched\n")
+        before = path.read_bytes()
+        self.assertNotEqual(self.run_helper(*args).returncode, 0)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_history_retention_is_explicit_and_preserves_operator_files(self):
+        candidate = self.root / "candidate.tsv"
+        for index in range(4):
+            candidate.write_text(HEADER + f"shell-{index}\t/tmp\tbash\t\n")
+            self.assertEqual(self.run_helper("publish", candidate, self.manifest).returncode, 0)
+        history = self.manifest.with_name(self.manifest.name + ".history")
+        self.assertEqual(len(list(history.glob("*.tsv"))), 4)
+        operator = history / ("20000101T000000.000000Z-" + "0" * 64 + ".tsv")
+        operator.write_text("operator content")
+        operator.chmod(0o600)
+        result = self.run_helper("prune-history", self.manifest, "--keep", "2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        counts = json.loads(result.stdout)
+        self.assertEqual(counts["pruned"], 2)
+        self.assertEqual(operator.read_text(), "operator content")
+        self.assertEqual(len(list(history.glob("*.tsv"))), 3)
+        self.assertTrue(
+            any(path.read_bytes() == self.manifest.read_bytes() for path in history.glob("*.tsv"))
+        )
+
+    def test_invalid_automatic_history_retention_fails_before_manifest_mutation(self):
+        from unittest.mock import patch
+
+        self.manifest.write_text(HEADER + "old\t/tmp\tbash\t\n")
+        before = self.manifest.read_bytes()
+        candidate = self.root / "candidate.tsv"
+        candidate.write_text(HEADER + "new\t/tmp\tbash\t\n")
+        with patch.dict(os.environ, {"CODEXFARM_MANIFEST_HISTORY_KEEP": "invalid"}):
+            result = self.run_helper("publish", candidate, self.manifest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.manifest.read_bytes(), before)
 
     def test_validation_rejects_unsafe_or_malformed_rows(self):
         for row in (

@@ -51,16 +51,24 @@ def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return value
 
 
-def read_private_json(path: Path) -> dict:
+def read_private_bytes(path: Path, *, max_bytes: int = MAX_JSON_BYTES) -> bytes:
     directory = _directory_fd(path.parent)
     try:
         fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+        with os.fdopen(fd, "rb") as stream:
             _validate_stat(os.fstat(stream.fileno()), directory=False)
-            data = stream.read(MAX_JSON_BYTES + 1)
-        if len(data.encode("utf-8")) > MAX_JSON_BYTES:
-            raise ValueError("resource JSON exceeds size limit")
-        value = json.loads(data, object_pairs_hook=_no_duplicates)
+            data = stream.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError("resource storage exceeds size limit")
+        return data
+    finally:
+        os.close(directory)
+
+
+def read_private_json(path: Path) -> dict:
+    try:
+        data = read_private_bytes(path)
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=_no_duplicates)
         if not isinstance(value, dict):
             raise ValueError("resource JSON must be an object")
         return value
@@ -68,14 +76,18 @@ def read_private_json(path: Path) -> dict:
         if isinstance(exc, FileNotFoundError):
             raise
         raise ValueError("resource JSON is inaccessible or invalid") from exc
-    finally:
-        os.close(directory)
 
 
 def write_private_json(path: Path, value: dict) -> Path:
-    """Atomically replace a private file, refusing existing unsafe paths."""
-    data = json.dumps(value, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n"
-    if len(data.encode("utf-8")) > MAX_JSON_BYTES:
+    data = (
+        json.dumps(value, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    return write_private_bytes(path, data)
+
+
+def write_private_bytes(path: Path, data: bytes, *, max_bytes: int = MAX_JSON_BYTES) -> Path:
+    """Atomically publish bounded private data and flush both file and directory."""
+    if not isinstance(data, bytes) or len(data) > max_bytes:
         raise ValueError("resource JSON exceeds size limit")
     private_directory(path.parent, create=True)
     directory = _directory_fd(path.parent)
@@ -90,7 +102,7 @@ def write_private_json(path: Path, value: dict) -> Path:
         fd = os.open(
             temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory
         )
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        with os.fdopen(fd, "wb") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())

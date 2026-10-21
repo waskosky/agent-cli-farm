@@ -93,3 +93,26 @@ jobs:
           python -m unittest -v
           tests.test_add_scripts.AddScriptsTests
           tests.test_add_scripts.RestoreScriptTests
+
+  windows-thermal-helpers:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parse Windows helpers without installing them
+        shell: powershell
+        run: |
+          $found = @()
+          Get-ChildItem tools/thermal-windows/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors) { $found += $parseErrors }
+          }
+          if ($found.Count) { throw ($found | Out-String) }
+      - name: Exercise atomic publication and watchdog decisions without hardware or tasks
+        shell: powershell
+        run: ./tools/thermal-windows/sensor.ps1 -SelfTest
+      - name: Check installer ownership and operator choices without applying changes
+        shell: powershell
+        run: ./tools/thermal-windows/install.ps1 -SelfTest

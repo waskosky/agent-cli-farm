@@ -89,6 +89,8 @@ esac
         self.env.pop("TMUX", None)
         self.env["XDG_STATE_HOME"] = str(self.tmpdir / "state")
         self.env["XDG_CONFIG_HOME"] = str(self.tmpdir / "config")
+        self.env["XDG_DATA_HOME"] = str(self.tmpdir / "data")
+        self.env.pop("CODEXFARM_DEEP_HISTORY_BIN", None)
         self.env["HOME"] = str(self.tmpdir)
         # Unit tests stub tmux and must not leave a real annotator daemon
         # running after the short-lived codex-add process exits.
@@ -1031,6 +1033,9 @@ exit 0
         self.assertIn("Unit=codex-autosave.service", autosave_timer_content)
         self.assertIn("codex-restore", autorestore_content)
         self.assertIn("--all-registered", autorestore_content)
+        self.assertIn("--best-effort", autosave_content)
+        self.assertIn("KillMode=process", autorestore_content)
+        self.assertIn("--skip-active", autorestore_content)
 
         choice_file = Path(env["XDG_STATE_HOME"]) / "codexfarm" / "autoservice_choice"
         self.assertEqual(choice_file.read_text().strip(), "yes")
@@ -2529,6 +2534,25 @@ esac
         self.assertNotIn("--allow-fallback", result.stderr)
         self.assertNotIn(self.hook_session_id, result.stderr)
 
+    def test_best_effort_keeps_verified_sessions_when_one_pane_is_unresolved(self):
+        self.manifest.write_text(
+            "name\tdir\tcmd\targs\n"
+            "previous\t/tmp\tcodex\tresume 123e4567-e89b-42d3-a456-426614174009\n"
+        )
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-save", "--autosave", "--best-effort", str(self.manifest)],
+            env={**self.env, "NO_CODEX_SESSION": "1"},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        content = self.manifest.read_text()
+        self.assertIn("previous\t", content)
+        self.assertIn("claude-proj\t", content)
+        self.assertIn("gemini-proj\t", content)
+        self.assertNotIn("proj\t/tmp/project\tcodex\t", content)
+        self.assertIn("remain unresolved", result.stderr)
+
     def test_codex_save_all_registered_writes_each_registered_manifest(self):
         registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm" / "farms.tsv"
         registry.parent.mkdir(parents=True, exist_ok=True)
@@ -3185,6 +3209,23 @@ esac
             ],
         )
         self.assertNotIn(child_id, result.stdout + result.stderr)
+
+    @unittest.skipIf(fcntl is None, "advisory file locks are unavailable")
+    def test_scheduled_restore_leaves_externally_owned_conversation_alone(self):
+        session_id = "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"
+        lock_dir = self.tmpdir / ".codex/thread-writer-locks"
+        lock_dir.mkdir(parents=True)
+        with (lock_dir / f"{session_id}.lock").open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = subprocess.run(
+                [REPO_ROOT / "bin/codex-restore", "--skip-active", str(self.manifest)],
+                env={**self.env, "CODEXFARM_RESTORE_WRITER_WAIT_SECONDS": "0"},
+                text=True,
+                capture_output=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already active", result.stdout)
+        self.assertFalse(self.codex_add_log.exists())
 
     @unittest.skipIf(fcntl is None, "advisory file locks are unavailable")
     def test_codex_restore_refuses_thread_with_persistent_active_writer(self):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -10,11 +11,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_looper.health import (
+    IMPLEMENTATION,
     HealthMonitor,
     Limits,
     Memory,
     backup_issues,
     backups_expected,
+    capture_issues,
     main,
     read_memory,
     refresh_memory_title,
@@ -28,6 +31,89 @@ class HealthTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.addCleanup(self.temporary.cleanup)
+        environment = patch.dict(
+            os.environ,
+            {
+                "HOME": str(self.root / "home"),
+                "XDG_CONFIG_HOME": str(self.root / "config"),
+                "XDG_STATE_HOME": str(self.root / "state"),
+            },
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_cli_reports_stale_thermal_feed_and_dead_guard_despite_healthy_memory(self):
+        from codex_looper import thermal
+
+        sensor = self.root / "temperature.json"
+        settings = thermal.ThermalSettings(enabled=True, enforce=True, sensor_file=str(sensor))
+        thermal.save_settings(settings)
+        for stamp, expected in (
+            (time.time() - 100, "sensor unavailable"),
+            (time.time(), "guard heartbeat"),
+        ):
+            sensor.write_text(
+                json.dumps(
+                    {"source": "LibreHardwareMonitor", "checked_at": stamp, "cpu_celsius": 60}
+                )
+            )
+            output = io.StringIO()
+            with (
+                patch("sys.argv", ["codex-health"]),
+                patch("sys.stdout", output),
+                patch("codex_looper.health.read_memory", return_value=Memory(8000, 4000, 0)),
+            ):
+                self.assertEqual(main(), 1)
+            self.assertIn(expected, output.getvalue())
+            self.assertNotIn("No backup or monitor faults", output.getvalue())
+
+    def test_temperature_monitor_without_enforcement_does_not_require_guard(self):
+        from codex_looper import thermal
+
+        sensor = self.root / "temperature.json"
+        sensor.write_text(
+            json.dumps(
+                {"source": "LibreHardwareMonitor", "checked_at": time.time(), "cpu_celsius": 60}
+            )
+        )
+        thermal.save_settings(thermal.ThermalSettings(enabled=True, sensor_file=str(sensor)))
+        with (
+            patch("sys.argv", ["codex-health"]),
+            patch("sys.stdout", io.StringIO()),
+            patch("codex_looper.health.read_memory", return_value=Memory(8000, 4000, 0)),
+        ):
+            self.assertEqual(main(), 0)
+
+    def test_manifest_capture_warnings_are_independent_of_disabled_archives(self):
+        import hashlib
+
+        from codex_looper.health import config_directory
+
+        config = config_directory()
+        config.mkdir(parents=True)
+        state = self.root / "state/codexfarm"
+        state.mkdir(parents=True)
+        (state / "autoservice_choice").write_text("yes\n")
+        (state / "conversation_backup_choice").write_text("no\n")
+        manifest = config / "manifest.tsv"
+        manifest.write_text("name\tdir\tcmd\targs\nshell\t/tmp\tbash\t\n")
+        (config / "farms.tsv").write_text("session\tmanifest\nwork\t" + str(manifest) + "\n")
+        receipt = manifest.with_name(manifest.name + ".capture.json")
+        status = {
+            "schema_version": 1,
+            "checked_at": 1000,
+            "complete": True,
+            "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        }
+        receipt.write_text(json.dumps(status))
+        self.assertEqual(capture_issues(state, 1005), [])
+        self.assertIn("15 minutes", str(capture_issues(state, 2000)))
+        status.update(checked_at=2000, complete=False)
+        receipt.write_text(json.dumps(status))
+        self.assertIn("unresolved", str(capture_issues(state, 2005)))
+        self.assertEqual(backup_issues(state, 2005, expected=backups_expected(state)), [])
+        (state / "autoservice_choice").write_text("no\n")
+        self.assertEqual(capture_issues(state, 2005), [])
 
     def test_restore_check_is_advisory_unless_enforced(self):
         for memory in (Memory(8000, 400, 0), None):
@@ -253,7 +339,12 @@ class HealthTests(unittest.TestCase):
     def test_doctor_shared_server_rss_is_informational_with_healthy_host_memory(self):
         (self.root / "health-status.json").write_text(
             json.dumps(
-                {"checked_at": time.time(), "windows_mib": {"@1": 100}, "shared_servers_mib": 4000}
+                {
+                    "checked_at": time.time(),
+                    "implementation": IMPLEMENTATION,
+                    "windows_mib": {"@1": 100},
+                    "shared_servers_mib": 4000,
+                }
             )
         )
         with (

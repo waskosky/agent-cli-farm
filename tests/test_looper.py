@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOOPER_PATH = REPO_ROOT / "bin" / "codex-looper.py"
@@ -55,6 +56,22 @@ def init_git_repo(repo: Path) -> None:
 
 class LooperCoreTests(unittest.TestCase):
     def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="looper-core-home-")
+        self.addCleanup(temporary.cleanup)
+        home = Path(temporary.name)
+        environment = patch.dict(
+            os.environ,
+            {
+                "HOME": str(home),
+                "XDG_CONFIG_HOME": str(home / "config"),
+                "XDG_STATE_HOME": str(home / "state"),
+                "XDG_DATA_HOME": str(home / "data"),
+                "XDG_RUNTIME_DIR": str(home / "runtime"),
+                "CODEXFARM_RESOURCE_PROTECTION": "0",
+            },
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
         self.looper = load_looper_module()
 
     def test_load_prompts_splits_on_separator_lines(self) -> None:

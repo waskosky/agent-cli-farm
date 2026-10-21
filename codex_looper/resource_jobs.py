@@ -11,6 +11,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -21,6 +22,8 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
+from itertools import islice
 from pathlib import Path
 
 from .health import read_memory, state_directory
@@ -31,7 +34,7 @@ from .resource_config import (
     read_private_json,
     write_private_json,
 )
-from .resource_policy import HeadroomGate, finite_number
+from .resource_policy import HeadroomGate, finite_number, valid_memory_reading
 
 WORKER_VARIABLES = frozenset(
     {"CARGO_BUILD_JOBS", "CMAKE_BUILD_PARALLEL_LEVEL", "OMP_NUM_THREADS", "UV_THREADPOOL_SIZE"}
@@ -55,6 +58,19 @@ SCOPE_RE = re.compile(r"codexfarm-(agent|batch)-[a-f0-9]{32}\.scope\Z")
 MAX_JOBS = 512
 MAX_OVERRIDE_SECONDS = 3600
 MAX_PROC_SCAN = 65536
+MANAGER_DEADLINE = ContextVar("codexfarm_manager_deadline", default=None)
+
+
+@contextmanager
+def manager_budget(seconds: float):
+    """Bound the combined manager calls in a monitor pass, including validation."""
+    previous = MANAGER_DEADLINE.get()
+    deadline = time.monotonic() + seconds
+    token = MANAGER_DEADLINE.set(min(previous, deadline) if previous is not None else deadline)
+    try:
+        yield
+    finally:
+        MANAGER_DEADLINE.reset(token)
 
 
 def warn(message: str) -> None:
@@ -134,13 +150,19 @@ def manager_environment(env: dict[str, str], *, runtime_root: Path | None = None
     return result
 
 
-def manager_call(args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+def manager_call(
+    args: list[str], env: dict[str, str] | None = None, *, timeout: float = 2
+) -> subprocess.CompletedProcess:
+    deadline = MANAGER_DEADLINE.get()
+    timeout = timeout if deadline is None else min(timeout, deadline - time.monotonic())
+    if timeout <= 0:
+        raise subprocess.TimeoutExpired("systemctl", 0)
     return subprocess.run(
         ["systemctl", "--user", *args],
         env=manager_environment(os.environ if env is None else env),
         capture_output=True,
         text=True,
-        timeout=2,
+        timeout=timeout,
         check=False,
     )
 
@@ -269,6 +291,9 @@ class JobStore:
         worker_env: str | None = None,
         workers: int | None = None,
         managed: bool = False,
+        admission_group: str | None = None,
+        max_parallel: int | None = None,
+        reserve_memory_mib: float = 0,
     ) -> dict:
         if (
             role not in ("agent", "batch")
@@ -281,6 +306,22 @@ class JobStore:
         if not argv or not all(isinstance(arg, str) and "\0" not in arg for arg in argv):
             raise ValueError("job argv must contain literal strings")
         validate_workers(worker_env, workers)
+        if max_parallel is not None and (
+            type(max_parallel) is not int or not 1 <= max_parallel <= MAX_JOBS
+        ):
+            raise ValueError("max-parallel must be an integer within 1..512")
+        if admission_group is not None and (
+            not isinstance(admission_group, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", admission_group)
+            or max_parallel is None
+        ):
+            raise ValueError(
+                "admission-group requires max-parallel and a simple name within 64 characters"
+            )
+        if not finite_number(reserve_memory_mib) or not 0 <= reserve_memory_mib <= 1_000_000_000:
+            raise ValueError("reserve-memory-mib must be finite within 0..1000000000")
+        if role == "agent" and (max_parallel is not None or reserve_memory_mib):
+            raise ValueError("agents never accept admission ceilings")
         supervisor = process_identity(os.getpid())
         if supervisor is None:
             raise ValueError("supervisor identity unavailable")
@@ -312,11 +353,75 @@ class JobStore:
                 "worker_env": worker_env,
                 "workers": workers,
                 "recipe_fingerprint": recipe_fingerprint(argv, cwd, worker_env),
+                "admission_group": admission_group,
+                "max_parallel": max_parallel,
+                "reserve_memory_mib": reserve_memory_mib,
                 "created_at": now,
                 "updated_at": now,
             }
             self.write(value)
             return value
+
+    def reserve_admission(self, job_id: str, settings: ResourceSettings) -> str | None:
+        """Atomically reserve only explicitly declared batch capacity, before launch."""
+        with self._locked():
+            current = self.read(job_id)
+            count = current.get("max_parallel")
+            requested = current.get("reserve_memory_mib", 0)
+            if current["role"] != "batch":
+                return None
+            from .thermal import MAX_REMEDIES, enforcing
+
+            thermal_enrolled = enforcing()
+            if count is None and not requested and not thermal_enrolled:
+                return None
+            if _recorded_process_state(current, "supervisor") != "live":
+                return "batch admission owner identity is unavailable"
+            paths = self._records()
+            if len(paths) > MAX_JOBS:
+                return "batch admission registry is full"
+            group = current.get("admission_group") or current["recipe_fingerprint"]
+            peers = []
+            active_count = 0
+            reserved = 0
+            for path in paths:
+                other = self.read(path.stem)
+                if (
+                    other["job_id"] == job_id
+                    or other["role"] != "batch"
+                    or other["status"] not in ("admitted", "running")
+                ):
+                    continue
+                if _recorded_process_state(
+                    other, "supervisor"
+                ) == "dead" and _recorded_process_state(other, "payload") not in (
+                    "live",
+                    "unknown",
+                ):
+                    continue
+                # Unknown owners retain their reservations; never prune live or unreadable identities.
+                active_count += 1
+                reserved += other.get("reserve_memory_mib", 0)
+                if (
+                    other.get("max_parallel") is not None
+                    and (other.get("admission_group") or other["recipe_fingerprint"]) == group
+                ):
+                    peers.append(other)
+            if thermal_enrolled and active_count >= MAX_REMEDIES:
+                return "waiting for available thermal guard batch capacity"
+            if count is not None:
+                limit = min([count, *(peer["max_parallel"] for peer in peers)])
+                if len(peers) >= limit:
+                    return "waiting for an explicitly selected batch concurrency slot"
+            if requested:
+                memory = read_memory()
+                if not valid_memory_reading(memory):
+                    return "memory counters unavailable for an explicit batch reservation"
+                if memory.available_mib - reserved - requested <= settings.reserve_mib:
+                    return "waiting for explicitly reserved batch memory headroom"
+            current.update(status="admitted", updated_at=time.time())
+            self.write(current)
+            return None
 
     def register_payload(self, job_id: str, pid: int, scope: str | None = None) -> dict:
         identity = process_identity(pid)
@@ -511,9 +616,12 @@ class JobStore:
         return result
 
     def _records(self) -> list[Path]:
-        return [path for path in self.path.glob("*.json") if ID_RE.fullmatch(path.stem)][
-            : MAX_JOBS + 1
-        ]
+        return list(
+            islice(
+                (path for path in self.path.glob("*.json") if ID_RE.fullmatch(path.stem)),
+                MAX_JOBS + 1,
+            )
+        )
 
     def cleanup(self, *, now: float | None = None) -> None:
         if not self.path.exists():
@@ -529,7 +637,10 @@ class JobStore:
                 }
                 if value.get("status") in ("finished", "failed", "queued_timeout", "stale"):
                     terminal.append((value.get("updated_at", 0), path))
-                elif value.get("status") in ("queued", "running") and "dead" in states.values():
+                elif (
+                    value.get("status") in ("queued", "admitted", "running")
+                    and "dead" in states.values()
+                ):
                     # Scope/cgroup validation can fail temporarily. Only actual
                     # PID death or start-tick reuse is stale; UID changes remain
                     # ambiguous while the original recorded process is alive.
@@ -566,9 +677,12 @@ def admit(
     *,
     recovery: bool = False,
     gate: HeadroomGate | None = None,
+    job_id: str | None = None,
 ) -> bool:
-    if role == "agent" or policy == "ignore":
+    if role == "agent":
         return True
+    from .thermal import admission_reason
+
     gate = gate or HeadroomGate(settings.headroom())
     start = time.monotonic()
     if recovery:
@@ -580,21 +694,42 @@ def admit(
     announced = False
     while True:
         now = time.monotonic()
-        allowed = gate.sample(read_memory(), now)
+        thermal_reason = admission_reason()
+        allowed = policy == "ignore" or gate.sample(read_memory(), now)
         overrides = store.recipe_overrides(fingerprint)
-        deferred = overrides.get("defer_until", 0) > time.time()
-        if allowed and not deferred:
+        deferred = policy != "ignore" and overrides.get("defer_until", 0) > time.time()
+        reservation_reason = None
+        if not deferred and not thermal_reason and (allowed or policy == "warn") and job_id:
+            reservation_reason = store.reserve_admission(job_id, settings)
+        if allowed and not deferred and not thermal_reason and not reservation_reason:
             if "advisory" in gate.reason:
                 warn(gate.reason)
             return True
-        if policy == "warn" and not recovery and not deferred:
+        if (
+            policy == "warn"
+            and not recovery
+            and not deferred
+            and not thermal_reason
+            and not reservation_reason
+        ):
             warn(gate.reason + " Advisory launch; use --memory-policy queue to wait.")
             return True
         if not announced:
-            warn("Waiting for job admission. Manual bypass: --memory-policy ignore.")
+            warn(
+                thermal_reason
+                or reservation_reason
+                or "Waiting for job admission. Manual bypass: --memory-policy ignore."
+            )
             announced = True
         if now - start >= timeout:
-            warn("Queue timeout; payload was not launched. Manual bypass: --memory-policy ignore.")
+            detail = (
+                " Restore fresh telemetry and the thermal guard before retrying."
+                if thermal_reason
+                else " Retry when the explicitly selected batch reservation is available."
+                if reservation_reason
+                else " Manual bypass: --memory-policy ignore."
+            )
+            warn("Queue timeout; payload was not launched." + detail)
             return False
         time.sleep(min(0.25, max(0, timeout - (now - start))))
 
@@ -801,6 +936,7 @@ def handle_restart(
         store,
         record["recipe_fingerprint"],
         recovery=True,
+        job_id=job_id,
     ):
         store.update(job_id, status="queued_timeout")
         return False
@@ -828,11 +964,67 @@ def _apply_preferences(role: str) -> None:
         )
 
 
+def kernel_limits_effective(
+    identity: dict,
+    *,
+    cpu_quota: float | None = None,
+    memory_high: float | None = None,
+    memory_max: float | None = None,
+    require_cpu: bool = False,
+    unlimited_cpu: bool = False,
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> bool:
+    """Check recorded scope controls in the actual unified hierarchy, never an environment override."""
+    scope = identity.get("scope")
+    if not isinstance(scope, str) or not SCOPE_RE.fullmatch(scope):
+        return False
+    try:
+        path = next(line[3:] for line in identity["cgroup"].splitlines() if line.startswith("0::/"))
+        parts = Path(path).parts[1:]
+        if ".." in parts or scope not in parts:
+            return False
+        directory = cgroup_root.joinpath(*parts[: parts.index(scope) + 1])
+        if require_cpu or cpu_quota is not None or unlimited_cpu:
+            quota, period = (directory / "cpu.max").read_text().split()
+            period = int(period)
+            if period <= 0:
+                return False
+            if unlimited_cpu:
+                if quota != "max":
+                    return False
+            elif cpu_quota is not None:
+                # Kernel quota granularity is one microsecond per period.
+                if quota == "max" or not 0 < int(quota) <= math.ceil(cpu_quota * period / 100):
+                    return False
+            elif quota != "max" and int(quota) <= 0:
+                return False
+        for name, maximum in (("memory.high", memory_high), ("memory.max", memory_max)):
+            if maximum is not None:
+                value = (directory / name).read_text().strip()
+                # Memory controllers account in pages; allow the final partial page.
+                bound = int(maximum * 1024 * 1024) + os.sysconf("SC_PAGE_SIZE") - 1
+                if value == "max" or not 0 <= int(value) <= bound:
+                    return False
+        return directory.is_dir()
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        return False
+
+
 def inner_main(store: JobStore, job_id: str, argv: list[str], scope: str | None) -> int:
     try:
         record = store.read(job_id)
         _apply_preferences(record["role"])
-        store.register_payload(job_id, os.getpid(), scope)
+        record = store.register_payload(job_id, os.getpid(), scope)
+        if record.get("scope_required"):
+            identity = store.identity(job_id)
+            if not store.validate(job_id, identity) or not kernel_limits_effective(
+                identity,
+                cpu_quota=record.get("cpu_quota"),
+                memory_high=record.get("memory_high"),
+                memory_max=record.get("memory_max"),
+                require_cpu=record.get("thermal_enrolled", False),
+            ):
+                raise ValueError("requested scope or kernel limits are unavailable")
         # The durable marker is the sole authority for fallback. Never exec if
         # writing it fails, even when the record update already succeeded.
         write_private_json(store.marker_path(job_id), {"started": True, "pid": os.getpid()})
@@ -927,6 +1119,7 @@ def scope_command(
     *,
     memory_high: float | None = None,
     memory_max: float | None = None,
+    cpu_quota: float | None = None,
 ) -> list[str]:
     props = (
         ["MemoryLow=infinity", "CPUWeight=200", "IOWeight=200"]
@@ -937,6 +1130,10 @@ def scope_command(
         props.append(f"MemoryHigh={int(memory_high * 1024 * 1024)}")
     if memory_max is not None:
         props.append(f"MemoryMax={int(memory_max * 1024 * 1024)}")
+    if cpu_quota is not None:
+        if role != "batch":
+            raise ValueError("agents never accept CPU ceilings")
+        props.append(f"CPUQuota={cpu_quota:g}%")
     result = [
         "systemd-run",
         "--user",
@@ -967,7 +1164,12 @@ def _launch(
     ]
     command = (
         scope_command(
-            record["role"], scope, inner, memory_high=args.memory_high, memory_max=args.memory_max
+            record["role"],
+            scope,
+            inner,
+            memory_high=args.memory_high,
+            memory_max=args.memory_max,
+            cpu_quota=args.cpu_quota,
         )
         if scoped
         else inner
@@ -1038,7 +1240,7 @@ def parser() -> argparse.ArgumentParser:
         "--memory-policy",
         choices=("warn", "queue", "ignore"),
         default=None,
-        help="new batch admission only; ignore bypasses memory and temporary deferrals",
+        help="memory headroom only; explicit reservations and thermal protection remain enforced",
     )
     run.add_argument("--queue-timeout", type=float, default=None)
     run.add_argument(
@@ -1048,6 +1250,23 @@ def parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--worker-env", choices=sorted(WORKER_VARIABLES))
     run.add_argument("--workers", type=int)
+    run.add_argument(
+        "--cpu-quota", type=float, help="explicit batch CPU percent; 100 is one CPU; requires scope"
+    )
+    run.add_argument(
+        "--max-parallel",
+        type=int,
+        help="explicit batch concurrency for this recipe or admission group",
+    )
+    run.add_argument(
+        "--admission-group", help="explicit concurrency group; requires --max-parallel"
+    )
+    run.add_argument(
+        "--reserve-memory-mib",
+        type=float,
+        default=0,
+        help="explicit conservative batch memory reservation, not a memory ceiling",
+    )
     run.add_argument(
         "--memory-high", type=float, help="opt-in batch MiB threshold; requires scope enforcement"
     )
@@ -1073,7 +1292,13 @@ def main(argv: list[str] | None = None) -> int:
         if not command:
             raise ValueError("provide argv after --")
         if args.role == "agent" and (
-            args.restartable or args.memory_high is not None or args.memory_max is not None
+            args.restartable
+            or args.memory_high is not None
+            or args.memory_max is not None
+            or args.cpu_quota is not None
+            or args.max_parallel is not None
+            or args.reserve_memory_mib
+            or args.admission_group is not None
         ):
             raise ValueError("agents never accept restart consent or explicit memory ceilings")
         for value in (args.memory_high, args.memory_max):
@@ -1085,13 +1310,26 @@ def main(argv: list[str] | None = None) -> int:
             and args.memory_high > args.memory_max
         ):
             raise ValueError("memory-high must be <= memory-max")
-        limits = args.memory_high is not None or args.memory_max is not None
+        if args.cpu_quota is not None and (
+            not finite_number(args.cpu_quota) or not 0 < args.cpu_quota <= 10000
+        ):
+            raise ValueError("cpu-quota must be finite percent within 0..10000")
+        limits = (
+            args.memory_high is not None
+            or args.memory_max is not None
+            or args.cpu_quota is not None
+        )
         if limits and args.scope == "off":
             raise ValueError("explicit limits require an enforcing scope")
         timeout = settings.queue_timeout if args.queue_timeout is None else args.queue_timeout
         if not finite_number(timeout) or not 0 <= timeout <= 86400:
             raise ValueError("queue-timeout must be finite seconds within 0..86400")
         validate_workers(args.worker_env, args.workers)
+        from .thermal import enforcing as thermal_enforcing
+
+        thermal_scope = args.role == "batch" and thermal_enforcing()
+        if thermal_scope and args.scope == "off":
+            raise ValueError("thermal-enrolled batch jobs require an enforcing scope")
         store = JobStore()
         try:
             record = store.create(
@@ -1102,7 +1340,19 @@ def main(argv: list[str] | None = None) -> int:
                 worker_env=args.worker_env,
                 workers=args.workers,
                 managed=True,
+                admission_group=args.admission_group,
+                max_parallel=args.max_parallel,
+                reserve_memory_mib=args.reserve_memory_mib,
             )
+            if args.scope == "required" or limits or thermal_scope:
+                record = store.update(
+                    record["job_id"],
+                    scope_required=True,
+                    thermal_enrolled=thermal_scope,
+                    cpu_quota=args.cpu_quota,
+                    memory_high=args.memory_high,
+                    memory_max=args.memory_max,
+                )
         except (OSError, ValueError):
             if args.role != "agent" or args.scope == "required":
                 raise
@@ -1110,7 +1360,15 @@ def main(argv: list[str] | None = None) -> int:
             os.execvpe(command[0], command, os.environ)
             return 127
         policy = memory_policy(args.memory_policy, args.role, settings)
-        if not admit(args.role, policy, settings, timeout, store, record["recipe_fingerprint"]):
+        if not admit(
+            args.role,
+            policy,
+            settings,
+            timeout,
+            store,
+            record["recipe_fingerprint"],
+            job_id=record["job_id"],
+        ):
             store.update(record["job_id"], status="queued_timeout")
             return 124
         env = manager_environment(dict(os.environ))
@@ -1120,7 +1378,7 @@ def main(argv: list[str] | None = None) -> int:
             env[record["worker_env"]] = str(count)
             record = store.update(record["job_id"], workers=count)
         scoped = args.scope != "off" and _scope_ready(args.role, env)
-        mandatory = args.scope == "required" or limits
+        mandatory = args.scope == "required" or limits or thermal_scope
         if args.scope != "off" and not scoped:
             if mandatory:
                 store.update(record["job_id"], status="failed")
