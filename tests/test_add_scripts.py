@@ -89,6 +89,8 @@ esac
         self.env.pop("TMUX", None)
         self.env["XDG_STATE_HOME"] = str(self.tmpdir / "state")
         self.env["XDG_CONFIG_HOME"] = str(self.tmpdir / "config")
+        self.env["XDG_DATA_HOME"] = str(self.tmpdir / "data")
+        self.env.pop("CODEXFARM_DEEP_HISTORY_BIN", None)
         self.env["HOME"] = str(self.tmpdir)
         # Unit tests stub tmux and must not leave a real annotator daemon
         # running after the short-lived codex-add process exits.
