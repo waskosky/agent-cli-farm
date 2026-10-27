@@ -108,6 +108,21 @@ skip the normal first-time offer; explicit `--with-thermal-protection` refreshes
 the integration while preserving numeric thresholds. Healthy existing sensors
 and a verified active cooling profile are reused without Windows elevation.
 
+After opt-in, setup checks Windows access before offering the extra cooling
+choice or making thermal changes. It finds `wslpath` in standard Linux locations
+and Windows PowerShell under `C:\Windows\System32\WindowsPowerShell\v1.0`, using
+`wslpath` to respect custom drive mounts, even when Windows tools are absent from
+`PATH`. WSL's `appendWindowsPath=false` can stay unchanged; Windows process
+interop must be enabled. See Microsoft's [WSL interop settings](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#interop-settings).
+For a nonstandard Windows installation directory, add the directory containing
+`powershell.exe` to your WSL `PATH`.
+
+If this check fails, setup identifies the missing tool or failed command and
+prints a command to retry only the thermal step after fixing it. A failure before
+Windows installation starts explicitly says no Windows changes were attempted.
+If installation did start, the error points to `setup-result.json` and
+`setup-apply.log` for review before retrying.
+
 Unattended thermal/cooling setup only prints the command to run from a terminal,
 even with explicit enable flags. Default unattended setup never probes Windows
 or reads thermal settings. `--without-thermal-protection` and
@@ -301,6 +316,14 @@ codex-restore -a        # recreates and attaches to the session
 codex-restore --list-snapshots  # list retained snapshots and window counts
 codex-restore /path/from/the/list.tsv  # restore a chosen earlier snapshot
 ```
+
+If an older manifest contains a named window with both its command and arguments
+empty, `codex-restore --repair-manifest` preserves the original in
+`manifest.tsv.history/`, omits those unlaunchable rows, and restores the remaining
+verified entries. It reports every omitted window. All remaining rows must pass
+validation before the manifest changes; incomplete provider IDs and other
+malformed rows still stop recovery. This cannot reconstruct the missing window's
+command, conversation, or unsaved editor contents.
 
 Reboot a running farm through the complete save, stop, and restore sequence:
 

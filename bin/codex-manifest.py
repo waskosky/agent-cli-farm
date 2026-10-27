@@ -26,7 +26,10 @@ UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
 Row = tuple[str, str, str, str]
 
 
-def parse_manifest(content: bytes) -> list[Row]:
+def parse_manifest(
+    content: bytes, *, empty_commands: list[tuple[int, str]] | None = None
+) -> list[Row]:
+    """Validate every row; an explicit collector permits omitting empty commands."""
     try:
         lines = content.decode("utf-8").split("\n")
     except UnicodeDecodeError as exc:
@@ -42,8 +45,13 @@ def parse_manifest(content: bytes) -> list[Row]:
         if len(fields) != 4 or any(ord(c) < 32 and c != "\t" for c in line):
             raise ValueError(f"Malformed manifest row {number}: expected four TSV fields")
         name, directory, command, args = fields
+        if empty_commands is not None and name.strip() and not command.strip() and not args.strip():
+            empty_commands.append((number, name))
+            continue
         if not name.strip() or not command.strip():
-            raise ValueError(f"Malformed manifest row {number}: name and command are required")
+            raise ValueError(
+                f"Malformed manifest row {number}: name and command are required (window {name!r})"
+            )
         try:
             parsed_command = command.strip()
             if parsed_command[0] in {"'", '"'} and parsed_command[-1] == parsed_command[0]:
@@ -142,6 +150,31 @@ def archive(manifest: Path, content: bytes) -> Path:
     snapshot = history / f"{timestamp}-{digest}.tsv"
     atomic_write(snapshot, content)
     return snapshot
+
+
+def repair_empty_commands(manifest: Path, *, resolve_codex: bool = False) -> list[Row]:
+    """Under the manifest lock, retain original bytes before a narrowly scoped repair."""
+    previous = manifest.read_bytes()
+    removed: list[tuple[int, str]] = []
+    rows = parse_manifest(previous, empty_commands=removed)
+    if resolve_codex:
+        rows = resolve_codex_rows(rows)
+    # Finish validation before even creating history. Never turn an empty or
+    # ambiguous provider snapshot into an apparently successful recovery.
+    if removed:
+        content = serialize(rows)
+        backup = archive(manifest, previous)
+        archive(manifest, content)
+        atomic_write(manifest, content)
+        print(f"Original manifest preserved at {backup}", file=sys.stderr)
+        for number, name in removed:
+            print(
+                f"Omitted row {number} (window {name!r}): no command or arguments were saved.",
+                file=sys.stderr,
+            )
+        # This is a repair, not a live capture; do not publish a capture receipt.
+        print(f"Repaired manifest retains {len(rows)} restorable window(s).", file=sys.stderr)
+    return rows
 
 
 @contextmanager
@@ -409,6 +442,11 @@ def main() -> int:
     validate = commands.add_parser("validate")
     validate.add_argument("manifest", type=Path)
     validate.add_argument("--resolve-codex", action="store_true")
+    validate.add_argument(
+        "--repair-empty-commands",
+        action="store_true",
+        help="back up and remove only named rows with both command and arguments empty",
+    )
     save = commands.add_parser("publish")
     save.add_argument("candidate", type=Path)
     save.add_argument("manifest", type=Path)
@@ -454,9 +492,22 @@ def main() -> int:
                 with manifest_lock(args.manifest):
                     record_restore(args.manifest, args.normalized, args.outcomes, args.exit_code)
         elif args.action == "validate":
-            rows = parse_manifest(args.manifest.read_bytes())
-            if args.resolve_codex:
-                rows = resolve_codex_rows(rows)
+            if args.repair_empty_commands:
+                if Path(
+                    os.environ.get("CODEXFARM_LOCKED_MANIFEST", "")
+                ) == args.manifest and os.environ.get("CODEXFARM_LOCK_SCRIPT_PID") == str(
+                    os.getppid()
+                ):
+                    rows = repair_empty_commands(args.manifest, resolve_codex=args.resolve_codex)
+                else:
+                    with manifest_lock(args.manifest):
+                        rows = repair_empty_commands(
+                            args.manifest, resolve_codex=args.resolve_codex
+                        )
+            else:
+                rows = parse_manifest(args.manifest.read_bytes())
+                if args.resolve_codex:
+                    rows = resolve_codex_rows(rows)
             sys.stdout.buffer.write(serialize(rows))
         elif args.action == "history":
             for path in sorted(history_directory(args.manifest).glob("*.tsv"), reverse=True):

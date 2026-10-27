@@ -3684,6 +3684,87 @@ set -euo pipefail
         self.assertFalse(self.codex_add_log.exists())
         self.assertFalse(self.tmux_log.exists())
 
+    def test_restore_empty_command_error_explains_recovery_without_touching_tmux(self):
+        with self.manifest.open("a") as handle:
+            handle.write(f"nano\t{self.project_dir}\t\t\n")
+        original = self.manifest.read_bytes()
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("window 'nano'", result.stderr)
+        self.assertIn("--repair-manifest", result.stderr)
+        self.assertIn("--list-snapshots", result.stderr)
+        self.assertEqual(self.manifest.read_bytes(), original)
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertFalse(self.tmux_log.exists())
+
+    def test_restore_explicit_repair_backs_up_then_launches_only_verified_rows(self):
+        with self.manifest.open("a") as handle:
+            handle.write(f"nano\t{self.project_dir}\t\t\n")
+        original = self.manifest.read_bytes()
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--repair-manifest", str(self.manifest)],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Omitted row 3", result.stderr)
+        self.assertEqual(len(self.codex_add_log.read_text().splitlines()), 1)
+        self.assertNotIn("nano", self.codex_add_log.read_text())
+        self.assertTrue(
+            any(
+                path.read_bytes() == original
+                for path in self.manifest.with_name(self.manifest.name + ".history").glob("*.tsv")
+            )
+        )
+        receipt = json.loads(
+            self.manifest.with_name(self.manifest.name + ".restore.json").read_text()
+        )
+        self.assertTrue(receipt["complete"])
+        self.assertEqual(receipt["expected_rows"], 1)
+
+    def test_restore_repair_keeps_unsafe_manifest_and_windows_untouched(self):
+        with self.manifest.open("a") as handle:
+            handle.write(f"nano\t{self.project_dir}\t\t\n")
+            handle.write(f"unsafe\t{self.project_dir}\tcodex\tresume --last\n")
+        original = self.manifest.read_bytes()
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--force", "--repair-manifest", str(self.manifest)],
+            env={**self.env, "TMUX_WINDOWS_OUTPUT": "@9\tproj"},
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(self.manifest.read_bytes(), original)
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertFalse(self.tmux_log.exists())
+        self.assertFalse(self.manifest.with_name(self.manifest.name + ".history").exists())
+
+    def test_restore_repair_cannot_be_combined_with_read_only_snapshot_listing(self):
+        result = subprocess.run(
+            [
+                REPO_ROOT / "bin/codex-restore",
+                "--repair-manifest",
+                "--list-snapshots",
+                str(self.manifest),
+            ],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("cannot be combined", result.stderr)
+        self.assertFalse(self.tmux_log.exists())
+
     def test_restore_rejects_two_child_ids_for_one_root_before_force(self):
         first, second = self.write_duplicate_manifest()
         root_id = "123e4567-e89b-42d3-a456-426614174099"
@@ -3712,6 +3793,21 @@ set -euo pipefail
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertFalse(self.codex_add_log.exists())
         self.assertFalse(self.tmux_log.exists())
+        with self.manifest.open("a") as handle:
+            handle.write(f"nano\t{self.project_dir}\t\t\n")
+        original = self.manifest.read_bytes()
+        repaired = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--force", "--repair-manifest", str(self.manifest)],
+            env={**self.env, "TMUX_WINDOWS_OUTPUT": "@9\tdup"},
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(repaired.returncode, 2, repaired.stderr)
+        self.assertEqual(self.manifest.read_bytes(), original)
+        self.assertFalse(self.codex_add_log.exists())
+        self.assertFalse(self.tmux_log.exists())
+        self.assertFalse(self.manifest.with_name(self.manifest.name + ".history").exists())
 
     def test_restore_does_not_claim_success_for_same_name_with_different_conversation(self):
         result = subprocess.run(
@@ -3943,6 +4039,23 @@ case "$1" in""",
 
         commands = self.read_tmux_commands()
         self.assertIn(["new-session", "-d", "-s", "work", "-n", "home"], commands)
+
+    def test_restore_all_registered_forwards_explicit_manifest_repair(self):
+        with self.manifest.open("a") as handle:
+            handle.write(f"nano\t{self.project_dir}\t\t\n")
+        registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/farms.tsv"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(f"session\tmanifest\nwork\t{self.manifest}\n")
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--all-registered", "--repair-manifest"],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Omitted row 3", result.stderr)
+        self.assertEqual(len(self.codex_add_log.read_text().splitlines()), 1)
 
 
 class ResumeAndBoardScriptsTests(unittest.TestCase):
