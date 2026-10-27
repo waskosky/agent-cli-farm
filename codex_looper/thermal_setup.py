@@ -34,6 +34,7 @@ PACKAGES = (
     ),
 )
 COOL_GUID = "0f5a6bd1-cc7e-4635-8bdd-09d0b13df1a8"
+POWERSHELL_WINDOWS_PATH = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 SCRIPTS = ("install.ps1", "sensor.ps1", "cooling-profile.ps1", "setup.ps1")
 EXPLANATION = """
 Optional Windows/WSL thermal protection installs checksum-pinned
@@ -115,12 +116,38 @@ def powershell(executable: str, code: str, *, timeout: int = 30) -> str:
 
 class WindowsBridge:
     def __init__(self):
+        self.wslpath = (
+            shutil.which("wslpath")
+            or shutil.which("/usr/bin/wslpath")
+            or shutil.which("/bin/wslpath")
+        )
+        if not self.wslpath:
+            raise ValueError(
+                "Missing WSL tool: wslpath (checked PATH, /usr/bin/wslpath and /bin/wslpath).\n"
+                "Open a terminal inside your WSL distribution and check:\n"
+                "  command -v wslpath\n"
+                "  ls -l /usr/bin/wslpath /bin/wslpath\n"
+                "wslpath is supplied by WSL; if absent there too, check your WSL installation."
+            )
         self.exe = shutil.which("powershell.exe")
-        self.wslpath = shutil.which("wslpath")
-        if not self.exe or not self.wslpath:
-            raise ValueError("Windows interop requires powershell.exe and wslpath in PATH")
-        info = json.loads(
-            powershell(
+        if not self.exe:
+            # wslpath respects custom Windows drive mounts; Windows PATH import
+            # can stay disabled. Do not change PATH or the user's WSL settings.
+            candidate = self.linux_path(POWERSHELL_WINDOWS_PATH)
+            self.exe = shutil.which(str(candidate))
+            if not self.exe:
+                raise ValueError(
+                    "Missing Windows tool: powershell.exe (not in PATH or at "
+                    + str(candidate)
+                    + ").\nCheck that the Windows system drive is mounted:\n  "
+                    + shlex.join(["ls", "-l", str(candidate)])
+                    + "\nFor a nonstandard Windows location, find PowerShell in Windows with:\n"
+                    "  (Get-Command powershell.exe).Source\n"
+                    "Then add its containing directory, converted with wslpath -u, to your WSL PATH."
+                )
+            print(f"Using Windows PowerShell at {self.exe} (not on PATH).", flush=True)
+        try:
+            output = powershell(
                 self.exe,
                 """
 [ordered]@{
@@ -129,7 +156,26 @@ class WindowsBridge:
 } | ConvertTo-Json -Compress
 """,
             )
-        )
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            command = shlex.join(
+                [
+                    self.exe,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "$PSVersionTable.PSVersion",
+                ]
+            )
+            raise ValueError(
+                f"PowerShell was found at {self.exe}, but the read-only Windows check failed: {exc}\n"
+                f"Try this check from a fresh WSL terminal:\n  {command}\n"
+                "If Windows programs cannot launch there, check /etc/wsl.conf: "
+                "[interop] enabled must not be false."
+            ) from exc
+        info = json.loads(output)
+        if not isinstance(info, dict):
+            raise ValueError("Windows did not return an object with installation paths")
         for key in ("local_app_data", "program_data"):
             if not isinstance(info.get(key), str) or not PureWindowsPath(info[key]).is_absolute():
                 raise ValueError("Windows did not return absolute installation paths")
@@ -139,17 +185,26 @@ class WindowsBridge:
         self.base = PureWindowsPath(info["local_app_data"]) / "CodexFarm/thermal-stage/0.9.6"
 
     def linux_path(self, value: str) -> Path:
-        result = subprocess.run(
-            [self.wslpath, "-u", value],
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            timeout=5,
-            check=False,
-        )
-        path = result.stdout.strip()
-        if result.returncode or not path.startswith("/") or "\n" in path:
-            raise ValueError("Could not convert a Windows installation path with wslpath")
+        command = [self.wslpath, "-u", value]
+        try:
+            result = subprocess.run(
+                command,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            path = result.stdout.strip()
+            if result.returncode or not path.startswith("/") or "\n" in path:
+                raise ValueError(
+                    (result.stderr or result.stdout)[-1000:] or "no absolute path returned"
+                )
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise ValueError(
+                f"wslpath could not convert {value!r}: {exc}\n"
+                f"Check the Windows drive mount and try in a WSL terminal:\n  {shlex.join(command)}"
+            ) from exc
         return Path(path)
 
     def stage(self, sensors: bool) -> tuple[Path, str]:
@@ -195,6 +250,14 @@ def fetch_package(destination: Path, url: str, digest: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _setup_command(flags: list[str]) -> str:
+    parent = Path(__file__).resolve().parent.parent
+    script = parent / "bin/codex-setup-thermal.py"
+    if not script.is_file():
+        script = parent / "codex-setup-thermal.py"
+    return shlex.join([sys.executable, str(script), *flags])
+
+
 def _manual(args) -> None:
     flags = []
     for name in ("thermal_protection", "windows_cooling"):
@@ -204,7 +267,7 @@ def _manual(args) -> None:
             flags.append("--without-" + name.replace("_", "-"))
     print("Windows thermal setup requires an interactive WSL terminal for administrator approval.")
     print("No settings or Windows services changed. Run in a terminal:")
-    print("  " + shlex.join([sys.executable, sys.argv[0], *flags]))
+    print("  " + _setup_command(flags))
 
 
 def main(argv=None) -> int:
@@ -232,6 +295,8 @@ def main(argv=None) -> int:
 
     sensors = args.with_thermal_protection
     cooling = args.with_windows_cooling
+    cooling_decided = cooling or args.without_windows_cooling
+    windows_apply_started = False
     try:
         if not sensors and not args.without_thermal_protection:
             if thermal.settings_path().exists():
@@ -248,20 +313,24 @@ def main(argv=None) -> int:
             print(EXPLANATION.strip())
         if cooling:
             print(COOLING_EXPLANATION.strip())
-        elif sensors and not args.without_windows_cooling:
-            print(COOLING_EXPLANATION.strip())
-            cooling = _confirm("Also enable whole-machine cooling (80% maximum, boost off)? [y/N]")
         if not sensors and not cooling:
             print("Existing thermal settings, services and Windows power choices preserved.")
             return 0
 
         if sensors:
             thermal.precheck_service()
+        # Only probe after opt-in, but before the extra cooling question or any
+        # setup writes. A missing Windows prerequisite needs a fix, not consent.
+        bridge = WindowsBridge()
+        if sensors and not cooling_decided:
+            print(COOLING_EXPLANATION.strip())
+            cooling = _confirm("Also enable whole-machine cooling (80% maximum, boost off)? [y/N]")
+            cooling_decided = True
+        if sensors:
             thermal.prepare_private_directory(thermal.settings_path().parent)
         # A cooling-only run still writes a private consent/undo receipt.
         thermal.prepare_private_directory(thermal.state_directory())
         settings = thermal.load_settings() if sensors else None
-        bridge = WindowsBridge()
         if sensors:
             proposed = replace(settings, enabled=True, enforce=True, sensor_file=str(bridge.sensor))
             fresh = thermal.read_temperature(proposed)["cpu_celsius"] is not None
@@ -317,6 +386,7 @@ def main(argv=None) -> int:
                 + str(directory),
                 flush=True,
             )
+            windows_apply_started = True
             bridge.script(windows, "setup.ps1", switches, timeout=360)
             result = json.loads((directory / "setup-result.json").read_text(encoding="utf-8-sig"))
             if result.get("success") is not True:
@@ -354,8 +424,21 @@ def main(argv=None) -> int:
             )
         return 0
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+        print(f"Thermal setup incomplete: {exc}", file=sys.stderr)
+        if windows_apply_started:
+            print(
+                "Windows changes may have been applied; they are not automatically retried or undone.\n"
+                f"Review {directory / 'setup-result.json'} and {directory / 'setup-apply.log'} before retrying.",
+                file=sys.stderr,
+            )
+        else:
+            print("No Windows installation or power changes were attempted.", file=sys.stderr)
+        flags = ["--with-thermal-protection" if sensors else "--without-thermal-protection"]
+        if cooling_decided:
+            flags.append("--with-windows-cooling" if cooling else "--without-windows-cooling")
         print(
-            f"Thermal setup incomplete: {exc}. Existing Windows changes are not automatically retried or undone.",
+            "After resolving the issue, retry only this step in an interactive WSL terminal:",
             file=sys.stderr,
         )
+        print("  " + _setup_command(flags), file=sys.stderr)
         return 1

@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from contextlib import ExitStack
 from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -77,7 +78,16 @@ class ThermalSetupTests(unittest.TestCase):
             )
         return "COMPLETE COOLING PLAN: 80% maximum, boost disabled, AC and battery"
 
-    def run_choice(self, answers="", args=(), *, input_tty=True, output_tty=True, supported=True):
+    def run_choice(
+        self,
+        answers="",
+        args=(),
+        *,
+        input_tty=True,
+        output_tty=True,
+        supported=True,
+        bridge_error=None,
+    ):
         stdout, stderr = Terminal(tty=output_tty), io.StringIO()
         with (
             patch.object(thermal_setup.sys, "stdin", Terminal(answers, tty=input_tty)),
@@ -85,7 +95,9 @@ class ThermalSetupTests(unittest.TestCase):
             patch.object(thermal_setup.sys, "stderr", stderr),
             patch.object(thermal_setup, "is_wsl", return_value=supported),
             patch.object(thermal_setup, "_nonroot", return_value=True),
-            patch.object(thermal_setup, "WindowsBridge", return_value=self.bridge) as factory,
+            patch.object(
+                thermal_setup, "WindowsBridge", return_value=self.bridge, side_effect=bridge_error
+            ) as factory,
             patch.object(thermal, "precheck_service") as precheck,
             patch.object(thermal, "install_service") as install,
         ):
@@ -191,6 +203,50 @@ class ThermalSetupTests(unittest.TestCase):
         self.assertLess(text.index("ALL Windows/WSL"), text.index("Also enable whole-machine"))
         self.assertEqual(self.calls, [("setup.ps1", " -InstallSensors")])
 
+    def test_bridge_failure_precedes_cooling_question_and_all_setup_writes(self):
+        with patch.object(thermal, "prepare_private_directory") as prepare:
+            status, text, windows, _, install = self.run_choice(
+                "yes\nyes\n", bridge_error=ValueError("Missing Windows tool: powershell.exe")
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("Missing Windows tool: powershell.exe", text)
+        self.assertNotIn("Also enable whole-machine cooling", text)
+        self.assertIn("No Windows installation or power changes were attempted", text)
+        self.assertNotIn("may have been applied", text)
+        self.assertIn("retry only this step", text)
+        retry = text.splitlines()[-1]
+        self.assertIn("codex-setup-thermal.py --with-thermal-protection", retry)
+        # The user has not been offered cooling yet; retry must still ask.
+        self.assertNotIn("windows-cooling", retry)
+        windows.assert_called_once_with()
+        prepare.assert_not_called()
+        install.assert_not_called()
+        self.bridge.stage.assert_not_called()
+        self.assertFalse(thermal.settings_path().parent.exists())
+        self.assertFalse(thermal.state_directory().exists())
+
+    def test_bridge_failure_retry_preserves_explicit_independent_choices(self):
+        status, text, _, precheck, install = self.run_choice(
+            args=("--without-thermal-protection", "--with-windows-cooling"),
+            bridge_error=ValueError("Missing WSL tool: wslpath"),
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("--without-thermal-protection --with-windows-cooling", text.splitlines()[-1])
+        precheck.assert_not_called()
+        install.assert_not_called()
+        self.assertFalse(thermal.state_directory().exists())
+
+    def test_staging_failure_reports_no_windows_changes_and_keeps_cooling_consent(self):
+        self.bridge.stage.side_effect = ValueError("Windows package checksum mismatch")
+        status, text, _, _, install = self.run_choice("yes\nyes\n")
+        self.assertEqual(status, 1)
+        self.assertIn("No Windows installation or power changes were attempted", text)
+        self.assertNotIn("may have been applied", text)
+        self.assertIn("--with-thermal-protection --with-windows-cooling", text.splitlines()[-1])
+        self.bridge.script.assert_not_called()
+        install.assert_not_called()
+        self.assertFalse(thermal.settings_path().exists())
+
     def test_failed_windows_install_never_enables_linux_guard_or_retries(self):
         self.bridge.script.side_effect = ValueError("Windows task disabled by operator")
         status, text, _, _, install = self.run_choice(
@@ -198,6 +254,11 @@ class ThermalSetupTests(unittest.TestCase):
         )
         self.assertEqual(status, 1)
         self.assertIn("disabled by operator", text)
+        self.assertIn("Windows changes may have been applied", text)
+        self.assertIn(str(self.directory / "setup-result.json"), text)
+        self.assertIn(str(self.directory / "setup-apply.log"), text)
+        self.assertNotIn("No Windows installation", text)
+        self.assertIn("--with-thermal-protection --without-windows-cooling", text.splitlines()[-1])
         self.assertEqual(self.bridge.script.call_count, 1)
         install.assert_not_called()
         self.assertFalse(thermal.settings_path().exists())
@@ -327,3 +388,148 @@ class ThermalSetupTests(unittest.TestCase):
         self.assertIn("UTF8Encoding", decoded)
         self.assertTrue(decoded.endswith(code))
         self.assertNotIn("shell", run.call_args.kwargs)
+
+
+class WindowsBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "custom Windows mount"
+        self.exe = str(self.root / "Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+        self.converter = "/test tools/wslpath"
+        self.sensor = self.root / "ProgramData/CodexFarm/Thermal/temperature.json"
+        self.executables = {
+            "powershell.exe": self.exe,
+            "wslpath": self.converter,
+            self.exe: self.exe,
+        }
+        self.stdout = io.StringIO()
+        contexts = ExitStack()
+        self.addCleanup(contexts.close)
+        self.which = contexts.enter_context(
+            patch.object(thermal_setup.shutil, "which", side_effect=self.executables.get)
+        )
+        self.run = contexts.enter_context(
+            patch.object(thermal_setup.subprocess, "run", side_effect=self.convert)
+        )
+        self.powershell = contexts.enter_context(
+            patch.object(
+                thermal_setup,
+                "powershell",
+                return_value=json.dumps(
+                    {
+                        "local_app_data": r"C:\Users\O'Hare\AppData\Local",
+                        "program_data": r"C:\ProgramData",
+                    }
+                ),
+            )
+        )
+        contexts.enter_context(patch.object(thermal_setup.sys, "stdout", self.stdout))
+
+    def convert(self, argv, **kwargs):
+        if argv == [self.converter, "-u", thermal_setup.POWERSHELL_WINDOWS_PATH]:
+            path = self.exe
+        elif argv == [self.converter, "-u", r"C:\ProgramData\CodexFarm\Thermal\temperature.json"]:
+            path = str(self.sensor)
+        else:
+            self.fail(f"Unexpected command: {argv!r}")
+        self.assertNotIn("shell", kwargs)
+        self.assertEqual(kwargs["timeout"], 5)
+        return subprocess.CompletedProcess(argv, 0, path + "\n", "")
+
+    def test_path_tools_take_precedence_without_fallback_search(self):
+        bridge = thermal_setup.WindowsBridge()
+        self.assertEqual(bridge.exe, self.exe)
+        self.assertEqual(bridge.wslpath, self.converter)
+        self.assertEqual(bridge.sensor, self.sensor)
+        self.assertEqual(self.run.call_count, 1)  # Only convert the sensor path.
+        self.assertEqual(self.stdout.getvalue(), "")
+        self.powershell.assert_called_once()
+        self.assertNotIn(unittest.mock.call(self.exe), self.which.call_args_list)
+
+    def test_missing_powershell_on_path_uses_wslpath_and_custom_mount(self):
+        del self.executables["powershell.exe"]
+        bridge = thermal_setup.WindowsBridge()
+        self.assertEqual(bridge.exe, self.exe)
+        self.assertEqual(bridge.sensor, self.sensor)
+        self.assertEqual(
+            self.run.call_args_list[0].args[0],
+            [self.converter, "-u", thermal_setup.POWERSHELL_WINDOWS_PATH],
+        )
+        self.assertIn(self.exe, self.stdout.getvalue())
+        self.assertIn("not on PATH", self.stdout.getvalue())
+        self.powershell.assert_called_once()
+
+    def test_wslpath_standard_locations_work_with_restricted_path(self):
+        del self.executables["wslpath"]
+        for candidate in ("/usr/bin/wslpath", "/bin/wslpath"):
+            with self.subTest(candidate=candidate):
+                self.converter = candidate
+                self.executables[candidate] = candidate
+                bridge = thermal_setup.WindowsBridge()
+                self.assertEqual(bridge.wslpath, candidate)
+                self.assertEqual(bridge.sensor, self.sensor)
+                del self.executables[candidate]
+
+    def test_missing_wslpath_names_tool_and_suggests_wsl_checks(self):
+        del self.executables["wslpath"]
+        with self.assertRaises(ValueError) as caught:
+            thermal_setup.WindowsBridge()
+        message = str(caught.exception)
+        self.assertIn("Missing WSL tool: wslpath", message)
+        self.assertIn("command -v wslpath", message)
+        self.assertIn("/usr/bin/wslpath", message)
+        self.assertNotIn("Missing Windows tool", message)
+        self.run.assert_not_called()
+        self.powershell.assert_not_called()
+
+    def test_missing_powershell_reports_searched_path_and_mount_guidance(self):
+        del self.executables["powershell.exe"]
+        del self.executables[self.exe]
+        with self.assertRaises(ValueError) as caught:
+            thermal_setup.WindowsBridge()
+        message = str(caught.exception)
+        self.assertIn("Missing Windows tool: powershell.exe", message)
+        self.assertIn(self.exe, message)
+        self.assertIn("Windows system drive is mounted", message)
+        self.assertIn("(Get-Command powershell.exe).Source", message)
+        self.assertNotIn("Missing WSL tool", message)
+        self.powershell.assert_not_called()
+
+    def test_failed_read_only_probe_explains_interop_and_never_retries(self):
+        for error in (
+            OSError(8, "Exec format error"),
+            subprocess.TimeoutExpired(self.exe, 30),
+            ValueError("Windows setup command failed: access denied"),
+        ):
+            with self.subTest(error=error):
+                self.powershell.reset_mock()
+                self.powershell.side_effect = error
+                with self.assertRaises(ValueError) as caught:
+                    thermal_setup.WindowsBridge()
+                message = str(caught.exception)
+                self.assertIn("read-only Windows check failed", message)
+                self.assertIn("fresh WSL terminal", message)
+                self.assertIn("/etc/wsl.conf", message)
+                self.assertIn("'$PSVersionTable.PSVersion'", message)
+                self.assertIn(self.exe, message)
+                self.powershell.assert_called_once()
+                self.run.assert_not_called()
+
+    def test_bad_path_conversion_stops_before_powershell_with_reproducible_check(self):
+        del self.executables["powershell.exe"]
+        for result in (
+            subprocess.CompletedProcess([], 1, "", "drive not mounted"),
+            subprocess.CompletedProcess([], 0, "relative/path", ""),
+            subprocess.CompletedProcess([], 0, "/first\n/second", ""),
+        ):
+            with self.subTest(result=result):
+                self.run.side_effect = None
+                self.run.return_value = result
+                with self.assertRaises(ValueError) as caught:
+                    thermal_setup.WindowsBridge()
+                message = str(caught.exception)
+                self.assertIn("wslpath could not convert", message)
+                self.assertIn("Windows drive mount", message)
+                self.assertIn("'/test tools/wslpath' -u", message)
+                self.powershell.assert_not_called()

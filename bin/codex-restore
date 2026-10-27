@@ -27,11 +27,15 @@ original_args=("$@")
 usage() {
   cat <<EOF
 Usage: $script_name [-a|--attach] [-f|--force] [--all-registered] [--list-snapshots]
+       [--repair-manifest]
        [--delay SECONDS] [--enforce-memory-pressure|--ignore-memory-pressure] [manifest-path]
 
 Restore tmux farm windows from a trusted executable manifest.
 Provider conversations require exact IDs; latest/continue resumes are disabled.
 Use --list-snapshots to find retained snapshots, then pass the chosen path here.
+--repair-manifest backs up the original and omits only named rows with empty
+commands AND empty arguments. All remaining rows must validate before repair.
+Omitted windows cannot be resumed; no commands or conversation IDs are guessed.
 Launches are spaced by 2 seconds (0..300, also CODEXFARM_RESTORE_DELAY_SECONDS).
 Memory pressure is advisory by default: warnings do not block restoration.
 --skip-active leaves externally owned Codex conversations alone (scheduled recovery).
@@ -284,6 +288,7 @@ restore_all_registered() {
       restore_args+=("--force")
     fi
     [ "$skip_active" -eq 0 ] || restore_args+=(--skip-active)
+    [ "$repair_manifest" -eq 0 ] || restore_args+=(--repair-manifest)
     restore_args+=("$manifest")
     if [ "$count" -gt 0 ]; then
       sleep "$RESTORE_DELAY"
@@ -308,6 +313,7 @@ force=0
 skip_active=0
 all_registered=0
 list_snapshots=0
+repair_manifest=0
 args_pos=()
 while (( "$#" )); do
   case "${1:-}" in
@@ -322,6 +328,7 @@ while (( "$#" )); do
       if [ "$#" -lt 2 ]; then echo "Missing value for --delay" >&2; exit 2; fi
       RESTORE_DELAY="$2"; shift 2 ;;
     --list-snapshots) list_snapshots=1; shift ;;
+    --repair-manifest) repair_manifest=1; shift ;;
     --) shift; while (( "$#" )); do args_pos+=("$1"); shift; done ;;
     -*) echo "Unknown option: $1" >&2; exit 2 ;;
     *) args_pos+=("$1"); shift ;;
@@ -330,6 +337,10 @@ done
 
 if [ "$skip_active" -eq 1 ] && [ "$force" -eq 1 ]; then
   echo "--skip-active cannot be combined with --force" >&2
+  exit 2
+fi
+if [ "$repair_manifest" -eq 1 ] && [ "$list_snapshots" -eq 1 ]; then
+  echo "--repair-manifest cannot be combined with --list-snapshots" >&2
   exit 2
 fi
 
@@ -416,7 +427,17 @@ finish_restore() {
   exit "$result"
 }
 trap finish_restore EXIT
-python3 "$MANIFEST_BIN" validate --resolve-codex "$MANIFEST_PATH" > "$validated_manifest" || exit 2
+validation_args=(--resolve-codex)
+[ "$repair_manifest" -eq 0 ] || validation_args+=(--repair-empty-commands)
+if ! python3 "$MANIFEST_BIN" validate "${validation_args[@]}" "$MANIFEST_PATH" > "$validated_manifest"; then
+  echo "Restore stopped before changing tmux windows." >&2
+  printf 'Inspect retained snapshots: %q --list-snapshots %q\n' "$0" "$MANIFEST_PATH" >&2
+  if [ "$repair_manifest" -eq 0 ]; then
+    echo "For rows with both command and arguments empty, back up and omit just those rows with:" >&2
+    printf '  %q --repair-manifest %q\n' "$0" "$MANIFEST_PATH" >&2
+  fi
+  exit 2
+fi
 restore_outcomes=$(mktemp)
 record_restore_outcome() {
   printf '%s\t%s\n' "$restore_row" "$1" >> "$restore_outcomes"

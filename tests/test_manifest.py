@@ -150,6 +150,73 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, HEADER + f"proj\t\tcodex\tresume {SESSION_ID}\n")
 
+    def test_explicit_empty_command_repair_preserves_original_and_exact_conversations(self):
+        valid = HEADER + f"proj\t/tmp\tcodex\tresume {SESSION_ID}\n"
+        original = valid + "nano\t/tmp\t\t\n"
+        self.manifest.write_text(original)
+        self.assertEqual(self.run_helper("validate", self.manifest).returncode, 2)
+        self.assertEqual(self.manifest.read_text(), original)
+
+        result = self.run_helper("validate", "--repair-empty-commands", self.manifest)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, valid)
+        self.assertEqual(self.manifest.read_text(), valid)
+        self.assertIn("Omitted row 3 (window 'nano')", result.stderr)
+        self.assertIn("Original manifest preserved", result.stderr)
+        history = self.manifest.with_name(self.manifest.name + ".history")
+        snapshots = list(history.glob("*.tsv"))
+        self.assertEqual({path.read_text() for path in snapshots}, {original, valid})
+        self.assertEqual(history.stat().st_mode & 0o777, 0o700)
+        for path in [self.manifest, *snapshots]:
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(self.manifest.with_name(self.manifest.name + ".capture.json").exists())
+
+    def test_empty_command_repair_validates_every_remaining_row_before_writing(self):
+        good = f"proj\t/tmp\tcodex\tresume {SESSION_ID}\n"
+        for bad in (
+            f"unknown\t/tmp\t\tresume {SESSION_ID}\n",
+            "unsafe\t/tmp\tcodex\tresume --last\n",
+            "\t/tmp\t\t\n",
+            "bad\x00name\t/tmp\t\t\n",
+            "malformed\t/tmp\t\n",
+            good,  # A duplicate exact conversation must still reject the repair.
+        ):
+            with self.subTest(bad=bad):
+                original = HEADER + "nano\t/tmp\t\t\n" + good + bad
+                self.manifest.write_text(original)
+                result = self.run_helper("validate", "--repair-empty-commands", self.manifest)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(self.manifest.read_text(), original)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(self.manifest.with_name(self.manifest.name + ".history").exists())
+
+    def test_empty_command_repair_refuses_an_empty_restore_point(self):
+        original = HEADER + "nano\t/tmp\t\t\n"
+        self.manifest.write_text(original)
+        result = self.run_helper("validate", "--repair-empty-commands", self.manifest)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(self.manifest.read_text(), original)
+        self.assertFalse(self.manifest.with_name(self.manifest.name + ".history").exists())
+
+    def test_empty_command_repair_leaves_valid_manifest_bytes_and_mtime_unchanged(self):
+        original = HEADER + "shell\t/tmp\tbash\t\n"
+        self.manifest.write_text(original)
+        os.utime(self.manifest, (1000, 1000))
+        result = self.run_helper("validate", "--repair-empty-commands", self.manifest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.manifest.read_text(), original)
+        self.assertEqual(self.manifest.stat().st_mtime, 1000)
+        self.assertFalse(self.manifest.with_name(self.manifest.name + ".history").exists())
+
+    def test_empty_command_repair_requires_a_successful_backup_before_replacement(self):
+        original = HEADER + "shell\t/tmp\tbash\t\n" + "nano\t/tmp\t\t\n"
+        self.manifest.write_text(original)
+        self.manifest.with_name(self.manifest.name + ".history").write_text("operator file")
+        result = self.run_helper("validate", "--repair-empty-commands", self.manifest)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(self.manifest.read_text(), original)
+
     def test_duplicate_conversations_are_rejected_but_duplicate_names_are_valid(self):
         row = f"same\t/tmp\tcodex\tresume {SESSION_ID}\n"
         self.manifest.write_text(HEADER + row + row)
