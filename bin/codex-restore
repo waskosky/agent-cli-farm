@@ -21,8 +21,34 @@ HEALTH_BIN="${CODEX_HEALTH_BIN:-$SCRIPT_DIR/codex-health}"
 memory_policy="${CODEXFARM_RESTORE_MEMORY_POLICY-warn}"
 MANIFEST_BIN="$SCRIPT_DIR/codex-manifest.py"
 PANE_IDENTITY_BIN="${CODEX_PANE_IDENTITY_BIN:-$SCRIPT_DIR/codex-save}"
+DIAGNOSTICS_BIN="${CODEX_RESTORE_DIAGNOSTICS_BIN:-$SCRIPT_DIR/codex-restore-diagnostics}"
 # Bash 3.2 with nounset requires guarded expansion of possibly empty arrays.
 original_args=("$@")
+
+diagnose_restore() {
+  case "${CODEXFARM_RESTORE_DIAGNOSTICS:-1}" in
+    0|false|off|no) return 0 ;;
+  esac
+  if ! "$DIAGNOSTICS_BIN" "$@" --run-id "$diagnostic_run" \
+    --phase "$diagnostic_phase" --pid "$$" --memory-policy "$memory_policy" \
+    </dev/null >/dev/null 2>&1; then
+    if [ "$diagnostic_warned" -eq 0 ]; then
+      echo "warning: bounded restore diagnostics unavailable; restore continues." >&2
+      diagnostic_warned=1
+    fi
+  fi
+  return 0
+}
+
+restore_cleanup() {
+  local status=$?
+  trap - EXIT
+  if [ -n "${validated_manifest:-}" ]; then
+    rm -f "$validated_manifest" || true
+  fi
+  diagnose_restore exit --exit-code "$status"
+  exit "$status"
+}
 
 usage() {
   cat <<EOF
@@ -60,6 +86,7 @@ check_memory() {
     return 0
   fi
   echo "Restore stopped by memory guard. Saved manifest is unchanged; reinstall helpers or rerun when memory is available." >&2
+  diagnose_restore memory_refused
   return 1
 }
 
@@ -265,7 +292,8 @@ attach_to_session() {
 restore_all_registered() {
   local attach_requested="$1"
   local force_requested="$2"
-  local session manifest status count first_session
+  local session manifest status count first_session index
+  local sessions=() manifests=() restore_args=()
   status=0
   count=0
   first_session=""
@@ -282,7 +310,24 @@ restore_all_registered() {
     if [ -z "${manifest:-}" ]; then
       manifest="$(default_manifest_path_for_session "$session")"
     fi
+    if [ ! -f "$manifest" ] || [ ! -r "$manifest" ]; then
+      echo "Registered manifest missing or unreadable for farm '$session': $manifest" >&2
+      status=1
+    fi
+    sessions+=("$session")
+    manifests+=("$manifest")
+  done < "$AUTOSERVICE_REGISTRY"
 
+  if [ "$status" -ne 0 ]; then
+    echo "Restore stopped before launching any farms; recover the missing manifests or remove obsolete entries from $AUTOSERVICE_REGISTRY." >&2
+    return "$status"
+  fi
+
+  # Use the checked registry snapshot even if codex-add registers a farm while
+  # restoration runs. A missing later entry must never cause a late failure.
+  for index in "${!sessions[@]}"; do
+    session="${sessions[$index]}"
+    manifest="${manifests[$index]}"
     restore_args=("--delay" "$RESTORE_DELAY")
     if [ "$force_requested" -eq 1 ]; then
       restore_args+=("--force")
@@ -299,12 +344,13 @@ restore_all_registered() {
     else
       status=1
     fi
-  done < "$AUTOSERVICE_REGISTRY"
+  done
 
   if [ "$attach_requested" -eq 1 ] && [ -n "$first_session" ]; then
     attach_to_session "$first_session"
   fi
   echo "Restored $count registered farm(s)"
+  diagnose_restore complete --restored "$count" --failed "$status"
   return "$status"
 }
 
@@ -380,6 +426,23 @@ if [ "$list_snapshots" -eq 1 ]; then
   exec python3 "$MANIFEST_BIN" history "$MANIFEST_PATH"
 fi
 
+diagnostic_run="${CODEXFARM_RESTORE_DIAGNOSTIC_RUN:-}"
+if [[ ! "$diagnostic_run" =~ ^[0-9]{1,10}-[0-9]{1,5}-[0-9]{1,5}$ ]]; then
+  diagnostic_run="$$-$RANDOM-$RANDOM"
+fi
+export CODEXFARM_RESTORE_DIAGNOSTIC_RUN="$diagnostic_run"
+diagnostic_phase=dispatch
+if [ "$all_registered" -eq 1 ]; then
+  diagnostic_phase=registry
+elif [ "${CODEXFARM_LOCKED_MANIFEST:-}" = "$MANIFEST_PATH" ] \
+  && [ "${CODEXFARM_LOCK_PARENT_PID:-}" = "$PPID" ]; then
+  diagnostic_phase=farm
+fi
+diagnostic_warned=0
+validated_manifest=""
+trap restore_cleanup EXIT
+diagnose_restore start
+
 if [ "$all_registered" -eq 1 ]; then
   if ! command -v tmux >/dev/null; then
     echo "tmux not found" >&2
@@ -424,6 +487,7 @@ finish_restore() {
   fi
   rm -f "$validated_manifest"
   [ -z "$restore_outcomes" ] || rm -f "$restore_outcomes"
+  diagnose_restore exit --exit-code "$result"
   exit "$result"
 }
 trap finish_restore EXIT
@@ -560,6 +624,7 @@ restore_row=0
       if [ "$other_farm_status" -eq 0 ]; then
         echo "Skipping existing conversation in another farm: $name"
         record_restore_outcome active_elsewhere
+        diagnose_restore skip --row "$restore_row"
         continue
       elif [ "$other_farm_status" -ne 1 ]; then
         echo "Unable to inspect other tmux farms before restoring '$name'." >&2
@@ -572,6 +637,7 @@ restore_row=0
       if [ -n "$exact_session_id" ] && session_already_present "$RESTORE_CMD" "$exact_session_id"; then
         echo "Skipping existing conversation: $name"
         record_restore_outcome already_present
+        diagnose_restore skip --row "$restore_row"
         continue
       fi
       existing_target="$(
@@ -585,6 +651,7 @@ restore_row=0
         else
           echo "Skipping existing window: $name"
           record_restore_outcome already_present
+          diagnose_restore skip --row "$restore_row"
         fi
         continue
       fi
@@ -614,18 +681,27 @@ restore_row=0
       record_restore_outcome memory_pressure
       exit 3
     fi
-    if ! CODEXFARM_RESTORE_PID="$$" \
+    diagnostic_provider=other
+    case "$RESTORE_CMD" in
+      codex|claude|gemini) diagnostic_provider="$RESTORE_CMD" ;;
+    esac
+    diagnose_restore launch_start --row "$restore_row" --provider "$diagnostic_provider"
+    launch_status=0
+    CODEXFARM_RESTORE_PID="$$" \
       CODEX_TOOL_NAME="$restore_provider" \
       CODEX_SESSION="$SESSION" \
       CODEX_NAME="$name" \
       CODEX_CMD="$RESTORE_CMD" \
       CODEX_ARGS="$RESTORE_ARGS" \
-      "$ADD_BIN" -d "$restore_dir"; then
+      "$ADD_BIN" -d "$restore_dir" || launch_status=$?
+    if [ "$launch_status" -ne 0 ]; then
       echo "Unable to launch saved window: $name" >&2
       record_restore_outcome launch_failed
+      diagnose_restore launch_end --row "$restore_row" --provider "$diagnostic_provider" --exit-code "$launch_status"
       restore_failures=$((restore_failures + 1))
       continue
     fi
+    diagnose_restore launch_end --row "$restore_row" --provider "$diagnostic_provider" --exit-code 0
     restored=$((restored + 1))
     record_restore_outcome launched
     if [ "$force" -eq 0 ] && [ -n "$exact_session_id" ]; then
@@ -657,3 +733,4 @@ if [ "$restore_failures" -ne 0 ]; then
 fi
 
 echo "Restore complete from $MANIFEST_PATH"
+diagnose_restore complete --restored "$restored" --failed "$restore_failures"
