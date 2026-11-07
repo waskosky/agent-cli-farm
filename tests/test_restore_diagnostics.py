@@ -7,10 +7,17 @@ import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_looper.restore_diagnostics import LOG_COUNT, append_record, main
+from codex_looper.restore_diagnostics import (
+    LOG_COUNT,
+    MAX_LOG_AGE_SECONDS,
+    append_record,
+    main,
+    resource_snapshot,
+)
 
 
 class RestoreDiagnosticsTests(unittest.TestCase):
@@ -72,6 +79,23 @@ class RestoreDiagnosticsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             append_record(self.logs, {"event": "start"})
         self.assertEqual(target.read_text(), "preserve this file")
+
+    def test_age_pruning_uses_first_record_even_after_newer_appends(self):
+        old = datetime.fromtimestamp(time.time() - MAX_LOG_AGE_SECONDS - 60, timezone.utc)
+        self.assertTrue(append_record(self.logs, {"time": old.isoformat(), "old": True}))
+        self.assertTrue(append_record(self.logs, {"event": "start"}))
+        current = (self.logs / "restore.jsonl").read_text()
+        self.assertNotIn('"old"', current)
+        self.assertEqual(json.loads(current), {"event": "start"})
+
+    def test_process_scan_has_a_fixed_budget_and_reports_incomplete_counts(self):
+        proc = self.root / "proc"
+        for number in range(4):
+            (proc / str(number)).mkdir(parents=True)
+        with patch("codex_looper.restore_diagnostics.MAX_PROCESSES", 2):
+            snapshot = resource_snapshot(proc)
+        self.assertEqual(snapshot["processes"]["total"], 2)
+        self.assertTrue(snapshot["process_scan_truncated"])
 
     def test_busy_lock_cannot_stall_a_restore(self):
         self.logs.mkdir()

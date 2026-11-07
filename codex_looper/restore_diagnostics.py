@@ -20,6 +20,8 @@ from codex_looper.health import read_memory
 MAX_LOG_BYTES = 1024 * 1024
 LOG_COUNT = 3
 MAX_RECORD_BYTES = 8192
+MAX_LOG_AGE_SECONDS = 14 * 86400
+MAX_PROCESSES = 4096
 EVENTS = ("start", "launch_start", "launch_end", "skip", "memory_refused", "complete", "exit")
 
 
@@ -49,10 +51,15 @@ def resource_snapshot(proc: Path) -> dict:
         pressure[resource] = values
     processes = {"total": 0, "codex": 0, "node": 0}
     rss = {"codex": 0.0, "node": 0.0}
+    deadline = time.monotonic() + 0.25
+    truncated = False
     try:
         for entry in proc.iterdir():
             if not entry.name.isdigit():
                 continue
+            if processes["total"] >= MAX_PROCESSES or time.monotonic() >= deadline:
+                truncated = True
+                break
             processes["total"] += 1
             command = read_text(entry / "comm").strip()
             if command in rss:
@@ -69,6 +76,7 @@ def resource_snapshot(proc: Path) -> dict:
         "memory": asdict(memory) if memory else None,
         "pressure_avg10": pressure,
         "processes": processes,
+        "process_scan_truncated": truncated,
         "rss_mib": {key: round(value, 1) for key, value in rss.items()},
     }
 
@@ -88,6 +96,19 @@ def tmux_snapshot() -> dict:
         return {"available": False}
     states = [line for line in result.stdout.splitlines() if line in {"0", "1"}]
     return {"available": True, "panes": len(states), "dead": states.count("1")}
+
+
+def log_started_at(path: Path) -> float:
+    try:
+        with path.open() as handle:
+            first = json.loads(handle.readline(MAX_RECORD_BYTES + 1))
+        if isinstance(first, dict) and isinstance(first.get("time"), str):
+            timestamp = datetime.fromisoformat(first["time"])
+            if timestamp.tzinfo is not None:
+                return timestamp.timestamp()
+    except (OSError, ValueError, TypeError):
+        pass
+    return path.stat().st_mtime
 
 
 def append_record(directory: Path, record: dict, *, max_bytes: int = MAX_LOG_BYTES) -> bool:
@@ -119,7 +140,10 @@ def append_record(directory: Path, record: dict, *, max_bytes: int = MAX_LOG_BYT
         for path in paths:
             if path.is_symlink() or (path.exists() and not path.is_file()):
                 raise ValueError("diagnostic logs must be regular files")
-            if path.exists() and path.stat().st_size > max_bytes:
+            if path.exists() and (
+                path.stat().st_size > max_bytes
+                or log_started_at(path) < time.time() - MAX_LOG_AGE_SECONDS
+            ):
                 path.unlink()
         if paths[0].exists() and paths[0].stat().st_size + len(payload) > max_bytes:
             paths[-1].unlink(missing_ok=True)

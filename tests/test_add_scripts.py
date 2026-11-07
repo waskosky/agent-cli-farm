@@ -1559,6 +1559,47 @@ exit 0
             ],
         )
 
+    def test_restore_with_saved_autoservice_choice_does_not_activate_manager(self):
+        target = self.tmpdir / "restore-project"
+        target.mkdir()
+        config = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm"
+        config.mkdir(parents=True)
+        manifest = config / "manifest.tsv"
+        manifest.write_text(
+            f"name\tdir\tcmd\targs\nproj\t{target}\tcodex\t"
+            "resume 019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4\n"
+        )
+        (config / "farms.tsv").write_text(f"session\tmanifest\ncodexfarm\t{manifest}\n")
+        choice = Path(self.env["XDG_STATE_HOME"]) / "codexfarm/autoservice_choice"
+        choice.parent.mkdir(parents=True)
+        choice.write_text("yes\n")
+        manager_log = self.tmpdir / "systemctl-restore.log"
+        make_executable(
+            self.tmpdir / "systemctl",
+            f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{manager_log}"\n',
+        )
+        for flags in ([], ["--all-registered"]):
+            with self.subTest(flags=flags):
+                self.tmux_log.write_text("")
+                result = subprocess.run(
+                    [REPO_ROOT / "bin/codex-restore", *flags],
+                    env={
+                        **self.env,
+                        "CODEX_SESSION": "codexfarm",
+                        "CODEX_ADD_BIN": str(REPO_ROOT / "bin/codex-add"),
+                        "CODEXFARM_HISTORY_BACKEND": "legacy",
+                        "SYSTEMCTL_BIN": str(self.tmpdir / "systemctl"),
+                        "CODEXFARM_RESTORE_DELAY_SECONDS": "0",
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(manager_log.exists(), "restore must not activate its own service")
+                windows = [cmd for cmd in self.read_tmux_commands() if cmd[0] == "new-window"]
+                self.assertEqual(len(windows), 1)
+
     def test_autoservice_install_registers_multiple_farms_with_single_units(self):
         systemctl_log = self.tmpdir / "systemctl-session.log"
         systemctl_stub = f"""#!/usr/bin/env bash

@@ -519,7 +519,9 @@ farm names, paths, command arguments, and environment values. Files live in
 `${XDG_STATE_HOME:-~/.local/state}/codexfarm/diagnostics/`: `restore.jsonl` plus
 two rotated copies, each capped at 1 MiB (3 MiB of log content total). Rotation
 is locked across concurrent restores; records are flushed to disk at restore
-steps, with no continuous recorder. A failed logger warns and lets restore
+steps, with no continuous recorder. Files expire 14 days after their first
+record and are pruned on the next restore. Process scans stop after 4096 PIDs
+or a quarter second and mark incomplete counts. A failed logger warns and lets restore
 continue. Set `CODEXFARM_RESTORE_DIAGNOSTICS=0` to disable it. These limits apply
 to diagnostic files; conversation logs and backups have their own retention.
 
