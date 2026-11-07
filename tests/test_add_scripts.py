@@ -95,6 +95,7 @@ esac
         # Unit tests stub tmux and must not leave a real annotator daemon
         # running after the short-lived codex-add process exits.
         self.env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
+        self.env["CODEXFARM_RESTORE_DIAGNOSTICS"] = "0"
 
     def read_tmux_commands(self) -> list[list[str]]:
         lines = self.tmux_log.read_text(encoding="utf-8").splitlines()
@@ -173,6 +174,41 @@ esac
             self.assertEqual("codex-job run --role agent --" in capture.read_text(), expected)
             if not private:
                 self.assertIn("optional resource settings unavailable", result.stderr)
+
+    def test_background_annotator_does_not_hold_launcher_output_open(self):
+        ready = self.tmpdir / "annotator-ready"
+        release = self.tmpdir / "annotator-release"
+        annotator = self.tmpdir / "annotator"
+        make_executable(
+            annotator,
+            f"""#!/bin/sh
+: > "{ready}"
+while [ ! -e "{release}" ]; do sleep 0.02; done
+""",
+        )
+        process = subprocess.Popen(
+            [REPO_ROOT / "bin/codex-add", "-d", str(self.tmpdir)],
+            env={
+                **self.env,
+                "CODEX_ANNOTATOR_AUTOSTART": "1",
+                "CODEX_ANNOTATOR_BIN": str(annotator),
+                "CODEXFARM_HISTORY_BACKEND": "legacy",
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertIn("Started codex", stdout)
+            deadline = time.monotonic() + 2
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "annotator must start while launcher output closes")
+        finally:
+            release.touch()
+            process.communicate(timeout=5)
 
     def test_help_does_not_require_tmux_or_agent(self):
         env = self.env.copy()
@@ -1045,6 +1081,30 @@ exit 0
         self.assertTrue(
             any("codex-autosave.timer" in line for line in systemctl_calls),
             f"Expected timer-related systemctl calls, got: {systemctl_calls}",
+        )
+        self.assertEqual(
+            [line.split() for line in systemctl_calls if "start" in line.split()],
+            [["--user", "start", "codex-autosave.timer"]],
+            "Installation must not launch a bulk restore",
+        )
+
+    def test_explicit_autoservice_refresh_does_not_start_restore(self):
+        manager_log = self.tmpdir / "systemctl-refresh.log"
+        make_executable(
+            self.tmpdir / "systemctl",
+            f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{manager_log}"\n',
+        )
+        result = self.run_install()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [line.split() for line in manager_log.read_text().splitlines()]
+        self.assertIn(["--user", "daemon-reload"], calls)
+        self.assertIn(
+            ["--user", "enable", "codex-autosave.timer", "codex-autorestore.service"], calls
+        )
+        self.assertEqual(
+            [call for call in calls if "start" in call or "--now" in call],
+            [["--user", "start", "codex-autosave.timer"]],
         )
 
     def run_install(self, *flags):
@@ -2839,6 +2899,8 @@ exit 0
         self.env["XDG_CONFIG_HOME"] = str(self.tmpdir / "config")
         self.env["CODEX_ADD_BIN"] = str(self.tmpdir / "codex-add")
         self.env["CODEXFARM_RESTORE_DELAY_SECONDS"] = "0"
+        self.env["XDG_STATE_HOME"] = str(self.tmpdir / "state")
+        self.env["CODEXFARM_RESTORE_DIAGNOSTICS"] = "0"
         proc = self.tmpdir / "proc"
         proc.mkdir()
         (proc / "meminfo").write_text("MemTotal: 8000000 kB\nMemAvailable: 4000000 kB\n")
@@ -2903,6 +2965,66 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.codex_add_log.read_text().splitlines()), 1)
         self.assertFalse(any(cmd[0] == "kill-window" for cmd in self.read_tmux_commands()))
+
+    def test_restore_diagnostics_record_results_without_private_manifest_data(self):
+        self.env["CODEXFARM_RESTORE_DIAGNOSTICS"] = "1"
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        log = Path(self.env["XDG_STATE_HOME"]) / "codexfarm/diagnostics/restore.jsonl"
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual({record["run_id"] for record in records}, {records[0]["run_id"]})
+        launches = [record for record in records if record["event"].startswith("launch_")]
+        self.assertEqual([record["event"] for record in launches], ["launch_start", "launch_end"])
+        self.assertEqual(launches[-1]["exit_code"], 0)
+        self.assertTrue(
+            all(record["exit_code"] == 0 for record in records if record["event"] == "exit")
+        )
+        for secret in (str(self.project_dir), "019e1659-3a2f-7a40-95cf-5ac9dd7fe5d4"):
+            self.assertNotIn(secret, log.read_text())
+
+    def test_restore_diagnostics_preserve_refusal_exit_status(self):
+        self.env["CODEXFARM_RESTORE_DIAGNOSTICS"] = "1"
+        (Path(self.env["CODEX_PROC_ROOT"]) / "meminfo").write_text(
+            "MemTotal: 8000000 kB\nMemAvailable: 100000 kB\n"
+        )
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--enforce-memory-pressure", str(self.manifest)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        log = Path(self.env["XDG_STATE_HOME"]) / "codexfarm/diagnostics/restore.jsonl"
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("memory_refused", [record["event"] for record in records])
+        self.assertEqual(records[-1]["event"], "exit")
+        self.assertEqual(records[-1]["exit_code"], 3)
+        self.assertFalse(self.tmux_log.exists())
+
+    def test_failed_diagnostics_do_not_block_restore_or_change_its_exit_status(self):
+        broken = self.tmpdir / "broken-diagnostics"
+        make_executable(broken, "#!/bin/sh\nexit 17\n")
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", str(self.manifest)],
+            env={
+                **self.env,
+                "CODEXFARM_RESTORE_DIAGNOSTICS": "1",
+                "CODEX_RESTORE_DIAGNOSTICS_BIN": str(broken),
+            },
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("diagnostics unavailable", result.stderr)
+        self.assertTrue(self.codex_add_log.exists())
 
     def test_codex_restore_launches_saved_codex_resume_command(self):
         original_manifest = self.manifest.read_bytes()
@@ -4056,6 +4178,51 @@ case "$1" in""",
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Omitted row 3", result.stderr)
         self.assertEqual(len(self.codex_add_log.read_text().splitlines()), 1)
+
+    def test_registered_restore_checks_missing_manifests_before_any_launch(self):
+        registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/farms.tsv"
+        registry.parent.mkdir(parents=True)
+        valid = f"work\t{self.manifest}\n"
+        missing = f"missing\t{self.tmpdir / 'missing.tsv'}\n"
+        for rows in (valid + missing, missing + valid):
+            with self.subTest(rows=rows):
+                self.tmux_log.unlink(missing_ok=True)
+                self.codex_add_log.unlink(missing_ok=True)
+                Path(self.env["TMUX_STATE_FILE"]).unlink(missing_ok=True)
+                registry.write_text("session\tmanifest\n" + rows)
+                original_manifest = self.manifest.read_bytes()
+                result = subprocess.run(
+                    [REPO_ROOT / "bin/codex-restore", "--all-registered", "--force", "--attach"],
+                    env=self.env,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("missing.tsv", result.stderr)
+                self.assertIn("before launching any farms", result.stderr)
+                self.assertFalse(self.tmux_log.exists())
+                self.assertFalse(self.codex_add_log.exists())
+                self.assertEqual(self.manifest.read_bytes(), original_manifest)
+                self.assertEqual(registry.read_text(), "session\tmanifest\n" + rows)
+
+    def test_registered_restore_prechecks_default_manifest_paths(self):
+        registry = Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/farms.tsv"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(f"session\tmanifest\nwork\t{self.manifest}\nmissing\t\n")
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-restore", "--all-registered"],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("manifests/missing.tsv", result.stderr)
+        self.assertFalse(self.tmux_log.exists())
+        self.assertFalse(self.codex_add_log.exists())
 
 
 class ResumeAndBoardScriptsTests(unittest.TestCase):

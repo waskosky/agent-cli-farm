@@ -512,6 +512,17 @@ CLI flags override it. An invalid final policy exits 2 before touching tmux.
 These options also apply with `--all-registered` and provider restore wrappers.
 Checks never interrupt running chats.
 
+Restore diagnostics record timestamps, run/boot identifiers, row numbers,
+provider types, exit statuses, RAM/swap, pressure counters, process counts/RSS,
+and aggregate tmux pane counts. They exclude conversation text, session IDs,
+farm names, paths, command arguments, and environment values. Files live in
+`${XDG_STATE_HOME:-~/.local/state}/codexfarm/diagnostics/`: `restore.jsonl` plus
+two rotated copies, each capped at 1 MiB (3 MiB of log content total). Rotation
+is locked across concurrent restores; records are flushed to disk at restore
+steps, with no continuous recorder. A failed logger warns and lets restore
+continue. Set `CODEXFARM_RESTORE_DIAGNOSTICS=0` to disable it. These limits apply
+to diagnostic files; conversation logs and backups have their own retention.
+
 If tmux sessions are already running (no manifest needed):
 ```bash
 codex-resume            # joins the main Codex session if present
@@ -540,6 +551,13 @@ codex-add --session personal --install-autoservice
 ```
 
 Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session. New service definitions use `--best-effort`: verified conversations are merged into the recovery set even when another pane is unresolved, earlier conversations remain recoverable, and incomplete coverage still returns nonzero. A manual `codex-save` deliberately selects a smaller restore set. Standalone `--autosave` retains its conservative replacement policy. Saves run after autorestore when both services start together. Re-run `codex-add --install-autoservice` to refresh existing service definitions. The detached tmux server intentionally survives the short-lived restore launcher's exit, including partial restore failures.
+
+Installation starts the autosave timer and enables autorestore for the next
+login. Run `codex-restore` to restore now. The restore service uses
+`KillMode=process` so restored tmux sessions survive the launcher's completion
+or failure. Before `--all-registered` launches any farms, it checks that every
+registered manifest exists and is readable. Recover missing manifests or remove
+obsolete entries from `~/.config/codexfarm/farms.tsv` before retrying.
 
 Autosave defaults to `codex-save --all-registered --best-effort` every five minutes at low CPU
 and idle I/O priority, with a three-minute helper timeout. It saves small
@@ -1213,6 +1231,13 @@ Run the basic validation script (requires tmux):
 ./tests/integration/session_resume_smoke.sh
 CODEXFARM_DEEP_HISTORY_BIN=/path/to/tmux-deep-history/bin/tmux-deep-history \
   ./tests/integration/deep_history_smoke.sh
+```
+
+With a working systemd user manager, verify restore-service cleanup using only
+sleeping panes on private tmux sockets:
+
+```bash
+python3 tests/integration/autorestore_lifecycle_smoke.py
 ```
 
 For the static checks used in CI without creating live tmux sessions:

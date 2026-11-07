@@ -20,7 +20,7 @@ Start a provider CLI in a tmux farm window.
 Options:
   -d, --detach              Start without attaching
   -s, --session SESSION     Target farm session
-  --install-autoservice     Install or explicitly refresh autosave/autorestore units
+  --install-autoservice     Enable login restore and start autosave; refresh existing units
   --with-conversation-backups     Opt in to scheduled archives (requires --install-autoservice)
   --without-conversation-backups  Use lightweight manifests (requires --install-autoservice)
   -h, --help                Show this help
@@ -556,7 +556,9 @@ EOF
   if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
     "$SYSTEMCTL_BIN" --user daemon-reload >/dev/null 2>&1 || return 1
     "$SYSTEMCTL_BIN" --user enable codex-autosave.timer codex-autorestore.service >/dev/null 2>&1 || return 1
-    "$SYSTEMCTL_BIN" --user start codex-autosave.timer codex-autorestore.service >/dev/null 2>&1 || return 1
+    # Enable restore for the next login. Installation must not launch or wait
+    # for a bulk restore, including when invoked by a restore's child process.
+    "$SYSTEMCTL_BIN" --user start codex-autosave.timer >/dev/null 2>&1 || return 1
     "$SYSTEMCTL_BIN" --user is-active --quiet codex-autosave.timer >/dev/null 2>&1 || return 1
   else
     echo "systemctl not found; services written to $SYSTEMD_DIR but not enabled." >&2
@@ -669,7 +671,8 @@ start_status_annotator() {
   false_value "$ANNOTATOR_AUTOSTART" && return
   if [ -x "$ANNOTATOR_BIN" ]; then
     # Runs detached; helper enforces a single instance via its lockfile.
-    ( "$ANNOTATOR_BIN" >/dev/null 2>&1 || true ) &
+    # Redirect the whole group so output capture cannot wait for the daemon.
+    ( "$ANNOTATOR_BIN" || true ) </dev/null >/dev/null 2>&1 &
   fi
 }
 

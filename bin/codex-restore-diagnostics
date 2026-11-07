@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""Write a bounded restore diagnostic event without recording conversation data."""
+
+import sys
+from pathlib import Path
+
+for root in (Path(__file__).resolve().parent.parent, Path(__file__).resolve().parent):
+    if (root / "codex_looper").is_dir():
+        sys.path.insert(0, str(root))
+        break
+
+from codex_looper.restore_diagnostics import main  # noqa: E402
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, TypeError):
+        print(
+            "Restore diagnostics unavailable; no restore action was taken by this helper.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
