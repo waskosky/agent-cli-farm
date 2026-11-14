@@ -50,6 +50,8 @@ class SetupScriptTests(unittest.TestCase):
         self.env["HOME"] = str(self.tmpdir / "home")
         self.env["XDG_STATE_HOME"] = str(self.tmpdir / "state")
         self.env["XDG_CONFIG_HOME"] = str(self.tmpdir / "config")
+        self.env["XDG_DATA_HOME"] = str(self.tmpdir / "home/.local/share")
+        self.env["CODEX_HOME"] = str(self.tmpdir / "home/.codex")
         self.env["PATH"] = str(self.bin_dir)
         self.env["SHELL"] = "/bin/bash"
 
@@ -88,6 +90,7 @@ class SetupScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--with-deep-history", result.stdout)
         self.assertIn("--without-session-hook", result.stdout)
+        self.assertIn("System packages are not installed", result.stdout)
 
     def test_upgrade_atomically_replaces_helper_without_truncating_running_generation(self):
         result = self.run_setup("--without-session-hook")
@@ -323,6 +326,7 @@ exit "$setup_status"
         entry = REPO_ROOT / "bin/codex-setup-memory.py"
         self.assertTrue(entry.exists(), "memory setup entry point is missing")
         shutil.copy2(entry, fixture / "bin" / entry.name)
+        shutil.copy2(REPO_ROOT / "bin/codex-tmux-help.sh", fixture / "bin/codex-tmux-help.sh")
         host_log = self.tmpdir / "host.log"
         make_executable(
             fixture / "bin/codex-resource-host",
@@ -740,6 +744,39 @@ exit 98
             result.stdout,
         )
         self.assertTrue((Path(self.env["HOME"]) / "bin" / "codex-watch").exists())
+        self.assertNotIn("farm sessions are not ready", result.stderr)
+
+    def test_missing_tmux_leaves_helpers_installed_with_final_actionable_warning(self) -> None:
+        for command in ("apt-get", "sudo"):
+            make_executable(
+                self.bin_dir / command,
+                f'#!/bin/bash\necho called >> "{self.pkg_log}"\nexit 98\n',
+            )
+
+        result = self.run_setup("--without-session-hook")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Helpers installed, but farm sessions are not ready", result.stderr)
+        self.assertIn("sudo apt-get install tmux", result.stderr)
+        self.assertIn("tmux-deep-history plugin does not install tmux", result.stderr)
+        self.assertTrue(result.stderr.rstrip().endswith("then retry your farm command."))
+        self.assertFalse(self.pkg_log.exists(), "package manager and sudo must not be called")
+        installed_bin = Path(self.env["HOME"]) / "bin"
+        self.assertTrue((installed_bin / "codex-looper").is_file())
+        self.assertEqual(
+            (installed_bin / "codex-tmux-help.sh").read_bytes(),
+            (REPO_ROOT / "bin/codex-tmux-help.sh").read_bytes(),
+        )
+        # Verify that the installed commands can find their shared diagnostic.
+        launch = subprocess.run(
+            ["/bin/bash", str(installed_bin / "codex-resume")],
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(launch.returncode, 127, launch.stderr)
+        self.assertIn("sudo apt-get install tmux", launch.stderr)
 
     def test_uses_versioned_python_when_python3_is_too_old(self) -> None:
         make_fake_python(self.bin_dir / "python3", 3, 9)

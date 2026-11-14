@@ -44,6 +44,17 @@ not leak options or functions into your shell.
 
 ### 1. One-time Setup
 
+Install `tmux` first in the environment where you will run the farm:
+
+| Environment | Install command |
+| --- | --- |
+| Ubuntu/Debian (including Ubuntu inside WSL) | `sudo apt-get install tmux` |
+| macOS with Homebrew | `brew install tmux` |
+
+Use your distribution's package manager on other systems. Check `tmux -V`
+in the same terminal before continuing. If tmux is already installed but cannot
+be found, add its installation directory to that shell's `PATH`.
+
 Run the setup script to create helper scripts, install the Codex
 session-identity hook and pinned deep-history integration, and auto-reload your
 shell:
@@ -60,7 +71,11 @@ This will:
 - Add `$HOME/bin` to your PATH automatically (bash/zsh/fish) and the current session
 - Verify and install the pinned `tmux-deep-history` release under `$XDG_DATA_HOME/codexfarm/plugins/` (or `~/.local/share/codexfarm/plugins/`)
 
-If `tmux` is unavailable, core tmux commands will not work until you install it. If `multitail` is unavailable, `codex-watch` falls back to a simpler `tail` view.
+If `tmux` is unavailable, setup still installs the helpers for uses such as local
+loopers, but ends with a warning and installation instructions. Farm commands
+also report those instructions when tmux is missing. The optional
+`tmux-deep-history` plugin does not include tmux itself. If `multitail` is
+unavailable, `codex-watch` falls back to a simpler `tail` view.
 Omit `--with-deep-history` when you want the legacy flat-log backend only. Re-running the setup
 command is safe; the installed version can change only when this repository's reviewed lock changes.
 After updating an existing checkout, include `--with-deep-history` again if you use that backend so

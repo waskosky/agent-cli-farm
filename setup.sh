@@ -62,6 +62,7 @@ Usage: setup.sh [--with-deep-history] [--without-session-hook]
 
 Install Agent CLI Farm helpers and provider session-identity hooks. The
 --with-deep-history flag also installs the checksum-pinned history backend.
+System packages are not installed; tmux must be on PATH for farm sessions.
 Use --without-session-hook to leave provider hook settings unchanged.
 Interactive terminals explain and ask about gentle memory protection, then
 separately preview and ask before applying Linux/systemd preferences with sudo.
@@ -172,7 +173,7 @@ PY
     echo "Using Python interpreter: $setup_python"
   }
 
-  install_dependencies() {
+  check_dependencies() {
     local missing=()
 
     have_command tmux || missing+=("tmux")
@@ -271,7 +272,7 @@ EOF
   }
 
   require_python
-  install_dependencies
+  check_dependencies
 
   local script_source script_dir shell_name updated_any primary_rc install_source_marker
   script_source="${BASH_SOURCE[0]}"
@@ -493,6 +494,12 @@ EOF
     else
       echo "  export PATH=\"\$HOME/bin:\$PATH\""
     fi
+  fi
+
+  if ! have_command tmux; then
+    echo "" >&2
+    echo "WARNING: Helpers installed, but farm sessions are not ready until tmux is available." >&2
+    . "$script_dir/bin/codex-tmux-help.sh" >&2
   fi
 )
 

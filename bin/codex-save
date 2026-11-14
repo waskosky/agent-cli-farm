@@ -677,6 +677,11 @@ if [ "$all_registered" -eq 1 ] && [ "${#args_pos[@]}" -gt 0 ]; then
   exit 2
 fi
 
+if ! command -v tmux >/dev/null 2>&1; then
+  . "$SCRIPT_DIR/codex-tmux-help.sh" >&2
+  exit 127
+fi
+
 if [ "$all_registered" -eq 1 ]; then
   save_all_registered
   exit $?
@@ -691,11 +696,6 @@ if [ "${CODEXFARM_LOCKED_MANIFEST:-}" != "$MANIFEST_PATH" ] \
   exec python3 "$MANIFEST_BIN" lock-run "$MANIFEST_PATH" "$0" ${original_args[@]+"${original_args[@]}"}
 fi
 export CODEXFARM_LOCK_SCRIPT_PID=$$
-
-if ! command -v tmux >/dev/null; then
-  echo "tmux not found" >&2
-  exit 127
-fi
 
 if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
   if [ "$autosave" -eq 1 ]; then

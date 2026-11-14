@@ -257,7 +257,8 @@ check_runtime() {
   local audit_bin="$SCRIPT_DIR/codex-audit-panes.py"
 
   if ! command -v tmux >/dev/null 2>&1; then
-    problem "tmux is not installed"
+    problem "tmux is not available on PATH"
+    . "$SCRIPT_DIR/codex-tmux-help.sh"
     return
   fi
   if tmux has-session -t "$SESSION" 2>/dev/null; then

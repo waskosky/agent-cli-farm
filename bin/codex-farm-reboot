@@ -121,7 +121,7 @@ fi
 BOARD_SESSION="$(board_session_name "$SESSION")"
 
 if ! command -v tmux >/dev/null 2>&1; then
-  echo "tmux not found" >&2
+  . "$SCRIPT_DIR/codex-tmux-help.sh" >&2
   exit 127
 fi
 

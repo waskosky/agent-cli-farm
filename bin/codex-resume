@@ -84,8 +84,8 @@ if [ -z "$SESSION_ARG" ] && [ ${#POSITIONALS[@]} -gt 0 ]; then
   SESSION_ARG="${POSITIONALS[0]}"
 fi
 
-if ! command -v tmux >/dev/null; then
-  echo "tmux not found" >&2
+if ! command -v tmux >/dev/null 2>&1; then
+  . "$(dirname "${BASH_SOURCE[0]}")/codex-tmux-help.sh" >&2
   exit 127
 fi
 

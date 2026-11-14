@@ -348,12 +348,14 @@ if [ "$install_autoservice_only" -eq 0 ] && [ ! -d "$DIR" ]; then
 fi
 
 if [ "$install_autoservice_only" -eq 0 ]; then
-  for c in tmux "$CMD"; do
-      command -v "$c" >/dev/null || {
-          echo "$c not found" >&2
-          exit 127
-      }
-  done
+  if ! command -v tmux >/dev/null 2>&1; then
+    . "$(dirname "${BASH_SOURCE[0]}")/codex-tmux-help.sh" >&2
+    exit 127
+  fi
+  if ! command -v "$CMD" >/dev/null 2>&1; then
+    echo "$CMD not found" >&2
+    exit 127
+  fi
 fi
 
 # Fix tmux socket directory permissions if needed

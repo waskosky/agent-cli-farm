@@ -426,6 +426,11 @@ if [ "$list_snapshots" -eq 1 ]; then
   exec python3 "$MANIFEST_BIN" history "$MANIFEST_PATH"
 fi
 
+if ! command -v tmux >/dev/null 2>&1; then
+  . "$SCRIPT_DIR/codex-tmux-help.sh" >&2
+  exit 127
+fi
+
 diagnostic_run="${CODEXFARM_RESTORE_DIAGNOSTIC_RUN:-}"
 if [[ ! "$diagnostic_run" =~ ^[0-9]{1,10}-[0-9]{1,5}-[0-9]{1,5}$ ]]; then
   diagnostic_run="$$-$RANDOM-$RANDOM"
@@ -444,10 +449,6 @@ trap restore_cleanup EXIT
 diagnose_restore start
 
 if [ "$all_registered" -eq 1 ]; then
-  if ! command -v tmux >/dev/null; then
-    echo "tmux not found" >&2
-    exit 127
-  fi
   restore_all_registered "$attach" "$force"
   exit $?
 fi
@@ -506,11 +507,6 @@ restore_outcomes=$(mktemp)
 record_restore_outcome() {
   printf '%s\t%s\n' "$restore_row" "$1" >> "$restore_outcomes"
 }
-
-if ! command -v tmux >/dev/null; then
-  echo "tmux not found" >&2
-  exit 127
-fi
 
 # Ensure session exists
 check_memory || exit 3
