@@ -91,6 +91,32 @@ class SetupScriptTests(unittest.TestCase):
         self.assertIn("--with-deep-history", result.stdout)
         self.assertIn("--without-session-hook", result.stdout)
         self.assertIn("System packages are not installed", result.stdout)
+        self.assertIn("--with-autosave", result.stdout)
+
+    def test_explicit_autosave_setup_uses_platform_backend_without_starting_provider(self):
+        for command in ("bash", "tr", "id", "awk"):
+            (self.bin_dir / command).symlink_to(shutil.which(command))
+        make_executable(self.bin_dir / "uname", "#!/bin/sh\nprintf 'Linux\\n'\n")
+        # The other setup tests use interpreter doubles; this one exercises the
+        # real installed launcher with an isolated manager and private HOME.
+        (self.bin_dir / "python3").unlink()
+        (self.bin_dir / "python3").symlink_to(sys.executable)
+        log = self.tmpdir / "systemctl.log"
+        make_executable(
+            self.bin_dir / "systemctl", '#!/bin/sh\nprintf "%s\\n" "$*" >> "' + str(log) + '"\n'
+        )
+        result = self.run_setup(
+            "--with-autosave",
+            "--without-session-hook",
+            "--without-memory-protection",
+            "--without-thermal-protection",
+            "--without-windows-cooling",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        self.assertTrue((units / "codex-autosave.timer").is_file())
+        self.assertFalse((units / "codex-autorestore.service").exists())
+        self.assertNotIn("--user start codex-autorestore", log.read_text())
 
     def test_upgrade_atomically_replaces_helper_without_truncating_running_generation(self):
         result = self.run_setup("--without-session-hook")
@@ -237,7 +263,10 @@ class SetupScriptTests(unittest.TestCase):
         )
         self.assertFalse(self.pkg_log.exists())
         self.assertIn("system protection not applied", result.stdout.lower())
-        self.assertIn("--with-maintenance", result.stdout)
+        if "host step requires Linux" in result.stdout:
+            self.assertNotIn("sudo /usr/bin/python3", result.stdout)
+        else:
+            self.assertIn("--with-maintenance", result.stdout)
         self.assertNotIn("? [y/N]", result.stdout)
         installed = Path(self.env["HOME"]) / "bin/codex-setup-memory.py"
         self.assertEqual(
@@ -461,6 +490,7 @@ exit 0
         )
         self.assertFalse((home / ".config/systemd").exists())
 
+    @unittest.skipUnless(sys.platform == "linux", "registered resource identity requires /proc")
     def test_installed_jobs_register_after_setup_with_ordinary_umasks(self):
         (self.bin_dir / "python3").unlink()
         (self.bin_dir / "python3").symlink_to(sys.executable)
@@ -491,7 +521,9 @@ exit 0
                     env=env,
                     text=True,
                     capture_output=True,
-                    timeout=10,
+                    # Setup copies the entire installed package. Its duration
+                    # is not part of the umask/registration contract.
+                    timeout=120,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 farm_state = state / "codexfarm"

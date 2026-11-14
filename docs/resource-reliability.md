@@ -105,15 +105,23 @@ Sensor/guard/helper receipts distinguish acquisition failures, dead helpers, inc
 
 Five-minute autosave publishes exact manifests and a separate `manifest.tsv.capture.json` heartbeat even when manifest bytes have not changed. Partial saves retain earlier recovery identities and report incomplete coverage. The capture digest detects a changed manifest or an interrupted publication; doctor no longer relies solely on file modification time.
 
+To enable automatic manifests with manual restoration, run `codex-add --install-autosave` or `./setup.sh --with-autosave`. These explicitly install a per-user macOS LaunchAgent or Linux/WSL systemd timer, preserving existing login-restore and independent archive choices. Default unattended setup does not activate a scheduler. New launches in registered farms are covered; a stored autoservice yes alone does not prove a scheduler is installed or healthy.
+
+On macOS, autosave is `~/Library/LaunchAgents/com.codexfarm.autosave.plist`, scheduled every five minutes, at login, and after missed intervals during sleep. `codex-doctor --check` checks that the job is loaded and reports a failed last save. Disabled overrides, disabled or symlinked local plists, and global definitions block refreshes before registry or consent writes. No administrator access is used. Logs are under `${XDG_STATE_HOME:-~/.local/state}/codexfarm/logs/com.codexfarm.autosave.log`.
+
 Restore uses a stable normalized manifest under the same lock, skips exact conversations already active elsewhere, and never guesses the latest session. Its private `.restore.json` receipt records bounded row indices, identity hashes and outcomes, attempt number, manifest generation and completion status. Raw labels, paths and session IDs are omitted. Large attempts report receipt truncation instead of limiting the number of windows restored.
+
+Stable farm labels are saved separately from native CLI titles and exact conversation IDs. Shared-server captures use the recorded conversation name for new or placeholder labels while retaining custom labels. New shell and custom-command windows save their original executable and arguments separately from resource and keep-open wrappers so those wrappers remain executable after restoration.
 
 For a legacy manifest containing a named window with both command and arguments empty, explicitly run `codex-restore --repair-manifest`. The repair validates every remaining row, including resolved Codex identities, before archiving the original bytes and atomically publishing the repaired manifest. It reports each omitted row and leaves other malformed rows, missing provider IDs, and duplicate conversations as errors. An empty result is refused. Repair does not publish a live-capture heartbeat or reconstruct missing commands, conversation IDs, or editor contents. Use `codex-restore --list-snapshots` to inspect retained snapshots instead when a different restore point is needed.
 
-Autorestore has at most three starts per five-minute window, with a 15-second delay after failure. Successful detached tmux windows survive a partial failure. Retry uses the existing exact-identity checks and does not create a second conversation writer. Refresh existing unit definitions explicitly, preserving the independent archive choice:
+On Linux/WSL, autorestore has at most three starts per five-minute window, with a 15-second delay after failure. Successful detached tmux windows survive a partial failure. Retry uses the existing exact-identity checks and does not create a second conversation writer. Explicitly install or refresh login restoration, preserving the independent archive choice:
 
 ```bash
 codex-add --install-autoservice
 ```
+
+On macOS this also writes `com.codexfarm.autorestore.plist` for the next login. Installation activates only autosave and does not start a bulk restore. The restore job abandons its process group on exit so detached tmux sessions survive. Use `codex-restore` for immediate manual recovery.
 
 The Windows sensor task starts at Windows boot. Linux guard/autorestore services start with the WSL user manager. Enabling those Linux units does not itself launch WSL after a cold Windows boot. This implementation does not silently add a Windows task to keep a distro running.
 

@@ -596,7 +596,7 @@ save_all_registered() {
     fi
   done < "$AUTOSERVICE_REGISTRY"
 
-  echo "Autosaved $count registered farm(s)"
+  echo "Checked $count registered farm(s) for autosave (stopped farms are skipped)"
   return "$status"
 }
 
@@ -832,8 +832,14 @@ while IFS=$'\n' read -r idx; do
         ;;
       *)
         if [ "$first_pane" -eq 0 ] || [ "$name" = home ]; then first_pane=0; continue; fi
-        cmd=$(trim_command_field "$cmd")
-        cmd="${cmd:-$current_cmd}"
+        launch_command="$(pane_option "$pane_target" @codexfarm_launch_command)"
+        if [ -n "$launch_command" ]; then
+          cmd="$launch_command"
+          args="$(pane_option "$pane_target" @codexfarm_launch_args)"
+        else
+          cmd=$(trim_command_field "$cmd")
+          cmd="${cmd:-$current_cmd}"
+        fi
         ;;
     esac
     for field in "$name" "$dir" "$cmd" "$args"; do

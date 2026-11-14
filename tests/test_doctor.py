@@ -93,6 +93,7 @@ sys.exit(73)
 """,
         )
         make_executable(self.fake_bin / "systemctl", "#!/usr/bin/env bash\nexit 1\n")
+        make_executable(self.fake_bin / "uname", "#!/bin/sh\nprintf 'Linux\\n'\n")
 
         self.manifest.write_text(
             f"name\tdir\tcmd\targs\nproject\t/tmp/project\tcodex\tresume {SESSION_ID}\n",
@@ -159,6 +160,25 @@ sys.exit(73)
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("not active", result.stdout)
+
+    def test_macos_reports_loaded_schedule_and_failed_save(self):
+        make_executable(self.fake_bin / "uname", "#!/bin/sh\nprintf 'Darwin\\n'\n")
+        state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
+        state.mkdir(parents=True)
+        (state / "autoservice_choice").write_text("yes\n")
+        self.env["LAUNCHCTL_BIN"] = str(self.fake_bin / "launchctl")
+        for exit_code in (0, 1):
+            make_executable(
+                self.fake_bin / "launchctl",
+                '#!/bin/sh\ncase "$1" in\n'
+                'print-disabled) echo "disabled services = {}" ;;\n'
+                f'print) echo "state = not running"; echo "last exit code = {exit_code}" ;;\n'
+                "*) exit 71 ;;\nesac\n",
+            )
+            result = self.run_doctor(self.manifest)
+            self.assertEqual(result.returncode, exit_code, result.stdout + result.stderr)
+            self.assertIn("macOS autosave", result.stdout)
+            self.assertEqual("last save failed" in result.stdout, bool(exit_code))
 
     def test_stale_manifest_is_not_healthy(self) -> None:
         os.utime(self.manifest, (1, 1))

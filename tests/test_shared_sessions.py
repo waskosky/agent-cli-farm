@@ -152,6 +152,25 @@ class SharedSessionsTests(unittest.TestCase):
             shared.snapshot(str(self.path), None)
         self.assertTrue(self.fake.closed)
 
+    def test_snapshot_uses_recorded_titles_for_new_or_placeholder_names(self):
+        self.fake.threads[ROOT_ID]["name"] = "Map\tand\nportals\x1b"
+        self.fake.threads[SECOND_ID]["name"] = "Other project"
+        manifest = self.root / "manifest.tsv"
+        manifest.write_text(
+            f"name\tdir\tcmd\targs\nshared-codex-{ROOT_ID}\t/tmp/old\tcodex\tresume {ROOT_ID}\n"
+        )
+        rows = shared.snapshot(str(self.path), manifest)
+        self.assertEqual({row[0] for row in rows}, {"Map and portals", "Other project"})
+
+    def test_recorded_title_does_not_replace_a_custom_label(self):
+        self.fake.threads[ROOT_ID]["name"] = "New conversation name"
+        manifest = self.root / "manifest.tsv"
+        manifest.write_text(
+            f"name\tdir\tcmd\targs\nMy farm label\t/tmp/project\tcodex\tresume {ROOT_ID}\n"
+        )
+        rows = shared.snapshot(str(self.path), manifest)
+        self.assertEqual(next(row[0] for row in rows if row[3].endswith(ROOT_ID)), "My farm label")
+
     def test_child_thread_is_covered_by_its_loaded_root_and_fork_remains_independent(self):
         for page in self.fake.loaded:
             page.add(CHILD_ID)

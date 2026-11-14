@@ -76,7 +76,7 @@ jobs:
 
   macos-launchers:
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -88,11 +88,17 @@ jobs:
           ln -s /bin/bash "$RUNNER_TEMP/system-bash/bash"
           echo "$RUNNER_TEMP/system-bash" >> "$GITHUB_PATH"
           /bin/bash --version
-      - name: Test launch and restore with Bash 3.2
+      - name: Test launch, save, restore and native scheduling with Bash 3.2
         run: >-
           python -m unittest -v
           tests.test_add_scripts.AddScriptsTests
+          tests.test_add_scripts.SaveScriptTests
           tests.test_add_scripts.RestoreScriptTests
+          tests.test_launchd
+          tests.test_shared_sessions
+          tests.test_setup.SetupScriptTests.test_explicit_autosave_setup_uses_platform_backend_without_starting_provider
+          tests.test_doctor.DoctorTests.test_macos_reports_loaded_schedule_and_failed_save
+          tests.test_backup.BackupTests.test_macos_watcher_recognizes_loaded_autosave_without_starting_it
 
   windows-thermal-helpers:
     runs-on: windows-latest

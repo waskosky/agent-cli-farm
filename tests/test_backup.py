@@ -429,12 +429,31 @@ class BackupTests(unittest.TestCase):
         systemctl = self.root / "systemctl"
         systemctl.write_text("#!/bin/sh\nexit 0\n")
         systemctl.chmod(0o700)
+        # The subprocess test is portable even when hosted on a Mac.
+        launchctl = self.root / "launchctl"
+        launchctl.write_text("#!/bin/sh\nexit 0\n")
+        launchctl.chmod(0o700)
+        self.env["LAUNCHCTL_BIN"] = str(launchctl)
         self.env["PATH"] = str(self.root) + os.pathsep + self.env["PATH"]
         result = self.run_backup("--watch", archive=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("fallback watcher exiting", result.stdout)
         self.assertFalse((self.root / "state/codexfarm/backup-watch.json").exists())
         self.assertFalse(list(self.destination.glob("*.tar.gz")))
+
+    def test_macos_watcher_recognizes_loaded_autosave_without_starting_it(self):
+        module = self.load_backup_module()
+        with (
+            patch.object(module.sys, "platform", "darwin"),
+            patch.object(module.subprocess, "run") as run,
+        ):
+            run.return_value = subprocess.CompletedProcess([], 0)
+            self.assertTrue(module.timer_active())
+            self.assertEqual(
+                run.call_args.args[0][1:], ["print", f"gui/{os.getuid()}/com.codexfarm.autosave"]
+            )
+            run.return_value = subprocess.CompletedProcess([], 113)
+            self.assertFalse(module.timer_active())
 
     def test_explicit_archive_watcher_continues_alongside_manifest_autosave(self):
         module = self.load_backup_module()
