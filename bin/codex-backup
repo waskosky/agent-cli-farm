@@ -527,6 +527,26 @@ def run_once(args: argparse.Namespace, codex: Path, config: Path, state: Path) -
 
 
 def timer_active() -> bool:
+    if sys.platform == "darwin":
+        try:
+            # Loaded interval jobs are normally idle between saves. A PID is
+            # not required for a functioning launchd schedule.
+            return (
+                subprocess.run(
+                    [
+                        os.environ.get("LAUNCHCTL_BIN", "launchctl"),
+                        "print",
+                        f"gui/{os.getuid()}/com.codexfarm.autosave",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                ).returncode
+                == 0
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
     try:
         return (
             subprocess.run(
@@ -618,12 +638,12 @@ def main() -> int:
             {"pid": os.getpid(), "started_at": time.time(), "archive_enabled": args.archive},
         )
         try:
-            # The systemd timer saves manifests only. An explicitly opted-in
+            # The native scheduler saves manifests by default. An explicitly opted-in
             # archive watcher must remain active alongside that timer.
             while args.archive or not timer_active():
                 run_once(args, codex, config, state)
                 time.sleep(args.interval)
-            print("Systemd autosave timer is active; fallback watcher exiting.", flush=True)
+            print("Native autosave timer is active; fallback watcher exiting.", flush=True)
         finally:
             (state / "backup-watch.json").unlink(missing_ok=True)
     return 0

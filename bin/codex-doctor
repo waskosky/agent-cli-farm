@@ -279,6 +279,15 @@ check_runtime() {
 
   if [ -f "$STATE_DIR/autoservice_choice" ] && [ "$(cat "$STATE_DIR/autoservice_choice")" = no ]; then
     info "codex autosave service is deliberately disabled (optional)"
+  elif [ "$(uname -s)" = Darwin ]; then
+    local launchd_status
+    if launchd_status=$(python3 "$SCRIPT_DIR/codex-launchd.py" status 2>&1); then
+      ok "$launchd_status"
+    elif [ -f "$STATE_DIR/autoservice_choice" ] || [ -f "$HOME/Library/LaunchAgents/com.codexfarm.autosave.plist" ]; then
+      problem "$launchd_status"
+    else
+      info "macOS autosave is not installed (optional)"
+    fi
   elif command -v systemctl >/dev/null 2>&1 \
     && systemctl --user is-enabled --quiet codex-autosave.timer >/dev/null 2>&1; then
     if systemctl --user is-active --quiet codex-autosave.timer >/dev/null 2>&1; then

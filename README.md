@@ -29,7 +29,7 @@ backward compatibility.
 - Optional `lsof` improves exact-session discovery for Claude, Gemini, and
   Codex panes whose lifecycle hook has not run.
 - Git only for looper backup branches and git-progress circuit breakers.
-- Systemd user services for autosave/autorestore and optional WSL thermal protection.
+- Native macOS launchd and Linux/WSL systemd autosave/autorestore; optional WSL thermal protection.
 - Optional network access during `setup.sh --with-deep-history` to download the checksum-pinned plugin release.
 - Optional Windows thermal setup needs WSL2, working Windows interop, network
   access for pinned sensor packages, and Windows administrator approval.
@@ -552,9 +552,18 @@ Flags:
 
 ### 6. (Optional) Enable Autosave/Autorestore
 
-`codex-add` can install systemd user services to save lightweight session
-manifests every five minutes and restore on login.
-You can trigger it directly:
+`codex-add` installs macOS LaunchAgents or Linux/WSL systemd user services to
+save lightweight session manifests every five minutes. For automatic saves
+with manual restoration:
+
+```bash
+codex-add --install-autosave
+# Or while installing/updating the helpers:
+./setup.sh --with-autosave
+```
+
+This leaves any existing login-restore service unchanged. Default unattended
+setup does not activate services. To also enable restoration at the next login:
 
 ```bash
 codex-add --install-autoservice
@@ -567,23 +576,35 @@ codex-add --session work --install-autoservice
 codex-add --session personal --install-autoservice
 ```
 
-Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session. New service definitions use `--best-effort`: verified conversations are merged into the recovery set even when another pane is unresolved, earlier conversations remain recoverable, and incomplete coverage still returns nonzero. A manual `codex-save` deliberately selects a smaller restore set. Standalone `--autosave` retains its conservative replacement policy. Saves run after autorestore when both services start together. Re-run `codex-add --install-autoservice` to refresh existing service definitions. The detached tmux server intentionally survives the short-lived restore launcher's exit, including partial restore failures.
+Autosave/autorestore iterates the registry, so each registered farm is saved to its own manifest and restored into its own tmux session. New service definitions use `--best-effort`: verified conversations are merged into the recovery set even when another pane is unresolved, earlier conversations remain recoverable, and incomplete coverage still returns nonzero. A manual `codex-save` deliberately selects a smaller restore set. Standalone `--autosave` retains its conservative replacement policy. Systemd orders saves after autorestore; both platforms serialize writes with per-manifest locks. Re-run the relevant install command to refresh existing service definitions. Installation starts autosave but does not immediately launch a bulk restore. The detached tmux server intentionally survives the short-lived restore launcher's exit, including partial restore failures.
 
-Installation starts the autosave timer and enables autorestore for the next
-login. Run `codex-restore` to restore now. The restore service uses
-`KillMode=process` so restored tmux sessions survive the launcher's completion
-or failure. Before `--all-registered` launches any farms, it checks that every
+On macOS the files are `~/Library/LaunchAgents/com.codexfarm.autosave.plist`
+and, when requested, `com.codexfarm.autorestore.plist`. Autosave uses a calendar
+schedule, including a coalesced save after sleep, and starts at login. The
+restore plist takes effect at the next login. No administrator access is needed.
+Refreshes respect launchctl disabled overrides, disabled/symlinked local plists,
+and global definitions; they never enable an operator-disabled job.
+`codex-doctor --check` reports unloaded agents and failed saves. Logs are in
+`~/.local/state/codexfarm/logs/com.codexfarm.autosave.log` (or the selected
+`XDG_STATE_HOME`). PATH is recorded so Homebrew and NVM remain available.
+
+Full `--install-autoservice` installation starts autosave and enables
+autorestore for the next login. Run `codex-restore` to restore now. The restore
+job uses systemd's `KillMode=process` or launchd's `AbandonProcessGroup` so restored
+tmux sessions survive the launcher's completion or failure. Before
+`--all-registered` launches any farms, it checks that every
 registered manifest exists and is readable. Recover missing manifests or remove
 obsolete entries from `~/.config/codexfarm/farms.tsv` before retrying.
 
 Autosave defaults to `codex-save --all-registered --best-effort` every five minutes at low CPU
-and idle I/O priority, with a three-minute helper timeout. It saves small
+and I/O priority (systemd also applies a three-minute helper timeout). It saves small
 manifests of exact session identities. To explicitly schedule conversation
 archives, use `codex-add --install-autoservice --with-conversation-backups`;
 that selects `codex-backup --archive --min-age 3600` and preserves the archive
 budgets described below. Use `--without-conversation-backups` with an explicit
-install to return to manifests. Both backup flags require `--install-autoservice`
-and cannot be combined.
+install to return to manifests. Archive opt-in requires `--install-autoservice`;
+`--without-conversation-backups` also works with `--install-autosave`.
+The two backup flags cannot be combined.
 
 The service choice is stored in `autoservice_choice` and archive consent in
 `conversation_backup_choice` under `${XDG_STATE_HOME:-~/.local/state}/codexfarm`.
@@ -609,6 +630,18 @@ Restart any already-running backup watcher after updating. Save failures remain
 a nonzero service result.
 
 Set `CODEX_AUTOSERVICE_CHOICE=yes` to auto-accept the prompt, or `no` to suppress it.
+
+A saved yes records consent, not proof that a scheduler is installed or healthy.
+After a crash, check `codex-doctor --check` and `codex-restore --list-snapshots`
+before saving a smaller farm. An old manifest still resumes the latest locally
+stored history for each exact ID, but cannot include a new conversation that was
+never captured. Shells outside registered farms are not covered automatically.
+Regular panes retain their stable farm label; native CLI titles can continue to
+change after restore. Shared-server captures preserve custom labels and use the
+recorded conversation name for new or previously unnamed entries. Titles are
+display metadata, never a substitute for exact conversation identity.
+New shell/custom windows also retain their original executable and arguments,
+so resource and keep-open wrappers do not become an invalid executable on restore.
 
 ### Conversation backups and recovery
 
@@ -652,7 +685,7 @@ choose another destination. They do not protect against loss of that disk.
 does not prevent a history snapshot, but the combined command still exits
 nonzero. `--min-age` limits snapshot frequency while still checking the manifest
 on each invocation. The watcher uses an exclusive lock and saves every five
-minutes. The default manifest watcher exits once the systemd autosave timer
+minutes. The default manifest watcher exits once the native autosave scheduler
 becomes active. It is a temporary foreground scheduler, not a boot service.
 Scheduled full archives require explicit autoservice archive consent or a
 `codex-backup --archive --watch --min-age 3600` invocation; that archive watcher
@@ -1305,7 +1338,7 @@ agent-cli-farm/
 
 - `tmux` cannot mirror the same live pane in two windows (use linked windows or logs)
 - `tmux` survives client disconnects, but not host reboot or tmux-server exit unless autosave/autorestore recreates windows later.
-- Automatic login restoration uses systemd user services. `codex-backup --watch`
+- Automatic login restoration uses macOS LaunchAgents or Linux/WSL systemd user services. `codex-backup --watch`
   provides foreground manifest autosave when that manager is unavailable; it
   must be restarted after a reboot. Same-disk snapshots need a separate off-host
   copy to protect against disk loss.

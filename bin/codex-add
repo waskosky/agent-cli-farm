@@ -21,8 +21,9 @@ Options:
   -d, --detach              Start without attaching
   -s, --session SESSION     Target farm session
   --install-autoservice     Enable login restore and start autosave; refresh existing units
+  --install-autosave        Install/refresh autosave only; leave login restore unchanged
   --with-conversation-backups     Opt in to scheduled archives (requires --install-autoservice)
-  --without-conversation-backups  Use lightweight manifests (requires --install-autoservice)
+  --without-conversation-backups  Use lightweight manifests (requires an install flag)
   -h, --help                Show this help
 
 One non-path positional value is treated as a farm name. Use --session to avoid
@@ -188,6 +189,7 @@ session_arg=
 positionals=()
 tool_args=()
 install_autoservice_only=0
+autosave_only=0
 conversation_backup_flag=""
 while (( "$#" )); do
   case "${1:-}" in
@@ -204,6 +206,10 @@ while (( "$#" )); do
       ;;
     --install-autoservice)
       install_autoservice_only=1
+      ;;
+    --install-autosave)
+      install_autoservice_only=1
+      autosave_only=1
       ;;
     --with-conversation-backups|--without-conversation-backups)
       requested_backup_choice=no
@@ -247,7 +253,11 @@ while (( "$#" )); do
 done
 
 if [ -n "$conversation_backup_flag" ] && [ "$install_autoservice_only" -ne 1 ]; then
-  echo "Conversation backup flags require --install-autoservice" >&2
+  echo "Conversation backup flags require --install-autoservice or --install-autosave" >&2
+  exit 2
+fi
+if [ "$conversation_backup_flag" = yes ] && [ "$autosave_only" -eq 1 ]; then
+  echo "Archive opt-in requires --install-autoservice --with-conversation-backups" >&2
   exit 2
 fi
 
@@ -485,6 +495,24 @@ precheck_autoservice_masks() {
 }
 
 install_autoservice_units() {
+  if [ "$(uname -s)" = Darwin ]; then
+    local launchd_helper
+    launchd_helper="$(dirname "$0")/codex-launchd.py"
+    local launchd_backup_choice="$conversation_backup_flag"
+    local launchd_args=()
+    python3 "$launchd_helper" precheck || return 1
+    if [ -z "$launchd_backup_choice" ] && [ -f "$CONVERSATION_BACKUP_CHOICE_FILE" ]; then
+      launchd_backup_choice=$(cat "$CONVERSATION_BACKUP_CHOICE_FILE") || return 1
+    fi
+    [ "$launchd_backup_choice" = yes ] || launchd_backup_choice=no
+    [ "$autosave_only" -eq 0 ] || launchd_args+=(--save-only)
+    register_autoservice_farm || return 1
+    python3 "$launchd_helper" install --state-dir "$STATE_DIR" \
+      --archives "$launchd_backup_choice" --save-bin "$SAVE_BIN" \
+      --backup-bin "$BACKUP_BIN" --restore-bin "$RESTORE_BIN" \
+      ${launchd_args[@]+"${launchd_args[@]}"}
+    return $?
+  fi
   precheck_autoservice_masks || return 1
   local backup_choice="$conversation_backup_flag"
   local save_command="$SAVE_BIN --all-registered --best-effort"
@@ -532,7 +560,8 @@ Unit=codex-autosave.service
 WantedBy=timers.target
 EOF
 
-  cat > "$SYSTEMD_DIR/codex-autorestore.service" <<EOF || return 1
+  if [ "$autosave_only" -eq 0 ]; then
+    cat > "$SYSTEMD_DIR/codex-autorestore.service" <<EOF || return 1
 [Unit]
 Description=Codex autorestore tmux session on login
 StartLimitIntervalSec=300
@@ -552,14 +581,16 @@ KillMode=process
 [Install]
 WantedBy=default.target
 EOF
+  fi
 
   printf '%s\n' "$backup_choice" > "$CONVERSATION_BACKUP_CHOICE_FILE" || return 1
   printf '%s\n' yes > "$AUTOSERVICE_CHOICE_FILE" || return 1
   if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
     "$SYSTEMCTL_BIN" --user daemon-reload >/dev/null 2>&1 || return 1
-    "$SYSTEMCTL_BIN" --user enable codex-autosave.timer codex-autorestore.service >/dev/null 2>&1 || return 1
-    # Enable restore for the next login. Installation must not launch or wait
-    # for a bulk restore, including when invoked by a restore's child process.
+    local enable_units=(codex-autosave.timer)
+    [ "$autosave_only" -eq 1 ] || enable_units+=(codex-autorestore.service)
+    "$SYSTEMCTL_BIN" --user enable "${enable_units[@]}" >/dev/null 2>&1 || return 1
+    # Install login recovery without starting a bulk restore during setup.
     "$SYSTEMCTL_BIN" --user start codex-autosave.timer >/dev/null 2>&1 || return 1
     "$SYSTEMCTL_BIN" --user is-active --quiet codex-autosave.timer >/dev/null 2>&1 || return 1
   else
@@ -913,6 +944,7 @@ register_managed_session
 start_status_annotator
 
 # Create new window and start Codex
+LAUNCH_ARGS="$ARGS_ENV"
 printf -v CMDLINE '%q' "$CMD"
 if codex_individual_server_supported; then
   CMDLINE="$CMDLINE --no-daemon"
@@ -924,6 +956,7 @@ if [ ${#tool_args[@]} -gt 0 ]; then
   for tool_arg in "${tool_args[@]}"; do
     printf -v quoted_arg '%q' "$tool_arg"
     CMDLINE="$CMDLINE $quoted_arg"
+    LAUNCH_ARGS="${LAUNCH_ARGS}${LAUNCH_ARGS:+ }$quoted_arg"
   done
 fi
 # The original tmux shell interprets trusted ARGS_ENV exactly once. The
@@ -958,6 +991,16 @@ if [ -n "$PANE_PROVIDER" ] \
     @codexfarm_provider "$PANE_PROVIDER"
 then
   identity_failed=1
+fi
+if [ -z "$PANE_PROVIDER" ]; then
+  # Preserve the original executable and once-interpreted arguments for shell
+  # windows. pane_start_command can contain our resource/keep-open wrappers,
+  # which must never become a single executable name on the next restore.
+  # Publish the executable last, after its arguments have been recorded.
+  if ! tmux set-option -p -t "$SESSION:$WIN.0" @codexfarm_launch_args "$LAUNCH_ARGS" \
+    || ! tmux set-option -p -t "$SESSION:$WIN.0" @codexfarm_launch_command "$CMD"; then
+    identity_failed=1
+  fi
 fi
 if [ "$identity_failed" -eq 1 ]; then
   echo "warning: unable to set stable pane identity for $SESSION:$WIN" >&2

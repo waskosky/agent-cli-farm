@@ -30,6 +30,7 @@ codexfarm_setup_main() (
 
   local install_deep_history=0
   local install_session_hook=1
+  local install_autosave=0
   local with_memory_protection=0
   local without_memory_protection=0
   local with_thermal_protection=0 without_thermal_protection=0
@@ -43,6 +44,9 @@ codexfarm_setup_main() (
       --without-session-hook)
         install_session_hook=0
         ;;
+      --with-autosave)
+        install_autosave=1
+        ;;
       --with-memory-protection)
         with_memory_protection=1
         ;;
@@ -55,7 +59,7 @@ codexfarm_setup_main() (
       --without-windows-cooling) without_windows_cooling=1 ;;
       -h|--help)
         cat <<'EOF'
-Usage: setup.sh [--with-deep-history] [--without-session-hook]
+Usage: setup.sh [--with-deep-history] [--without-session-hook] [--with-autosave]
                 [--with-memory-protection | --without-memory-protection]
                 [--with-thermal-protection | --without-thermal-protection]
                 [--with-windows-cooling | --without-windows-cooling]
@@ -64,6 +68,10 @@ Install Agent CLI Farm helpers and provider session-identity hooks. The
 --with-deep-history flag also installs the checksum-pinned history backend.
 System packages are not installed; tmux must be on PATH for farm sessions.
 Use --without-session-hook to leave provider hook settings unchanged.
+--with-autosave explicitly installs five-minute manifest saves using launchd on
+macOS or systemd on Linux/WSL. It does not enable login restore or full archives;
+existing login restore and separately chosen archive settings are preserved.
+Default unattended setup does not install or activate autosave services.
 Interactive terminals explain and ask about gentle memory protection, then
 separately preview and ask before applying Linux/systemd preferences with sudo.
 Default unattended setup and --without-memory-protection preserve all memory
@@ -432,6 +440,9 @@ EOF
   fi
 
   primary_rc="${rc_files[0]:-}"
+  if [ "$install_autosave" -eq 1 ]; then
+    PATH="$HOME/bin:$PATH" "$HOME/bin/codex-add" --install-autosave || return "$?"
+  fi
   local memory_setup_args=()
   if [ "$with_memory_protection" -eq 1 ]; then
     memory_setup_args+=(--with-memory-protection)

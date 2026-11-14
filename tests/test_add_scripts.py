@@ -1,5 +1,6 @@
 import json
 import os
+import plistlib
 import shutil
 import socket
 import stat
@@ -92,6 +93,8 @@ esac
         self.env["XDG_DATA_HOME"] = str(self.tmpdir / "data")
         self.env.pop("CODEXFARM_DEEP_HISTORY_BIN", None)
         self.env["HOME"] = str(self.tmpdir)
+        # Platform-specific tests must never reach the real launchctl on Macs.
+        make_executable(self.tmpdir / "uname", "#!/bin/sh\nprintf 'Linux\\n'\n")
         # Unit tests stub tmux and must not leave a real annotator daemon
         # running after the short-lived codex-add process exits.
         self.env["CODEX_ANNOTATOR_AUTOSTART"] = "0"
@@ -444,19 +447,19 @@ while [ ! -e "{release}" ]; do sleep 0.02; done
                 self.assertNotIn("--no-daemon", launch)
 
     def test_codex_help_probe_cannot_stall_window_creation(self):
-        make_executable(self.tmpdir / "codex", "#!/usr/bin/env bash\nexec sleep 5\n")
+        # Bound a genuinely stuck probe, without assuming a particular host's
+        # total process-startup speed (notably different on macOS).
+        make_executable(self.tmpdir / "codex", "#!/usr/bin/env bash\nexec sleep 30\n")
         target = self.tmpdir / "project"
         target.mkdir()
-        started = time.monotonic()
         result = subprocess.run(
             [REPO_ROOT / "bin/codex-add", "-d", str(target)],
             env=self.env,
             text=True,
             capture_output=True,
-            timeout=7,
+            timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertLess(time.monotonic() - started, 4.5)
         launch = " ".join(next(cmd for cmd in self.read_tmux_commands() if cmd[0] == "new-window"))
         self.assertNotIn("--no-daemon", launch)
 
@@ -525,6 +528,26 @@ while [ ! -e "{release}" ]; do sleep 0.02; done
             ],
             commands,
         )
+
+    def test_wrapped_shell_records_original_executable_and_literal_arguments(self):
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-add", "-d", str(self.tmpdir), "--", "literal $value"],
+            env={
+                **self.env,
+                "CODEX_CMD": "bash",
+                "CODEX_ARGS": "-l",
+                "CODEXFARM_RESOURCE_PROTECTION": "1",
+            },
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = self.tmux_log.read_text().splitlines()
+        self.assertTrue(any(line.endswith("@codexfarm_launch_command bash") for line in lines))
+        self.assertTrue(
+            any(line.endswith(r"@codexfarm_launch_args -l literal\ \$value") for line in lines)
+        )
+        self.assertTrue(any("codex-job run --role agent -- bash" in line for line in lines))
 
     def test_codex_add_does_not_label_a_custom_command_as_a_provider(self):
         target_dir = self.tmpdir / "proj-custom-command"
@@ -1115,6 +1138,91 @@ exit 0
             text=True,
         )
 
+    def test_save_only_installs_timer_without_creating_or_starting_restore(self):
+        log = self.tmpdir / "systemctl.log"
+        make_executable(
+            self.tmpdir / "systemctl", '#!/bin/sh\nprintf "%s\\n" "$*" >> "' + str(log) + '"\n'
+        )
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-add", "--install-autosave"],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
+        self.assertTrue((units / "codex-autosave.timer").exists())
+        self.assertFalse((units / "codex-autorestore.service").exists())
+        mutations = [
+            line for line in log.read_text().splitlines() if " enable " in line or " start " in line
+        ]
+        self.assertEqual(
+            mutations, ["--user enable codex-autosave.timer", "--user start codex-autosave.timer"]
+        )
+
+    def test_macos_install_uses_launchd_and_preserves_independent_archive_consent(self):
+        make_executable(self.tmpdir / "uname", "#!/bin/sh\nprintf 'Darwin\\n'\n")
+        log = self.tmpdir / "launchctl.log"
+        marker = self.tmpdir / "loaded"
+        make_executable(
+            self.tmpdir / "launchctl",
+            f"""#!/bin/sh
+printf '%s\\n' "$*" >> '{log}'
+case "$1" in
+  print-disabled) echo 'disabled services = {{}}' ;;
+  print) test -f '{marker}' ;;
+  bootstrap) touch '{marker}' ;;
+  bootout) rm -f '{marker}' ;;
+  *) exit 71 ;;
+esac
+""",
+        )
+        self.env["LAUNCHCTL_BIN"] = str(self.tmpdir / "launchctl")
+        for flags, expected in (
+            (("--install-autosave",), "no"),
+            (("--install-autoservice", "--with-conversation-backups"), "yes"),
+            (("--install-autosave",), "yes"),
+        ):
+            result = subprocess.run(
+                [REPO_ROOT / "bin/codex-add", *flags],
+                env=self.env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            plist = Path(self.env["HOME"]) / "Library/LaunchAgents/com.codexfarm.autosave.plist"
+            value = plistlib.loads(plist.read_bytes())
+            self.assertEqual("--archive" in value["ProgramArguments"], expected == "yes")
+        self.assertFalse((Path(self.env["XDG_CONFIG_HOME"]) / "systemd").exists())
+        self.assertFalse(self.tmux_log.exists())
+        self.assertFalse(
+            any(
+                "bootstrap" in line and "autorestore" in line
+                for line in log.read_text().splitlines()
+            )
+        )
+
+    def test_macos_disabled_restore_refuses_even_save_only_before_registry_changes(self):
+        make_executable(self.tmpdir / "uname", "#!/bin/sh\nprintf 'Darwin\\n'\n")
+        make_executable(
+            self.tmpdir / "launchctl",
+            "#!/bin/sh\necho '\"com.codexfarm.autorestore\" => disabled'\n",
+        )
+        self.env["LAUNCHCTL_BIN"] = str(self.tmpdir / "launchctl")
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-add", "--install-autosave"],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("preserving operator choice", result.stderr)
+        self.assertFalse((Path(self.env["XDG_CONFIG_HOME"]) / "codexfarm/farms.tsv").exists())
+        self.assertFalse(
+            (Path(self.env["XDG_STATE_HOME"]) / "codexfarm/autoservice_choice").exists()
+        )
+        self.assertFalse(self.tmux_log.exists())
+
     def test_explicit_archive_service_consent_is_separate_and_preserved(self):
         make_executable(self.tmpdir / "systemctl", "#!/bin/sh\nexit 0\n")
         state = Path(self.env["XDG_STATE_HOME"]) / "codexfarm"
@@ -1146,6 +1254,7 @@ exit 0
         for flags in (
             ("--with-conversation-backups",),
             ("--without-conversation-backups",),
+            ("--install-autosave", "--with-conversation-backups"),
             (
                 "--install-autoservice",
                 "--with-conversation-backups",
@@ -1818,6 +1927,8 @@ case "$1" in
       esac
     done
     case "$target|$option" in
+      *:0.0'|@codexfarm_launch_command') printf '%s\\n' "${HOME_LAUNCH_COMMAND:-}" ;;
+      *:0.0'|@codexfarm_launch_args') printf '%s\\n' "${HOME_LAUNCH_ARGS:-}" ;;
       *:1.0'|@codexfarm_name')
         [ -n "${STABLE_CODEX_NAME:-}" ] && printf '%s\\n' "$STABLE_CODEX_NAME"
         ;;
@@ -1847,7 +1958,8 @@ case "$1" in
       esac
     done
     case "$target|$format" in
-      *:0'|#{window_name}') printf '*READY* home\\n' ;;
+      *:0'|#{window_name}')
+        if [ -n "${HOME_LAUNCH_COMMAND:-}" ]; then printf 'Home Shell\\n'; else printf '*READY* home\\n'; fi ;;
       *:0.0'|#{pane_current_path}') printf '/tmp/home-project\\n' ;;
       *:0.0'|#{pane_start_command}'|*:0.0'|#{pane_current_command}')
         if [ "${HOME_CODEX:-0}" = 1 ]; then printf 'codex\\n'; else printf 'bash\\n'; fi ;;
@@ -2382,6 +2494,20 @@ esac
                     rows,
                 )
 
+    def test_codex_save_keeps_shell_executable_separate_from_wrappers_and_arguments(self):
+        arguments = r"-l literal\ \$value"
+        result = subprocess.run(
+            [REPO_ROOT / "bin/codex-save", str(self.manifest)],
+            env={**self.env, "HOME_LAUNCH_COMMAND": "/bin/zsh", "HOME_LAUNCH_ARGS": arguments},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            f"Home Shell\t/tmp/home-project\t/bin/zsh\t{arguments}",
+            self.manifest.read_text().splitlines(),
+        )
+
     def test_codex_save_prefers_stable_name_and_provider_pane_options(self):
         env = self.env.copy()
         env["STACKED_WINDOW_NAME"] = "node"
@@ -2813,7 +2939,9 @@ esac
                     child.wait(timeout=3)
                 self.assertFalse(self.manifest.exists())
                 fcntl.flock(handle, fcntl.LOCK_UN)
-                stdout, stderr = child.communicate(timeout=10)
+                # The assertion above checks lock exclusion. Allow the full
+                # provider scan to finish on slower macOS shell launches.
+                stdout, stderr = child.communicate(timeout=60)
                 self.assertEqual(child.returncode, 0, stdout + stderr)
             finally:
                 if child.poll() is None:

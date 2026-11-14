@@ -343,7 +343,18 @@ def snapshot(endpoint: str, manifest: Path | None) -> list[tuple[str, str, str, 
             directory = thread.get("cwd")
             if not isinstance(directory, str) or not directory.startswith("/"):
                 raise ValueError("invalid server conversation directory")
-            name = previous.get(thread_id, f"shared-codex-{thread_id}")
+            placeholder = f"shared-codex-{thread_id}"
+            name = previous.get(thread_id, placeholder)
+            # A shared server cannot associate a tmux title with one thread.
+            # Its explicit conversation name is safe display metadata, never
+            # identity evidence. Preserve custom farm labels on later saves.
+            title = thread.get("name")
+            if name == placeholder and isinstance(title, str):
+                title = " ".join("".join(c if c.isprintable() else " " for c in title).split())[
+                    :160
+                ]
+                if title and title != "home":
+                    name = title
             rows[thread_id] = (name, directory, "codex", f"resume {thread_id}")
         if client.loaded() - loaded:
             raise ValueError("server conversations changed during capture; retry save")
