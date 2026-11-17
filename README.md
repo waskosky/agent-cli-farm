@@ -1364,3 +1364,10 @@ agent-cli-farm/
 
 Licensed under the MIT License. See `LICENSE` for full text.
 Unless noted otherwise, all files in this repository are covered by the MIT License.
+
+## Physical disk protection
+
+See [storage protection](docs/storage-protection.md) for independently enabled
+Windows/WSL telemetry, shared batch disk reservations, cooperative writer
+checkpoints, bounded diagnostic logs and safe retention. Start with
+`codex-storage status`; ordinary setup does not activate disk enforcement.

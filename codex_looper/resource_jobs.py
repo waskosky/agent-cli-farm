@@ -294,6 +294,9 @@ class JobStore:
         admission_group: str | None = None,
         max_parallel: int | None = None,
         reserve_memory_mib: float = 0,
+        reserve_disk_bytes: int = 0,
+        storage_path: str | None = None,
+        stop_on_disk_pressure: bool = False,
     ) -> dict:
         if (
             role not in ("agent", "batch")
@@ -322,6 +325,15 @@ class JobStore:
             raise ValueError("reserve-memory-mib must be finite within 0..1000000000")
         if role == "agent" and (max_parallel is not None or reserve_memory_mib):
             raise ValueError("agents never accept admission ceilings")
+        from .storage import validate_reservation
+
+        validate_reservation(reserve_disk_bytes)
+        if type(stop_on_disk_pressure) is not bool:
+            raise ValueError("stop-on-disk-pressure must be boolean")
+        if role == "agent" and (reserve_disk_bytes or storage_path or stop_on_disk_pressure):
+            raise ValueError("agents never accept disk admission or stop remedies")
+        if storage_path is not None:
+            storage_path = str(Path(storage_path).resolve(strict=True))
         supervisor = process_identity(os.getpid())
         if supervisor is None:
             raise ValueError("supervisor identity unavailable")
@@ -356,6 +368,9 @@ class JobStore:
                 "admission_group": admission_group,
                 "max_parallel": max_parallel,
                 "reserve_memory_mib": reserve_memory_mib,
+                "reserve_disk_bytes": reserve_disk_bytes,
+                "storage_path": storage_path or cwd,
+                "stop_on_disk_pressure": stop_on_disk_pressure,
                 "created_at": now,
                 "updated_at": now,
             }
@@ -372,8 +387,11 @@ class JobStore:
                 return None
             from .thermal import MAX_REMEDIES, enforcing
 
-            thermal_enrolled = enforcing()
-            if count is None and not requested and not thermal_enrolled:
+            thermal_enrolled = enforcing() and not current.get("storage_only")
+            from .storage import load_settings as storage_settings
+
+            disk_enrolled = storage_settings().enabled or current.get("reserve_disk_bytes", 0)
+            if count is None and not requested and not thermal_enrolled and not disk_enrolled:
                 return None
             if _recorded_process_state(current, "supervisor") != "live":
                 return "batch admission owner identity is unavailable"
@@ -384,6 +402,7 @@ class JobStore:
             peers = []
             active_count = 0
             reserved = 0
+            disk_peers = []
             for path in paths:
                 other = self.read(path.stem)
                 if (
@@ -399,6 +418,7 @@ class JobStore:
                     "unknown",
                 ):
                     continue
+                disk_peers.append(other)
                 # Unknown owners retain their reservations; never prune live or unreadable identities.
                 active_count += 1
                 reserved += other.get("reserve_memory_mib", 0)
@@ -419,6 +439,12 @@ class JobStore:
                     return "memory counters unavailable for an explicit batch reservation"
                 if memory.available_mib - reserved - requested <= settings.reserve_mib:
                     return "waiting for explicitly reserved batch memory headroom"
+            if disk_enrolled:
+                from .storage import admission_reason as storage_reason
+
+                reason = storage_reason(current, disk_peers)
+                if reason:
+                    return reason
             current.update(status="admitted", updated_at=time.time())
             self.write(current)
             return None
@@ -1198,7 +1224,21 @@ def _wait(
     settings: ResourceSettings,
     policy: str,
 ) -> tuple[int, bool]:
+    last_storage_check = 0.0
     while process.poll() is None:
+        if record.get("stop_on_disk_pressure") and time.monotonic() - last_storage_check >= 5:
+            from .storage import checkpoint
+
+            last_storage_check = time.monotonic()
+            reason = checkpoint(record["storage_path"], running=True)
+            if reason:
+                identity = store.identity(record["job_id"])
+                if store.validate(record["job_id"], identity, require_batch=True):
+                    warn(reason + "; stopping this explicitly enrolled batch")
+                    terminate_owned_batch(store, record["job_id"], identity)
+                    process.wait()
+                    return 75, False
+                warn("disk pressure: batch identity unavailable; no signal sent")
         if record["role"] == "batch" and store.request_path(record["job_id"]).exists():
             try:
                 restart = handle_restart(store, record["job_id"], process, settings, policy)
@@ -1243,6 +1283,18 @@ def parser() -> argparse.ArgumentParser:
         help="memory headroom only; explicit reservations and thermal protection remain enforced",
     )
     run.add_argument("--queue-timeout", type=float, default=None)
+    run.add_argument(
+        "--reserve-disk-gib",
+        type=float,
+        default=0,
+        help="peak additional disk bytes reserved across batches on this volume",
+    )
+    run.add_argument("--storage-path", help="existing output/scratch directory, default cwd")
+    run.add_argument(
+        "--stop-on-disk-pressure",
+        action="store_true",
+        help="consent to stop this scoped batch at emergency disk pressure",
+    )
     run.add_argument(
         "--restartable",
         action="store_true",
@@ -1299,6 +1351,9 @@ def main(argv: list[str] | None = None) -> int:
             or args.max_parallel is not None
             or args.reserve_memory_mib
             or args.admission_group is not None
+            or args.reserve_disk_gib
+            or args.storage_path
+            or args.stop_on_disk_pressure
         ):
             raise ValueError("agents never accept restart consent or explicit memory ceilings")
         for value in (args.memory_high, args.memory_max):
@@ -1314,8 +1369,11 @@ def main(argv: list[str] | None = None) -> int:
             not finite_number(args.cpu_quota) or not 0 < args.cpu_quota <= 10000
         ):
             raise ValueError("cpu-quota must be finite percent within 0..10000")
+        if not finite_number(args.reserve_disk_gib) or not 0 <= args.reserve_disk_gib <= 1048576:
+            raise ValueError("reserve-disk-gib must be finite within 0..1048576")
         limits = (
-            args.memory_high is not None
+            args.stop_on_disk_pressure
+            or args.memory_high is not None
             or args.memory_max is not None
             or args.cpu_quota is not None
         )
@@ -1343,6 +1401,9 @@ def main(argv: list[str] | None = None) -> int:
                 admission_group=args.admission_group,
                 max_parallel=args.max_parallel,
                 reserve_memory_mib=args.reserve_memory_mib,
+                reserve_disk_bytes=int(args.reserve_disk_gib * 1024**3),
+                storage_path=args.storage_path,
+                stop_on_disk_pressure=args.stop_on_disk_pressure,
             )
             if args.scope == "required" or limits or thermal_scope:
                 record = store.update(
