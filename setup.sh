@@ -341,6 +341,14 @@ EOF
     copied+=("codexfarm-thermal-windows/")
   fi
 
+  if [ -d "$script_dir/tools/storage-windows" ]; then
+    mkdir -p "$HOME/bin/codexfarm-storage-windows"
+    for f in "$script_dir"/tools/storage-windows/*.ps1; do
+      install_file "$f" "$HOME/bin/codexfarm-storage-windows/${f##*/}" 644
+    done
+    copied+=("codexfarm-storage-windows/")
+  fi
+
   # Remember the checkout used for this install so codex-doctor can detect
   # copied helpers that have fallen behind their source files.
   install_source_marker="${XDG_STATE_HOME:-$HOME/.local/state}/codexfarm/install-source"
@@ -481,6 +489,7 @@ EOF
   echo "  codex-save                   # Snapshot current windows to manifest"
   echo "  codex-farm-reboot            # Save, restart, and restore the default farm"
   echo "  codex-doctor                 # Repair farm health and saved resume coverage"
+  echo "  codex-storage status         # Physical disk headroom; protection is separately enabled"
   echo "  codex-resource status        # Inspect optional resource settings (all default off)"
   echo "  codex-restore -a             # Restore windows and attach"
   echo "  codex-resume                 # Attach/switch to existing session"

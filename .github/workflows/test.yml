@@ -109,7 +109,7 @@ jobs:
         shell: powershell
         run: |
           $found = @()
-          Get-ChildItem tools/thermal-windows/*.ps1 | ForEach-Object {
+          Get-ChildItem tools/thermal-windows/*.ps1,tools/storage-windows/*.ps1 | ForEach-Object {
             $tokens = $null
             $parseErrors = $null
             [void][Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)
@@ -122,3 +122,8 @@ jobs:
       - name: Check installer ownership and operator choices without applying changes
         shell: powershell
         run: ./tools/thermal-windows/install.ps1 -SelfTest
+      - name: Check independent storage monitor and installer without task changes
+        shell: powershell
+        run: |
+          ./tools/storage-windows/monitor.ps1 -SelfTest
+          ./tools/storage-windows/install.ps1 -SelfTest

@@ -217,3 +217,17 @@ not expose a structured status channel through tmux.
   `CODEXFARM_TEST_NATIVE_CODEX=/absolute/native/codex python3 -m unittest
   tests.test_resource_investigator` runs the optional native isolation matrix,
   checking actual additional_tools, forbidden dispatch and final JSON delivery.
+
+## Disk safety
+
+- Disk policy is independent and defaults off; ordinary setup only copies helpers.
+- Use codex-storage and codex-job disk reservations for bulk work; never bypass
+  a refusal with Linux df, memory ignore flags, or a second unmanaged launch.
+- Preserve physical Windows backing-volume checks, stale-monitor refusal, atomic
+  reservations, live/unknown owners, recovery hysteresis and agent availability.
+- Stop remedies require explicit batch consent and the existing identity/scope
+  checks. Cooperating writers checkpoint and preserve their original outputs.
+- Cleanup targets only owned reproducible scratch or recognized inactive logs.
+  Never delete source, conversations, accepted evidence or live runtimes by age.
+- Follow docs/storage-protection.md; tests use private roots and synthetic
+  measurements, never install tasks or fill the actual host disk.

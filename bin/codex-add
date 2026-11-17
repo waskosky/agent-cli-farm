@@ -786,9 +786,10 @@ configure_history_backend() {
 }
 
 attach_legacy_log_pipe() {
-  local pipe_error quoted_logfile
+  local pipe_error quoted_logfile quoted_logger
+  printf -v quoted_logger '%q' "$(dirname "$0")/codex-pane-log"
   printf -v quoted_logfile '%q' "$LOGFILE"
-  if ! pipe_error=$(tmux pipe-pane -o -t "$SESSION:$WIN" "cat >> $quoted_logfile" 2>&1); then
+  if ! pipe_error=$(tmux pipe-pane -o -t "$SESSION:$WIN" "$quoted_logger --path $quoted_logfile" 2>&1); then
     if [ -n "$pipe_error" ]; then
       echo "warning: unable to attach log pipe; pane may have exited already: $pipe_error" >&2
     else

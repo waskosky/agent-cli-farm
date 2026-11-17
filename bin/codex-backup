@@ -44,6 +44,12 @@ class BackupSizeError(ValueError):
 
 
 def require_space(destination: Path, extra: int = 0) -> None:
+    recovery_module()  # Resolve the installed package before its sibling import.
+    from codex_looper.storage import checkpoint
+
+    reason = checkpoint(destination, additional=extra)
+    if reason:
+        raise BackupSpaceError(reason)
     if shutil.disk_usage(destination).free < RESERVE_BYTES + extra:
         raise BackupSpaceError("insufficient free space for a safe snapshot")
 

@@ -606,6 +606,22 @@ def main() -> int:
             print(f"Thermal healthy: CPU {thermal['cpu_celsius']:.0f}C; {mode}")
     except (OSError, ValueError, TypeError):
         issues.append("thermal settings or protection status are invalid")
+    try:
+        from .storage import GIB, pressure, probe
+        from .storage import load_settings as storage_settings
+
+        disk_settings = storage_settings()
+        if disk_settings.enabled:
+            disk = probe(Path.home(), disk_settings)
+            reason = pressure(disk, disk_settings)
+            if reason:
+                issues.append("disk protection: " + reason)
+            elif disk["free"] < disk_settings.warning_gib * GIB:
+                issues.append(f"disk headroom low: {disk['free'] / GIB:.1f} GiB free")
+            else:
+                print(f"Disk healthy: {disk['free'] / GIB:.1f} GiB physical headroom")
+    except (OSError, ValueError, TypeError):
+        issues.append("disk protection settings or measurement are invalid")
     health = read_json(state / "health-status.json")
     if (state / "managed_sessions").exists() or health:
         if age(health.get("checked_at"), now) > 60:
