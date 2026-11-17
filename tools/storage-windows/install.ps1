@@ -12,7 +12,12 @@ function Test-OwnedTask($Task) {
     if (!$Task) { return $true }
     $actions = @($Task.Actions)
     $owner = $Task.Principal.UserId
-    return ($owner -in @($principalName,$identity.User.Value) -and
+    try {
+        $ownerSid = $(if ($owner -eq $identity.User.Value) { $owner } else {
+            [Security.Principal.NTAccount]::new($owner).Translate([Security.Principal.SecurityIdentifier]).Value
+        })
+    } catch { return $false }
+    return ($ownerSid -eq $identity.User.Value -and
         $Task.Principal.RunLevel -eq 'Limited' -and
         $actions.Count -eq 1 -and
         $actions[0].Execute -eq $executable -and
@@ -25,6 +30,8 @@ if ($SelfTest) {
         Actions=@([pscustomobject]@{Execute=$executable;Arguments=$arguments})
     }
     if (!(Test-OwnedTask $task)) { throw 'Expected exact owned task' }
+    $task.Principal.UserId = $env:USERNAME
+    if (!(Test-OwnedTask $task)) { throw 'Scheduler-normalized owner name was rejected' }
     $task.Actions[0].Arguments = '-File unrelated.ps1'
     if (Test-OwnedTask $task) { throw 'Accepted a different action' }
     Write-Output 'Storage installer self-test passed; no task changes.'

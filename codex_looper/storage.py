@@ -404,7 +404,9 @@ def main(argv=None):
                     "enabled": settings.enabled,
                     "reason": reason,
                     "warning": bool(
-                        sample.get("available") and sample["free"] < settings.warning_gib * GIB
+                        sample.get("available")
+                        and min(sample["free"], sample.get("host_guard_free", sample["free"]))
+                        < settings.warning_gib * GIB
                     ),
                     "settings": asdict(settings),
                 },

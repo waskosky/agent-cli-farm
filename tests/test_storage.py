@@ -1,3 +1,4 @@
+import io
 import json
 import tempfile
 import unittest
@@ -191,6 +192,19 @@ class StorageTests(unittest.TestCase):
     def test_windows_system_or_swap_volume_can_hold_another_drive(self):
         sample = {"available": True, "free": 100 * GIB, "host_guard_free": 9 * GIB}
         self.assertIn("system/swap", pressure(sample, self.settings, running=True))
+
+    def test_status_warns_when_system_or_swap_is_the_limiting_volume(self):
+        from codex_looper.storage import main
+
+        sample = {"available": True, "free": 100 * GIB, "host_guard_free": 20 * GIB}
+        output = io.StringIO()
+        with (
+            patch("codex_looper.storage.load_settings", return_value=self.settings),
+            patch("codex_looper.storage.probe", return_value=sample),
+            patch("sys.stdout", output),
+        ):
+            self.assertEqual(main(["status", "--path", str(self.root)]), 0)
+        self.assertTrue(json.loads(output.getvalue())["warning"])
 
     def test_configuration_rejects_bad_order_and_nonfinite(self):
         for values in (
