@@ -13,6 +13,12 @@ from WSL_DISTRO_NAME and the registry; it never trusts a virtual 1 TiB free-spac
 report as physical capacity. Other attached Linux filesystems require a verified
 mapping and otherwise fail closed. Native Linux uses its mounted filesystem.
 
+Admission, running checkpoints, warning status and recovery hysteresis use the
+smaller of filesystem-available bytes and physical backing-volume free bytes.
+A deliberately capped WSL filesystem can fill before its Windows drive, so
+physical headroom alone never grants admission. Windows system/swap reserves
+remain independent. The guard does not change filesystem or virtual-disk sizes.
+
 Initial thresholds are 60 GiB warning, 25 GiB admission reserve, 10 GiB emergency,
 and 40 GiB sustained recovery for 120 seconds. They are configurable using
 `configure --warning-gib ... --reserve-gib ... --emergency-gib ...

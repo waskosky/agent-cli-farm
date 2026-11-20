@@ -7,7 +7,15 @@ from unittest.mock import Mock, patch
 
 from codex_looper.resource_config import ResourceSettings
 from codex_looper.resource_jobs import JobStore, _wait
-from codex_looper.storage import GIB, StorageSettings, _snapshot, admission_reason, pressure, probe
+from codex_looper.storage import (
+    GIB,
+    StorageSettings,
+    _snapshot,
+    admission_reason,
+    main,
+    pressure,
+    probe,
+)
 
 
 class StorageTests(unittest.TestCase):
@@ -30,6 +38,86 @@ class StorageTests(unittest.TestCase):
             sample = probe(self.root, self.settings)
         self.assertLessEqual(sample["free"], 9 * GIB)
         self.assertIn("headroom", pressure(sample, self.settings, running=True))
+
+    def test_filesystem_capacity_limits_admission_and_running_checkpoints(self):
+        sample = {"available": True, "free": 120 * GIB, "filesystem_free": 20 * GIB}
+        self.assertIn("20.0 GiB", pressure(sample, self.settings))
+        self.assertIsNone(pressure(sample, self.settings, running=True))
+        sample["filesystem_free"] = 9 * GIB
+        self.assertIn("9.0 GiB", pressure(sample, self.settings, running=True))
+
+    def test_peak_reservation_must_fit_inside_filesystem(self):
+        sample = {"available": True, "free": 120 * GIB, "filesystem_free": 30 * GIB}
+        self.assertIsNone(pressure(sample, self.settings, additional=5 * GIB))
+        self.assertIsNotNone(pressure(sample, self.settings, additional=6 * GIB))
+
+    def test_shared_reservations_cannot_overcommit_capped_filesystem(self):
+        with (
+            patch("codex_looper.storage.load_settings", return_value=self.settings),
+            patch("codex_looper.storage.state_directory", return_value=self.state),
+            patch(
+                "codex_looper.storage.probe",
+                return_value={
+                    "available": True,
+                    "free": 120 * GIB,
+                    "filesystem_free": 60 * GIB,
+                    "volume": "windows:D:",
+                },
+            ),
+        ):
+            first = self.store.create("batch", ["one"], str(self.root), reserve_disk_bytes=20 * GIB)
+            second = self.store.create(
+                "batch", ["two"], str(self.root), reserve_disk_bytes=20 * GIB
+            )
+            self.assertIsNone(self.store.reserve_admission(first["job_id"], ResourceSettings()))
+            self.assertIn(
+                "headroom", self.store.reserve_admission(second["job_id"], ResourceSettings())
+            )
+
+    def test_guest_pressure_requires_guest_recovery_even_with_host_space(self):
+        self.store._prepare()
+        record = {"cwd": str(self.root), "reserve_disk_bytes": 0}
+        sample = {
+            "available": True,
+            "free": 120 * GIB,
+            "filesystem_free": 20 * GIB,
+            "volume": "windows:D:",
+        }
+        with (
+            patch("codex_looper.storage.load_settings", return_value=self.settings),
+            patch("codex_looper.storage.state_directory", return_value=self.state),
+            patch("codex_looper.storage.probe", return_value=sample),
+        ):
+            self.assertIn("headroom", admission_reason(record, []))
+            sample["filesystem_free"] = 30 * GIB
+            with patch("codex_looper.storage.time.time", return_value=1000):
+                self.assertIn("recovery", admission_reason(record, []))
+            sample["filesystem_free"] = 60 * GIB
+            with patch("codex_looper.storage.time.time", return_value=1100):
+                self.assertIn("recovery", admission_reason(record, []))
+            with patch("codex_looper.storage.time.time", return_value=1221):
+                self.assertIsNone(admission_reason(record, []))
+
+    def test_status_warns_when_filesystem_is_tighter_than_backing_drive(self):
+        output = io.StringIO()
+        with (
+            patch("codex_looper.storage.load_settings", return_value=self.settings),
+            patch(
+                "codex_looper.storage.probe",
+                return_value={
+                    "available": True,
+                    "free": 120 * GIB,
+                    "filesystem_free": 50 * GIB,
+                    "volume": "windows:D:",
+                },
+            ),
+            patch("sys.stdout", output),
+        ):
+            self.assertEqual(main(["status", "--path", str(self.root)]), 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["warning"])
+        self.assertIsNone(result["reason"])
+        self.assertEqual(result["free"], 120 * GIB)
 
     def test_stale_missing_and_future_snapshot_fail_closed(self):
         path = self.root / "snapshot.json"
