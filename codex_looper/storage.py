@@ -225,6 +225,11 @@ def validate_reservation(amount):
         raise ValueError("disk reservation must be integer bytes within 0..1 PiB")
 
 
+def _effective_free(sample):
+    """Capacity available within both the filesystem and its backing volume."""
+    return min(sample["free"], sample.get("filesystem_free", sample["free"]))
+
+
 def pressure(sample, settings, additional=0, *, running=False):
     validate_reservation(additional)
     if not sample.get("available"):
@@ -234,8 +239,9 @@ def pressure(sample, settings, additional=0, *, running=False):
     floor = settings.emergency_gib if running else settings.reserve_gib
     if sample.get("host_guard_free", floor * GIB) < floor * GIB:
         return "Windows system/swap volume reserve reached"
-    if sample["free"] < floor * GIB + additional:
-        return f"disk headroom insufficient: {sample['free'] / GIB:.1f} GiB free"
+    free = _effective_free(sample)
+    if free < floor * GIB + additional:
+        return f"disk headroom insufficient: {free / GIB:.1f} GiB free"
     return None
 
 
@@ -267,7 +273,7 @@ def admission_reason(record, peers):
     if pressure(sample, settings):
         gates[key] = {"blocked": True, "recovering_since": None}
     elif gate.get("blocked"):
-        if sample["free"] - reserved < settings.recovery_gib * GIB:
+        if _effective_free(sample) - reserved < settings.recovery_gib * GIB:
             gate["recovering_since"] = None
         elif gate.get("recovering_since") is None:
             gate["recovering_since"] = now
@@ -405,7 +411,7 @@ def main(argv=None):
                     "reason": reason,
                     "warning": bool(
                         sample.get("available")
-                        and min(sample["free"], sample.get("host_guard_free", sample["free"]))
+                        and min(_effective_free(sample), sample.get("host_guard_free", sample["free"]))
                         < settings.warning_gib * GIB
                     ),
                     "settings": asdict(settings),
