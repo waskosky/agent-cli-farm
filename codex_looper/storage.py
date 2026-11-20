@@ -411,7 +411,9 @@ def main(argv=None):
                     "reason": reason,
                     "warning": bool(
                         sample.get("available")
-                        and min(_effective_free(sample), sample.get("host_guard_free", sample["free"]))
+                        and min(
+                            _effective_free(sample), sample.get("host_guard_free", sample["free"])
+                        )
                         < settings.warning_gib * GIB
                     ),
                     "settings": asdict(settings),

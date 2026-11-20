@@ -7,7 +7,15 @@ from unittest.mock import Mock, patch
 
 from codex_looper.resource_config import ResourceSettings
 from codex_looper.resource_jobs import JobStore, _wait
-from codex_looper.storage import GIB, StorageSettings, _snapshot, admission_reason, main, pressure, probe
+from codex_looper.storage import (
+    GIB,
+    StorageSettings,
+    _snapshot,
+    admission_reason,
+    main,
+    pressure,
+    probe,
+)
 
 
 class StorageTests(unittest.TestCase):
@@ -31,7 +39,6 @@ class StorageTests(unittest.TestCase):
         self.assertLessEqual(sample["free"], 9 * GIB)
         self.assertIn("headroom", pressure(sample, self.settings, running=True))
 
-
     def test_filesystem_capacity_limits_admission_and_running_checkpoints(self):
         sample = {"available": True, "free": 120 * GIB, "filesystem_free": 20 * GIB}
         self.assertIn("20.0 GiB", pressure(sample, self.settings))
@@ -48,21 +55,34 @@ class StorageTests(unittest.TestCase):
         with (
             patch("codex_looper.storage.load_settings", return_value=self.settings),
             patch("codex_looper.storage.state_directory", return_value=self.state),
-            patch("codex_looper.storage.probe", return_value={
-                "available": True, "free": 120 * GIB, "filesystem_free": 60 * GIB,
-                "volume": "windows:D:",
-            }),
+            patch(
+                "codex_looper.storage.probe",
+                return_value={
+                    "available": True,
+                    "free": 120 * GIB,
+                    "filesystem_free": 60 * GIB,
+                    "volume": "windows:D:",
+                },
+            ),
         ):
             first = self.store.create("batch", ["one"], str(self.root), reserve_disk_bytes=20 * GIB)
-            second = self.store.create("batch", ["two"], str(self.root), reserve_disk_bytes=20 * GIB)
+            second = self.store.create(
+                "batch", ["two"], str(self.root), reserve_disk_bytes=20 * GIB
+            )
             self.assertIsNone(self.store.reserve_admission(first["job_id"], ResourceSettings()))
-            self.assertIn("headroom", self.store.reserve_admission(second["job_id"], ResourceSettings()))
+            self.assertIn(
+                "headroom", self.store.reserve_admission(second["job_id"], ResourceSettings())
+            )
 
     def test_guest_pressure_requires_guest_recovery_even_with_host_space(self):
         self.store._prepare()
         record = {"cwd": str(self.root), "reserve_disk_bytes": 0}
-        sample = {"available": True, "free": 120 * GIB, "filesystem_free": 20 * GIB,
-                  "volume": "windows:D:"}
+        sample = {
+            "available": True,
+            "free": 120 * GIB,
+            "filesystem_free": 20 * GIB,
+            "volume": "windows:D:",
+        }
         with (
             patch("codex_looper.storage.load_settings", return_value=self.settings),
             patch("codex_looper.storage.state_directory", return_value=self.state),
@@ -82,10 +102,15 @@ class StorageTests(unittest.TestCase):
         output = io.StringIO()
         with (
             patch("codex_looper.storage.load_settings", return_value=self.settings),
-            patch("codex_looper.storage.probe", return_value={
-                "available": True, "free": 120 * GIB, "filesystem_free": 50 * GIB,
-                "volume": "windows:D:",
-            }),
+            patch(
+                "codex_looper.storage.probe",
+                return_value={
+                    "available": True,
+                    "free": 120 * GIB,
+                    "filesystem_free": 50 * GIB,
+                    "volume": "windows:D:",
+                },
+            ),
             patch("sys.stdout", output),
         ):
             self.assertEqual(main(["status", "--path", str(self.root)]), 0)
